@@ -17,7 +17,7 @@ pub struct Cell {
     pub bg: Rgba,
 }
 impl Cell {
-    /// Canonical empty cell: space glyph + fully transparent bg (ADR-0007). The ONLY empty state.
+    /// Canonical empty cell: space glyph + fully transparent bg
     pub const BLANK: Cell = Cell {
         ch: ' ',
         fg: Rgba::WHITE,
@@ -65,7 +65,7 @@ pub struct DocExtent {
 pub struct Document {
     pub width: u16,
     pub height: u16,
-    pub layers: Vec<Layer>, // v1: exactly one, but never collapse to a single Layer (ADR-0006)
+    pub layers: Vec<Layer>,
     pub settings: DocSettings,
 }
 impl Document {

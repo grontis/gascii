@@ -2,7 +2,7 @@ use std::sync::{Arc, OnceLock};
 
 use eframe::egui;
 
-/// Named family used EXCLUSIVELY for the canvas (NFR-3). UI chrome keeps egui defaults.
+/// Named family used EXCLUSIVELY for the canvas. UI chrome keeps egui defaults.
 pub const CANVAS_FONT: &str = "iosevka-fixed";
 
 /// `Arc<str>` backing `FontFamily::Name`, built once and cloned (cheap refcount bump) on every

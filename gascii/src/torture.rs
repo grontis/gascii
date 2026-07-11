@@ -4,7 +4,7 @@ use crate::fonts::canvas_font_id;
 
 const GLYPH_PX: f32 = 20.0;
 
-/// Dev-only glyph coverage sheet (FR-14 curated Pages + Braille sample per ADR-0008).
+/// Dev-only glyph coverage sheet
 /// Missing glyphs render as tofu (notdef) — the sheet itself is the coverage check.
 pub fn show(ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().show(ui, |ui| {

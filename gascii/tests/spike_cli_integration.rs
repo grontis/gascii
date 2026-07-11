@@ -1,7 +1,7 @@
 //! Process-level test of the `--spike` CLI mode. `gascii` is a binary-only crate, so spawning
 //! the compiled binary is the only way to exercise it from `gascii/tests/` — real window
 //! creation, font loading, and render passes. Validates that startup-to-first-frame is logged
-//! (NFR-5), the full spike matrix runs and prints a decision, and the process exits on its own.
+//! , the full spike matrix runs and prints a decision, and the process exits on its own.
 //!
 //! Runs the real 3-row x 90-frame matrix, so it takes tens of seconds — far slower than every
 //! other test in this workspace. The bounded timeout turns a genuine hang into a clear failure
@@ -49,7 +49,7 @@ fn spike_cli_runs_full_matrix_prints_decision_and_exits_cleanly() {
         "gascii --spike exited non-zero: {status:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 
-    // NFR-5's <1s target is deliberately not asserted: this is a debug binary under a test
+    // <1s target is deliberately not asserted: this is a debug binary under a test
     // harness. Only the machine-independent part of the contract — the line is emitted and
     // well-formed — is checked.
     let startup_line = stderr
