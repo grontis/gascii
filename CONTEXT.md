@@ -1,0 +1,71 @@
+# GASCII
+
+A native ASCII/ANSI art editor: a character-grid canvas drawn on with continuous pointer input, using curated character palettes, per-cell color, and a density-brush system.
+
+## Language
+
+### Canvas & cells
+
+**Document**:
+One saved GASCII artwork: fixed canvas dimensions, an ordered stack of Layers, and document settings (e.g. strict-ASCII toggle).
+_Avoid_: File, project
+
+**Layer**:
+One full-canvas sheet of Cells within a Document. Layers composite top-down via alpha. v1 documents have exactly one.
+_Avoid_: Plane (that's a Cell component), level
+
+**Canvas**:
+The 2D grid of Cells that makes up a document's drawing surface, with explicit width×height set per Document (resizable, not growable).
+_Avoid_: Grid (reserve for the geometric lattice), page, sheet
+
+**Blank**:
+The canonical empty Cell: space glyph with fully transparent background. There is no separate null state — erasing writes Blank; compositing and export trimming test for it.
+_Avoid_: Empty, null, void
+
+**Cell**:
+One grid position holding a single code point plus foreground and background colors. 1 cell = 1 character = 1 terminal column.
+_Avoid_: Pixel, tile, character (that's the glyph it holds)
+
+**Plane**:
+One of the three independently-writable components of a Cell: glyph, foreground, background. Every tool can toggle which planes it writes.
+_Avoid_: Channel, layer (a Layer is a full canvas sheet, if/when added)
+
+### Input & tools
+
+**Stroke**:
+One continuous pointer gesture from press to release, reduced to a set of (cell, change) edits. The universal primitive all drawing tools produce; also the unit of undo.
+_Avoid_: Drag, gesture, path
+
+**Tool**:
+A mode that translates pointer/keyboard input into Strokes (pencil, eraser, fill, rectangle, line, text, selection).
+
+**Auto-join**:
+Junction resolution for the rectangle/line tools: where strokes cross box-drawing characters, the union of arm directions picks the right glyph (`├ ┬ ┼`; `+` in strict-ASCII mode).
+
+**Floating stamp**:
+Cells lifted by a selection move or produced by paste, hovering above the canvas until dropped and committed as one Stroke.
+_Avoid_: Selection buffer, ghost
+
+**Strict-ASCII mode**:
+A per-Document setting restricting the offered characters to printable ASCII; non-ASCII Pages grey out and tools fall back to ASCII equivalents. An artistic constraint, not a limitation.
+
+### Palette & density
+
+**Palette**:
+The curated set of characters currently offered for drawing, organized into Pages.
+_Avoid_: Charset, character map
+
+**Page**:
+One themed group within the Palette (ASCII, Box drawing, Blocks, …). Curation guarantees single-width glyphs.
+_Avoid_: Tab, category
+
+**Ramp**:
+An ordered character sequence from light to dark (e.g. ` .:-=+*#%@`), indexed by Intensity. A first-class palette object.
+_Avoid_: Gradient (reserve for color), scale
+
+**Intensity**:
+The 0.0–1.0 parameter of the density brush that selects a character from the active Ramp. Sources are pluggable (fixed, buildup, falloff, speed, pressure).
+_Avoid_: Pressure (one possible source, not the parameter), darkness
+
+**Buildup**:
+The intensity source where each pass of the brush over a cell advances it one Ramp step, like layering graphite.

@@ -1,0 +1,15 @@
+[package]
+name = "gascii-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+# NOTE: no eframe/egui/winit/wgpu — ever. serde_json/unicode-width added in their milestones.
+
+[dev-dependencies]
+serde_json = { workspace = true } # test-only, used for the serde round-trip guard test
+
+[lints]
+workspace = true

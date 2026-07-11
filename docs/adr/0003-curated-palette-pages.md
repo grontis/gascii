@@ -1,0 +1,3 @@
+# Curated palette pages instead of arbitrary Unicode input
+
+The Cell can store any `char`, but the UI only offers characters through curated Pages (ASCII, box drawing, blocks; later maybe Braille) that are guaranteed single-width. Arbitrary text input/paste is width-validated (`unicode-width`); double-width and combining characters are rejected because they break the 1-cell-1-column grid invariant. A per-document "strict ASCII" toggle greys out non-ASCII pages, making the constraint an artistic choice. This will surprise users who expect to type any character — it is deliberate grid protection, not a missing feature.
