@@ -1,0 +1,185 @@
+use super::{FreehandStroke, PendingCell, Tool, ToolCtx, ToolEvent, ToolResponse};
+use crate::model::{Cell, Document};
+
+/// Stamps the active glyph/fg/bg through the plane mask along an interpolated path.
+pub struct Pencil {
+    stroke: FreehandStroke,
+}
+
+impl Default for Pencil {
+    fn default() -> Self {
+        Pencil { stroke: FreehandStroke::new() }
+    }
+}
+
+impl Pencil {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Tool for Pencil {
+    fn update(&mut self, ev: ToolEvent, ctx: &ToolCtx, doc: &Document) -> ToolResponse {
+        let proposed = Cell { ch: ctx.glyph, fg: ctx.fg, bg: ctx.bg };
+        match ev {
+            ToolEvent::Press { x, y } => {
+                self.stroke.press(x, y, proposed, ctx.mask, doc, ctx.layer);
+                ToolResponse::Active
+            }
+            ToolEvent::Drag { x, y } => {
+                self.stroke.drag(x, y, proposed, ctx.mask, doc, ctx.layer);
+                ToolResponse::Active
+            }
+            ToolEvent::Release => ToolResponse::Commit(self.stroke.finish(doc, ctx.layer)),
+            ToolEvent::Cancel => {
+                self.stroke.cancel();
+                ToolResponse::Idle
+            }
+        }
+    }
+
+    fn pending(&self) -> &[PendingCell] {
+        self.stroke.pending()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Rgba;
+    use crate::tools::PlaneMask;
+
+    fn ctx(mask: PlaneMask) -> ToolCtx {
+        ToolCtx {
+            layer: 0,
+            glyph: '#',
+            fg: Rgba(1, 2, 3, 255),
+            bg: Rgba(4, 5, 6, 255),
+            mask,
+        }
+    }
+
+    #[test]
+    fn press_drag_release_emits_interpolated_edit() {
+        let doc = Document::new(20, 20);
+        let mut pencil = Pencil::new();
+        let ctx = ctx(PlaneMask::ALL);
+
+        pencil.update(ToolEvent::Press { x: 0, y: 0 }, &ctx, &doc);
+        pencil.update(ToolEvent::Drag { x: 3, y: 0 }, &ctx, &doc);
+        let resp = pencil.update(ToolEvent::Release, &ctx, &doc);
+
+        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
+            panic!("expected a committed multi-cell edit");
+        };
+        let mut coords: Vec<(u16, u16)> = cells.iter().map(|c| (c.x, c.y)).collect();
+        coords.sort();
+        assert_eq!(coords, vec![(0, 0), (1, 0), (2, 0), (3, 0)]);
+        for c in &cells {
+            assert_eq!(c.after.ch, '#');
+        }
+    }
+
+    #[test]
+    fn cell_revisited_within_stroke_yields_one_cell_edit() {
+        let doc = Document::new(20, 20);
+        let mut pencil = Pencil::new();
+        let ctx = ctx(PlaneMask::ALL);
+
+        pencil.update(ToolEvent::Press { x: 5, y: 5 }, &ctx, &doc);
+        pencil.update(ToolEvent::Drag { x: 6, y: 5 }, &ctx, &doc);
+        pencil.update(ToolEvent::Drag { x: 5, y: 5 }, &ctx, &doc); // revisit (5,5)
+        let resp = pencil.update(ToolEvent::Release, &ctx, &doc);
+
+        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
+            panic!("expected a committed edit");
+        };
+        let count_5_5 = cells.iter().filter(|c| (c.x, c.y) == (5, 5)).count();
+        assert_eq!(count_5_5, 1, "cell (5,5) must appear exactly once");
+    }
+
+    #[test]
+    fn painting_identical_existing_content_commits_none() {
+        let mut doc = Document::new(20, 20);
+        let existing = Cell { ch: '#', fg: Rgba(1, 2, 3, 255), bg: Rgba(4, 5, 6, 255) };
+        doc.set_cell(0, 2, 2, existing);
+
+        let mut pencil = Pencil::new();
+        let ctx = ctx(PlaneMask::ALL);
+        pencil.update(ToolEvent::Press { x: 2, y: 2 }, &ctx, &doc);
+        let resp = pencil.update(ToolEvent::Release, &ctx, &doc);
+
+        assert!(matches!(resp, ToolResponse::Commit(None)));
+    }
+
+    #[test]
+    fn glyph_only_mask_keeps_existing_fg_and_bg() {
+        let mut doc = Document::new(20, 20);
+        let existing = Cell { ch: 'x', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) };
+        doc.set_cell(0, 1, 1, existing);
+
+        let mask = PlaneMask { glyph: true, fg: false, bg: false };
+        let mut pencil = Pencil::new();
+        let ctx = ctx(mask);
+        pencil.update(ToolEvent::Press { x: 1, y: 1 }, &ctx, &doc);
+        let resp = pencil.update(ToolEvent::Release, &ctx, &doc);
+
+        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
+            panic!("expected a committed edit");
+        };
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].after.ch, '#');
+        assert_eq!(cells[0].after.fg, existing.fg);
+        assert_eq!(cells[0].after.bg, existing.bg);
+    }
+
+    #[test]
+    fn fg_only_mask_keeps_existing_glyph_and_bg() {
+        let mut doc = Document::new(20, 20);
+        let existing = Cell { ch: 'x', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) };
+        doc.set_cell(0, 1, 1, existing);
+
+        let mask = PlaneMask { glyph: false, fg: true, bg: false };
+        let mut pencil = Pencil::new();
+        let ctx = ctx(mask);
+        pencil.update(ToolEvent::Press { x: 1, y: 1 }, &ctx, &doc);
+        let resp = pencil.update(ToolEvent::Release, &ctx, &doc);
+
+        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
+            panic!("expected a committed edit");
+        };
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].after.ch, existing.ch);
+        assert_eq!(cells[0].after.fg, ctx.fg);
+        assert_eq!(cells[0].after.bg, existing.bg);
+    }
+
+    #[test]
+    fn pending_reflects_masked_result_mid_stroke() {
+        let doc = Document::new(20, 20);
+        let mask = PlaneMask { glyph: true, fg: false, bg: false };
+        let mut pencil = Pencil::new();
+        let ctx = ctx(mask);
+        pencil.update(ToolEvent::Press { x: 4, y: 4 }, &ctx, &doc);
+
+        let pending = pencil.pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].x, 4);
+        assert_eq!(pending[0].y, 4);
+        assert_eq!(pending[0].cell.ch, '#');
+        assert_eq!(pending[0].cell.fg, Rgba::WHITE); // unmasked fg keeps the blank default
+    }
+
+    #[test]
+    fn cancel_clears_pending_and_returns_idle() {
+        let doc = Document::new(20, 20);
+        let mut pencil = Pencil::new();
+        let ctx = ctx(PlaneMask::ALL);
+        pencil.update(ToolEvent::Press { x: 0, y: 0 }, &ctx, &doc);
+        assert!(!pencil.pending().is_empty());
+
+        let resp = pencil.update(ToolEvent::Cancel, &ctx, &doc);
+        assert!(matches!(resp, ToolResponse::Idle));
+        assert!(pencil.pending().is_empty());
+    }
+}

@@ -81,7 +81,7 @@ impl Document {
             settings: DocSettings::default(),
         }
     }
-    /// Default new document: 80×25 (FR-1).
+    /// Default new document: 80×25.
     pub fn default_document() -> Self {
         Self::new(Self::DEFAULT_WIDTH, Self::DEFAULT_HEIGHT)
     }

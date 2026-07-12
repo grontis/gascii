@@ -84,6 +84,30 @@ impl Viewport {
         Some((x, y))
     }
 
+    /// Like `screen_to_cell`, but clamps to `[0, w-1] x [0, h-1]` instead of returning `None` when
+    /// the point falls outside the doc's screen-space rect. Used only for active-stroke targeting
+    /// so a drag off the canvas keeps drawing to the edge instead of stalling.
+    pub fn screen_to_cell_clamped(
+        &self,
+        p: Pos2,
+        cell: Vec2,
+        origin: Pos2,
+        doc_extent: DocExtent,
+    ) -> (u16, u16) {
+        if doc_extent.width == 0 || doc_extent.height == 0 || cell.x <= 0.0 || cell.y <= 0.0 {
+            return (0, 0);
+        }
+        let rel = p - (origin + self.pan);
+        let x = (rel.x / cell.x).floor();
+        let y = (rel.y / cell.y).floor();
+
+        let max_x = (doc_extent.width - 1) as f32;
+        let max_y = (doc_extent.height - 1) as f32;
+        let x = x.clamp(0.0, max_x) as u16;
+        let y = y.clamp(0.0, max_y) as u16;
+        (x, y)
+    }
+
     /// Clamp the clip rect to doc bounds for culling.
     pub fn visible_cell_rect(
         &self,
@@ -283,6 +307,64 @@ mod tests {
         assert_eq!(y0, 0);
         assert_eq!(x1, 3);
         assert_eq!(y1, 2);
+    }
+
+    #[test]
+    fn screen_to_cell_clamped_matches_screen_to_cell_inside_bounds() {
+        let vp = Viewport::default();
+        let doc_extent = DocExtent { width: 80, height: 25 };
+        let p = vp.cell_to_screen(10, 5, cell(), origin()) + Vec2::new(1.0, 1.0);
+        let unclamped = vp.screen_to_cell(p, cell(), origin(), doc_extent);
+        let clamped = vp.screen_to_cell_clamped(p, cell(), origin(), doc_extent);
+        assert_eq!(unclamped, Some(clamped));
+    }
+
+    #[test]
+    fn screen_to_cell_clamped_left_or_above_origin_clamps_to_zero() {
+        let vp = Viewport::default();
+        let doc_extent = DocExtent { width: 80, height: 25 };
+        assert_eq!(
+            vp.screen_to_cell_clamped(Pos2::new(-100.0, 5.0), cell(), origin(), doc_extent),
+            (0, 0)
+        );
+        assert_eq!(
+            vp.screen_to_cell_clamped(Pos2::new(5.0, -100.0), cell(), origin(), doc_extent),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn screen_to_cell_clamped_past_right_or_bottom_clamps_to_max() {
+        let vp = Viewport::default();
+        let doc_extent = DocExtent { width: 80, height: 25 };
+        assert_eq!(
+            vp.screen_to_cell_clamped(Pos2::new(100_000.0, 5.0), cell(), origin(), doc_extent),
+            (79, 0)
+        );
+        assert_eq!(
+            vp.screen_to_cell_clamped(Pos2::new(5.0, 100_000.0), cell(), origin(), doc_extent),
+            (0, 24)
+        );
+        assert_eq!(
+            vp.screen_to_cell_clamped(Pos2::new(100_000.0, 100_000.0), cell(), origin(), doc_extent),
+            (79, 24)
+        );
+    }
+
+    #[test]
+    fn screen_to_cell_clamped_consistent_across_zoom_steps() {
+        let doc_extent = DocExtent { width: 40, height: 20 };
+        for zoom_step in 0..ZOOM_SCALES.len() {
+            let vp = Viewport { zoom_step, ..Viewport::default() };
+            let cell = Vec2::new(10.0 * vp.scale(), 20.0 * vp.scale());
+            let p = vp.cell_to_screen(5, 5, cell, origin()) + Vec2::new(1.0, 1.0);
+            assert_eq!(vp.screen_to_cell_clamped(p, cell, origin(), doc_extent), (5, 5));
+            // off-canvas stays clamped to the last valid cell at every zoom step
+            assert_eq!(
+                vp.screen_to_cell_clamped(Pos2::new(1_000_000.0, 1_000_000.0), cell, origin(), doc_extent),
+                (39, 19)
+            );
+        }
     }
 
     #[test]

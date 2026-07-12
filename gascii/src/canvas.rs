@@ -1,7 +1,7 @@
 use eframe::egui::{self, Align2, Color32, Painter, Pos2, Rect, Vec2};
-use gascii_core::{Document, Rgba};
+use gascii_core::{Document, PendingCell, Rgba, ToolEvent, ToolResponse};
 
-use crate::app::GasciiApp;
+use crate::app::{GasciiApp, ToolKind};
 use crate::fonts::canvas_font_id;
 use crate::viewport::Viewport;
 
@@ -22,6 +22,7 @@ pub trait CanvasRenderer {
         origin: Pos2,
         cell: Vec2,
         visible: (u16, u16, u16, u16),
+        pending: &[PendingCell],
         cursor_on: Option<(u16, u16)>,
     );
 }
@@ -38,6 +39,7 @@ impl CanvasRenderer for NaiveRenderer {
         origin: Pos2,
         cell: Vec2,
         visible: (u16, u16, u16, u16),
+        pending: &[PendingCell],
         cursor_on: Option<(u16, u16)>,
     ) {
         let (x0, y0, x1, y1) = visible;
@@ -71,6 +73,26 @@ impl CanvasRenderer for NaiveRenderer {
             }
         }
 
+        for p in pending {
+            if p.x < x0 || p.x >= x1 || p.y < y0 || p.y >= y1 {
+                continue;
+            }
+            let rect_min = vp.cell_to_screen(p.x, p.y, cell, origin);
+            if p.cell.bg.3 > 0 {
+                let rect = Rect::from_min_size(rect_min, cell);
+                painter.rect_filled(rect, 0.0, color32(p.cell.bg));
+            }
+            if p.cell.ch != ' ' {
+                painter.text(
+                    rect_min,
+                    Align2::LEFT_TOP,
+                    p.cell.ch,
+                    font_id.clone(),
+                    color32(p.cell.fg),
+                );
+            }
+        }
+
         if let Some((cx, cy)) = cursor_on {
             let rect_min = vp.cell_to_screen(cx, cy, cell, origin);
             let rect = Rect::from_min_size(rect_min, cell);
@@ -85,6 +107,16 @@ pub fn cursor_blink_on(ui: &egui::Ui) -> bool {
     (t * 2.0) as i64 % 2 == 0
 }
 
+fn tool_ctx(app: &GasciiApp) -> gascii_core::ToolCtx {
+    gascii_core::ToolCtx {
+        layer: 0,
+        glyph: app.active_glyph,
+        fg: app.active_fg,
+        bg: app.active_bg,
+        mask: app.mask,
+    }
+}
+
 pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
     let ctx = ui.ctx().clone();
     if app.pending_fit {
@@ -97,6 +129,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
     let origin = response.rect.min;
     let cell = app.viewport.cell_size(&ctx);
 
+    // Precedence 1: zoom. Allowed any time, including mid-stroke — pending cells are
+    // cell-addressed and stay valid; the cursor-anchored zoom keeps the pointer's cell fixed.
     let (scroll_y, ctrl) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.ctrl));
     if ctrl && scroll_y != 0.0 {
         if let Some(cursor) = response.hover_pos() {
@@ -105,34 +139,105 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
         }
     }
 
+    // Precedence 2: pan. Middle-drag is always available (never conflicts with a primary
+    // stroke). Space+primary-drag pans only while the space-pan gesture owns the primary button
+    // (decided at press time below), so it never steals an in-progress stroke.
     if response.dragged_by(egui::PointerButton::Middle) {
         app.viewport.pan += response.drag_delta();
     }
     let space = ui.input(|i| i.key_down(egui::Key::Space));
-    if space && response.dragged_by(egui::PointerButton::Primary) {
-        app.viewport.pan += response.drag_delta();
-    }
 
     let cell = app.viewport.cell_size(&ctx);
+    let doc_extent = app.doc.extent();
     app.hovered_cell = response
         .hover_pos()
-        .and_then(|p| app.viewport.screen_to_cell(p, cell, origin, app.doc.extent()));
+        .and_then(|p| app.viewport.screen_to_cell(p, cell, origin, doc_extent));
 
-    let visible = app
-        .viewport
-        .visible_cell_rect(painter.clip_rect(), cell, origin, app.doc.extent());
+    // Precedence 3: stroke vs space-pan, resolved from raw pointer edges (not
+    // clicked()/dragged()) so a single click that doesn't move still yields a one-cell stroke.
+    // Gesture ownership is decided once at press time and holds until release, so a mid-gesture
+    // Space toggle can't steal an in-progress stroke and a mid-gesture tool switch can't corrupt
+    // an in-progress pan.
+    //
+    // Known gap: release is detected from pointer state, so an OS-level focus loss mid-drag with
+    // no synthetic mouse-up (e.g. alt-tab while dragging) can leave
+    // `stroke_active`/`space_pan_active` stuck until the next primary press.
+    let (primary_pressed, primary_down, primary_released) =
+        ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.primary_released()));
+    let gesture_ends = primary_released || !primary_down;
 
-    let on = if app.spike.active {
-        ctx.request_repaint();
-        true
-    } else {
-        ctx.request_repaint_after(std::time::Duration::from_millis(500));
-        cursor_blink_on(ui)
-    };
+    // Tracks whether this frame's Press branch just started a stroke, so the Drag branch below
+    // (which re-checks `app.stroke_active`, now true) doesn't also send a same-frame, same-cell
+    // Drag for the press that just happened — one pointer event in, one Tool event out per frame.
+    let mut stroke_just_started = false;
+
+    if !app.stroke_active && !app.space_pan_active && primary_pressed {
+        if space {
+            app.space_pan_active = true;
+        } else if app.tool_kind == ToolKind::Eyedropper {
+            // One-shot pick, not a multi-frame gesture: no ownership to track.
+            if response.contains_pointer() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    if let Some((x, y)) = app.viewport.screen_to_cell(pos, cell, origin, doc_extent) {
+                        if let Some(picked) = app.doc.cell(0, x, y).copied() {
+                            let (fg, bg) = gascii_core::eyedrop(&picked);
+                            app.active_fg = fg;
+                            app.active_bg = bg;
+                        }
+                    }
+                }
+            }
+        } else if response.contains_pointer() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                if let Some((x, y)) = app.viewport.screen_to_cell(pos, cell, origin, doc_extent) {
+                    app.stroke_active = true;
+                    stroke_just_started = true;
+                    let tctx = tool_ctx(app);
+                    app.tool.update(ToolEvent::Press { x, y }, &tctx, &app.doc);
+                }
+            }
+        }
+    }
+
+    if app.space_pan_active {
+        if primary_down {
+            app.viewport.pan += response.drag_delta();
+        }
+        if gesture_ends {
+            app.space_pan_active = false;
+        }
+    } else if app.stroke_active {
+        if primary_down && !stroke_just_started {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let (x, y) = app.viewport.screen_to_cell_clamped(pos, cell, origin, doc_extent);
+                let tctx = tool_ctx(app);
+                app.tool.update(ToolEvent::Drag { x, y }, &tctx, &app.doc);
+            }
+        }
+        if gesture_ends {
+            let tctx = tool_ctx(app);
+            let resp = app.tool.update(ToolEvent::Release, &tctx, &app.doc);
+            if let ToolResponse::Commit(Some(edit)) = resp {
+                app.history.apply(&mut app.doc, edit);
+            }
+            app.stroke_active = false;
+        }
+    }
+
+    let visible = app.viewport.visible_cell_rect(painter.clip_rect(), cell, origin, doc_extent);
+
+    ctx.request_repaint_after(std::time::Duration::from_millis(500));
+    let on = cursor_blink_on(ui);
     let cursor_cell = Some(app.cursor).filter(|_| on);
 
-    let t0 = std::time::Instant::now();
-    app.renderer
-        .paint(&painter, &app.doc, &app.viewport, origin, cell, visible, cursor_cell);
-    app.spike.record(t0.elapsed());
+    app.renderer.paint(
+        &painter,
+        &app.doc,
+        &app.viewport,
+        origin,
+        cell,
+        visible,
+        app.tool.pending(),
+        cursor_cell,
+    );
 }

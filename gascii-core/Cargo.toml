@@ -6,7 +6,8 @@ rust-version.workspace = true
 
 [dependencies]
 serde = { workspace = true }
-# NOTE: no eframe/egui/winit/wgpu — ever. serde_json/unicode-width added in their milestones.
+unicode-width = { workspace = true }
+# NOTE: no eframe/egui/winit/wgpu — ever.
 
 [dev-dependencies]
 serde_json = { workspace = true } # test-only, used for the serde round-trip guard test

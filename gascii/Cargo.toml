@@ -9,7 +9,7 @@ gascii-core = { path = "../gascii-core" }
 eframe = { workspace = true }
 
 [dev-dependencies]
-ttf-parser = "0.25" # test-only glyph-coverage backstop for the torture sheet (S0.3)
+ttf-parser = "0.25" # test-only glyph-coverage backstop for the bundled canvas font
 
 [lints]
 workspace = true
