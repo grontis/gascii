@@ -1,5 +1,5 @@
 use eframe::egui::{self, Align2, Color32, Painter, Pos2, Rect, Vec2};
-use gascii_core::{Document, PendingCell, Rgba, ToolEvent, ToolResponse};
+use gascii_core::{Direction, Document, PendingCell, Rgba, ToolEvent, ToolResponse};
 
 use crate::app::{GasciiApp, ToolKind};
 use crate::fonts::canvas_font_id;
@@ -107,7 +107,7 @@ pub fn cursor_blink_on(ui: &egui::Ui) -> bool {
     (t * 2.0) as i64 % 2 == 0
 }
 
-fn tool_ctx(app: &GasciiApp) -> gascii_core::ToolCtx {
+pub(crate) fn tool_ctx(app: &GasciiApp) -> gascii_core::ToolCtx {
     gascii_core::ToolCtx {
         layer: 0,
         glyph: app.active_glyph,
@@ -187,6 +187,21 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
                     }
                 }
             }
+        } else if app.tool_kind == ToolKind::Text {
+            // No pointer-drag/release lifecycle for text entry: a single Press call is the whole
+            // pointer-side interaction, so stroke_active is never set here.
+            if response.contains_pointer() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    if let Some((x, y)) = app.viewport.screen_to_cell(pos, cell, origin, doc_extent) {
+                        let tctx = tool_ctx(app);
+                        let resp = app.tool.update(ToolEvent::Press { x, y }, &tctx, &app.doc);
+                        if let ToolResponse::Commit(Some(edit)) = resp {
+                            app.history.apply(&mut app.doc, edit);
+                        }
+                        app.text_editing = true;
+                    }
+                }
+            }
         } else if response.contains_pointer() {
             if let Some(pos) = response.interact_pointer_pos() {
                 if let Some((x, y)) = app.viewport.screen_to_cell(pos, cell, origin, doc_extent) {
@@ -223,6 +238,63 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
             app.stroke_active = false;
         }
     }
+
+    // Text-mode keyboard routing: translates raw input events to ToolEvents, fed to app.tool the
+    // same way pointer events already are (same Commit -> history.apply handling).
+    if app.tool_kind == ToolKind::Text && app.text_editing {
+        let events = ui.input(|i| i.events.clone());
+        for ev in events {
+            match ev {
+                egui::Event::Text(s) => {
+                    for ch in s.chars() {
+                        let tctx = tool_ctx(app);
+                        let resp = app.tool.update(ToolEvent::Char(ch), &tctx, &app.doc);
+                        if let ToolResponse::Commit(Some(edit)) = resp {
+                            app.history.apply(&mut app.doc, edit);
+                        }
+                    }
+                }
+                egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => {
+                    let tctx = tool_ctx(app);
+                    app.tool.update(ToolEvent::Enter, &tctx, &app.doc);
+                }
+                egui::Event::Key { key: egui::Key::Backspace, pressed: true, .. } => {
+                    let tctx = tool_ctx(app);
+                    app.tool.update(ToolEvent::Backspace, &tctx, &app.doc);
+                }
+                egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
+                    // Escape exits text-edit mode; not just a flush, so it's not routed through
+                    // the generic dispatch above.
+                    app.flush_text_tool();
+                }
+                egui::Event::Key { key: egui::Key::ArrowUp, pressed: true, .. } => {
+                    let tctx = tool_ctx(app);
+                    app.tool.update(ToolEvent::Arrow(Direction::Up), &tctx, &app.doc);
+                }
+                egui::Event::Key { key: egui::Key::ArrowDown, pressed: true, .. } => {
+                    let tctx = tool_ctx(app);
+                    app.tool.update(ToolEvent::Arrow(Direction::Down), &tctx, &app.doc);
+                }
+                egui::Event::Key { key: egui::Key::ArrowLeft, pressed: true, .. } => {
+                    let tctx = tool_ctx(app);
+                    app.tool.update(ToolEvent::Arrow(Direction::Left), &tctx, &app.doc);
+                }
+                egui::Event::Key { key: egui::Key::ArrowRight, pressed: true, .. } => {
+                    let tctx = tool_ctx(app);
+                    app.tool.update(ToolEvent::Arrow(Direction::Right), &tctx, &app.doc);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Focus-loss detection: a burst mid-typing must commit, not vanish, when the OS window loses
+    // focus. A no-op via flush_text_tool's own guard when not in text mode.
+    let focused = ui.input(|i| i.viewport().focused).unwrap_or(true);
+    if app.was_focused && !focused {
+        app.flush_text_tool();
+    }
+    app.was_focused = focused;
 
     let visible = app.viewport.visible_cell_rect(painter.clip_rect(), cell, origin, doc_extent);
 

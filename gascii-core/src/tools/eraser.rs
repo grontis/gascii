@@ -37,6 +37,7 @@ impl Tool for Eraser {
                 self.stroke.cancel();
                 ToolResponse::Idle
             }
+            _ => ToolResponse::Active, // keyboard events are irrelevant to a pointer-driven tool
         }
     }
 
@@ -116,6 +117,46 @@ mod tests {
         assert_eq!(cells[0].after.ch, existing.ch);
         assert_eq!(cells[0].after.fg, existing.fg);
         assert_eq!(cells[0].after.bg, Cell::BLANK.bg);
+    }
+
+    #[test]
+    fn keyboard_events_are_harmless_no_ops_outside_a_stroke() {
+        use crate::tools::Direction;
+        let doc = Document::new(20, 20);
+        let mut eraser = Eraser::new();
+        let ctx = ctx(PlaneMask::ALL);
+        for ev in [
+            ToolEvent::Char('x'),
+            ToolEvent::Backspace,
+            ToolEvent::Enter,
+            ToolEvent::Arrow(Direction::Left),
+            ToolEvent::Commit,
+        ] {
+            let resp = eraser.update(ev, &ctx, &doc);
+            assert!(matches!(resp, ToolResponse::Active));
+            assert!(eraser.pending().is_empty());
+        }
+    }
+
+    #[test]
+    fn keyboard_events_are_harmless_no_ops_mid_stroke() {
+        use crate::tools::Direction;
+        let doc = painted_doc();
+        let mut eraser = Eraser::new();
+        let ctx = ctx(PlaneMask::ALL);
+        eraser.update(ToolEvent::Press { x: 5, y: 5 }, &ctx, &doc);
+        let pending_before: Vec<_> = eraser.pending().to_vec();
+        for ev in [
+            ToolEvent::Char('x'),
+            ToolEvent::Backspace,
+            ToolEvent::Enter,
+            ToolEvent::Arrow(Direction::Left),
+            ToolEvent::Commit,
+        ] {
+            let resp = eraser.update(ev, &ctx, &doc);
+            assert!(matches!(resp, ToolResponse::Active));
+            assert_eq!(eraser.pending(), pending_before.as_slice());
+        }
     }
 
     #[test]

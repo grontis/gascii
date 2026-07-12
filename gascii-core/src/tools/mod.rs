@@ -4,9 +4,11 @@
 
 mod eraser;
 mod pencil;
+mod text;
 
 pub use eraser::Eraser;
 pub use pencil::Pencil;
+pub use text::TextTool;
 
 use std::collections::HashSet;
 
@@ -55,13 +57,30 @@ pub struct ToolCtx {
     pub mask: PlaneMask,
 }
 
-/// UI-agnostic pointer gesture, already resolved to a document cell.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// UI-agnostic pointer/keyboard gesture, already resolved to a document cell where relevant.
+/// Deliberately not `#[non_exhaustive]`: `gascii` (the app crate) constructs these directly via
+/// literal syntax, which `#[non_exhaustive]` would forbid from outside the defining crate.
 #[derive(Clone, Copy, Debug)]
 pub enum ToolEvent {
     Press { x: u16, y: u16 },
     Drag { x: u16, y: u16 },
     Release,
     Cancel,
+    Char(char),
+    Backspace,
+    Enter,
+    Arrow(Direction),
+    /// Finalize whatever is pending into one `Edit` now; the tool stays active/ready for more
+    /// input. Distinct from `Release` (pointer-up) and `Cancel` (discard).
+    Commit,
 }
 
 /// One overlay cell: already the masked *result* cell (what the user will actually get), not the
@@ -83,6 +102,12 @@ pub enum ToolResponse {
 pub trait Tool {
     fn update(&mut self, ev: ToolEvent, ctx: &ToolCtx, doc: &Document) -> ToolResponse;
     fn pending(&self) -> &[PendingCell];
+    /// Called whenever `doc` was just mutated through some path other than this tool's own
+    /// `update` calls — currently only a `History::redo` run while a gesture is still pending and
+    /// uncommitted. Default no-op: only `TextTool` can straddle an external mutation like this
+    /// (its burst spans multiple frames while idle, unlike `FreehandStroke`, which commits
+    /// atomically on release), so it's the only implementor that needs to override this.
+    fn resync(&mut self, _doc: &Document, _layer: usize) {}
 }
 
 /// Interpolates cell coordinates from `a` to `b` inclusive, 8-connected, so fast drags don't skip

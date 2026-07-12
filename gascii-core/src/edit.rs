@@ -241,6 +241,85 @@ mod tests {
         assert!(!history.undo(&mut doc));
     }
 
+    /// Documents a flush-before-redo hazard: callers that flush an in-progress edit via `apply()`
+    /// right before calling `redo()` will always find the redo stack empty, because `apply()`
+    /// unconditionally clears it. Any caller that wants a pending-edit flush *and* a possible redo
+    /// to coexist must check `can_redo()` first and skip the flush (leaving the pending edit
+    /// uncommitted) when a redo is actually available — this is exactly what
+    /// `gascii/src/app.rs`'s `request_redo` does.
+    #[test]
+    fn apply_after_undo_clears_the_very_redo_stack_a_flush_before_redo_would_need() {
+        let mut doc = Document::new(10, 10);
+        let mut history = History::new();
+        let edit1 = Edit::Cells(vec![CellEdit {
+            layer: 0,
+            x: 0,
+            y: 0,
+            before: Cell::BLANK,
+            after: cell('a'),
+        }]);
+        history.apply(&mut doc, edit1);
+        history.undo(&mut doc);
+        assert!(history.can_redo(), "undo must populate the redo stack");
+
+        // Simulate "flush a pending edit right before redo": a second, unrelated apply() call
+        // (standing in for flush_text_tool's own History::apply) fires here.
+        let edit2 = Edit::Cells(vec![CellEdit {
+            layer: 0,
+            x: 1,
+            y: 0,
+            before: Cell::BLANK,
+            after: cell('b'),
+        }]);
+        history.apply(&mut doc, edit2);
+
+        // The redo that was available a moment ago is now gone — a caller that unconditionally
+        // flushes before redoing would see this exact silent no-op.
+        assert!(!history.can_redo());
+        assert!(!history.redo(&mut doc));
+    }
+
+    /// Documents the mechanism behind a "stale pending tool state survives Open" corruption class
+    /// (`gascii/src/app.rs`'s `open_file`): `History::apply`/`undo` never validate that a
+    /// `CellEdit`'s `before` matches the target `Document`'s actual current cell value — they
+    /// simply write `after` forward and `before` backward, unconditionally. If an `Edit` were ever
+    /// constructed with a `before` pinned against a *different*, already-discarded document (e.g.
+    /// a `TextTool` burst that survived a document swap), applying it would silently overwrite the
+    /// new document's cell with `after`, and a later undo would overwrite it again with the old,
+    /// unrelated `before` — neither step notices the mismatch, because that check is deliberately
+    /// not `History`'s job (see the module doc). This is exactly why `open_file` resets any
+    /// pending `TextTool` state (rather than relying on `History` to catch drift that never gets
+    /// caught) when a load succeeds.
+    #[test]
+    fn apply_and_undo_do_not_validate_before_against_the_documents_actual_current_state() {
+        let mut doc = Document::new(5, 5);
+        doc.set_cell(0, 0, 0, cell('N')); // the "new" document's real current content at (0,0)
+
+        let mut history = History::new();
+        let stale_edit = Edit::Cells(vec![CellEdit {
+            layer: 0,
+            x: 0,
+            y: 0,
+            before: cell('O'), // an OLD, unrelated document's pre-edit value — not doc's 'N'
+            after: cell('X'),
+        }]);
+
+        history.apply(&mut doc, stale_edit);
+        assert_eq!(
+            doc.cell(0, 0, 0),
+            Some(&cell('X')),
+            "apply blindly writes `after`, never checking the doc's actual prior value"
+        );
+
+        assert!(history.undo(&mut doc));
+        assert_eq!(
+            doc.cell(0, 0, 0),
+            Some(&cell('O')),
+            "undo blindly restores the stored `before` ('O', the OLD document's value), \
+             clobbering 'N' — which was never seen, checked, or recorded anywhere"
+        );
+    }
+
     #[test]
     fn redo_on_empty_stack_returns_false_and_is_noop() {
         let mut doc = Document::new(10, 10);

@@ -35,6 +35,7 @@ impl Tool for Pencil {
                 self.stroke.cancel();
                 ToolResponse::Idle
             }
+            _ => ToolResponse::Active, // keyboard events are irrelevant to a pointer-driven tool
         }
     }
 
@@ -168,6 +169,46 @@ mod tests {
         assert_eq!(pending[0].y, 4);
         assert_eq!(pending[0].cell.ch, '#');
         assert_eq!(pending[0].cell.fg, Rgba::WHITE); // unmasked fg keeps the blank default
+    }
+
+    #[test]
+    fn keyboard_events_are_harmless_no_ops_outside_a_stroke() {
+        use crate::tools::Direction;
+        let doc = Document::new(20, 20);
+        let mut pencil = Pencil::new();
+        let ctx = ctx(PlaneMask::ALL);
+        for ev in [
+            ToolEvent::Char('x'),
+            ToolEvent::Backspace,
+            ToolEvent::Enter,
+            ToolEvent::Arrow(Direction::Left),
+            ToolEvent::Commit,
+        ] {
+            let resp = pencil.update(ev, &ctx, &doc);
+            assert!(matches!(resp, ToolResponse::Active));
+            assert!(pencil.pending().is_empty());
+        }
+    }
+
+    #[test]
+    fn keyboard_events_are_harmless_no_ops_mid_stroke() {
+        use crate::tools::Direction;
+        let doc = Document::new(20, 20);
+        let mut pencil = Pencil::new();
+        let ctx = ctx(PlaneMask::ALL);
+        pencil.update(ToolEvent::Press { x: 3, y: 3 }, &ctx, &doc);
+        let pending_before: Vec<_> = pencil.pending().to_vec();
+        for ev in [
+            ToolEvent::Char('x'),
+            ToolEvent::Backspace,
+            ToolEvent::Enter,
+            ToolEvent::Arrow(Direction::Left),
+            ToolEvent::Commit,
+        ] {
+            let resp = pencil.update(ev, &ctx, &doc);
+            assert!(matches!(resp, ToolResponse::Active));
+            assert_eq!(pencil.pending(), pending_before.as_slice());
+        }
     }
 
     #[test]

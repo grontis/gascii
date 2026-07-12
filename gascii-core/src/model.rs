@@ -1,12 +1,43 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Rgba(pub u8, pub u8, pub u8, pub u8);
 impl Rgba {
     pub const WHITE: Rgba = Rgba(255, 255, 255, 255);
     pub const TRANSPARENT: Rgba = Rgba(0, 0, 0, 0);
     pub const fn is_transparent(&self) -> bool {
         self.3 == 0
+    }
+}
+
+/// Parses `"#RRGGBBAA"` (case-insensitive), requiring exactly 8 hex digits after the leading `#`.
+/// Parses the whole 8-character span as one `u32` rather than byte-slicing fixed 2-byte cut
+/// points: a crafted multi-byte-UTF-8 string can total exactly 8 *bytes* while its char
+/// boundaries don't land on those cut points, which would otherwise panic on a mid-character
+/// slice. `from_str_radix` walks `hex` char-by-char and simply rejects any non-hex-digit
+/// character (including multi-byte ones) instead of panicking. Every byte is checked against
+/// `is_ascii_hexdigit` up front, since `from_str_radix` otherwise treats a leading `'+'` as a
+/// sign to strip rather than an invalid digit, silently accepting a 7-hex-digit value one byte
+/// short of this format's own 8-digit contract.
+fn parse_hex_rgba(s: &str) -> Option<Rgba> {
+    let hex = s.strip_prefix('#')?;
+    if hex.len() != 8 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let value = u32::from_str_radix(hex, 16).ok()?;
+    let [r, g, b, a] = value.to_be_bytes();
+    Some(Rgba(r, g, b, a))
+}
+
+impl Serialize for Rgba {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&format!("#{:02X}{:02X}{:02X}{:02X}", self.0, self.1, self.2, self.3))
+    }
+}
+impl<'de> Deserialize<'de> for Rgba {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        parse_hex_rgba(&s).ok_or_else(|| serde::de::Error::custom(format!("invalid color {s:?}, expected #RRGGBBAA")))
     }
 }
 
@@ -71,6 +102,17 @@ pub struct Document {
 impl Document {
     pub const DEFAULT_WIDTH: u16 = 80;
     pub const DEFAULT_HEIGHT: u16 = 25;
+    /// Sane upper bound on canvas extent, matching the size the app is designed to remain usable
+    /// at. Shared by every caller that must validate an untrusted width/height *before*
+    /// allocating anything sized by it (currently: the `.gascii` loader) — a single definition so
+    /// that bound can never drift out of sync with the value the rest of the app assumes.
+    pub const MAX_WIDTH: u16 = 1024;
+    pub const MAX_HEIGHT: u16 = 1024;
+    /// Sane upper bound on layer count for the same untrusted-input-validation reason as
+    /// `MAX_WIDTH`/`MAX_HEIGHT` — generous enough that no real document gets close to it (today's
+    /// app never writes more than one layer), tight enough that a file can't force an unbounded
+    /// number of full-size blank layers to be allocated before any per-row shape check runs.
+    pub const MAX_LAYERS: usize = 256;
 
     pub fn new(width: u16, height: u16) -> Self {
         assert!(width > 0 && height > 0, "canvas must be non-empty");
@@ -156,6 +198,81 @@ mod tests {
     fn rgba_transparency() {
         assert!(Rgba::TRANSPARENT.is_transparent());
         assert!(!Rgba::WHITE.is_transparent());
+    }
+
+    #[test]
+    fn rgba_hex_serialize_known_values() {
+        assert_eq!(serde_json::to_string(&Rgba::WHITE).unwrap(), "\"#FFFFFFFF\"");
+        assert_eq!(serde_json::to_string(&Rgba::TRANSPARENT).unwrap(), "\"#00000000\"");
+        assert_eq!(serde_json::to_string(&Rgba(18, 52, 86, 120)).unwrap(), "\"#12345678\"");
+    }
+
+    #[test]
+    fn rgba_hex_round_trips() {
+        for c in [Rgba::WHITE, Rgba::TRANSPARENT, Rgba(1, 2, 3, 4), Rgba(255, 0, 128, 64)] {
+            let json = serde_json::to_string(&c).unwrap();
+            let back: Rgba = serde_json::from_str(&json).unwrap();
+            assert_eq!(c, back);
+        }
+    }
+
+    #[test]
+    fn rgba_hex_deserialize_accepts_lowercase() {
+        let back: Rgba = serde_json::from_str("\"#abcdef12\"").unwrap();
+        assert_eq!(back, Rgba(0xAB, 0xCD, 0xEF, 0x12));
+    }
+
+    #[test]
+    fn rgba_hex_deserialize_rejects_malformed_strings() {
+        for bad in ["\"red\"", "\"#FFF\"", "\"FFFFFFFF\"", "\"#GGGGGGGG\"", "\"#FFFFFFFFFF\""] {
+            assert!(serde_json::from_str::<Rgba>(bad).is_err(), "expected {bad} to be rejected");
+        }
+    }
+
+    /// Regression for a byte-slicing panic: `'€'` (U+20AC) encodes to 3 UTF-8 bytes, so
+    /// `"€ABCDE"` is 8 *bytes* (passing a `hex.len() != 8` byte-length check) but its char
+    /// boundaries don't land on the fixed 2-byte cut points the old implementation sliced at.
+    /// Must return `Err`, never panic.
+    #[test]
+    fn rgba_hex_deserialize_rejects_multi_byte_utf8_without_panicking() {
+        let json = "\"#€ABCDE\"";
+        assert!(serde_json::from_str::<Rgba>(json).is_err());
+    }
+
+    /// A wider battery of malformed/adversarial color inputs, catching the multi-byte case
+    /// alongside the more ordinary malformations already covered above.
+    #[test]
+    fn rgba_hex_deserialize_rejects_a_battery_of_malformed_inputs() {
+        let bad = [
+            "\"#€ABCDE\"",       // multi-byte UTF-8, byte-length 8, not char-length 8
+            "\"#日本語ABCDE\"",  // several multi-byte chars
+            "\"#\u{0301}FFFFFF\"", // combining mark
+            "\"#FFFFFF\u{200D}\"", // ZWJ
+            "\"\"",              // empty string
+            "\"#\"",             // just the prefix
+            "\"##FFFFFFF\"",     // double leading '#'
+            "\"# FFFFFF\"",      // whitespace where a hex digit is expected
+            "\"#-FFFFFFF\"",     // non-hex punctuation
+            "\"#+1234567\"",     // leading '+': from_str_radix's sign-stripping, not a hex digit
+            "42",                // not a string at all
+            "null",
+        ];
+        for json in bad {
+            let result = std::panic::catch_unwind(|| serde_json::from_str::<Rgba>(json));
+            match result {
+                Ok(Ok(rgba)) => panic!("expected {json} to be rejected, got {rgba:?}"),
+                Ok(Err(_)) => {} // rejected cleanly, as expected
+                Err(_) => panic!("expected {json} to be rejected cleanly, but it panicked"),
+            }
+        }
+    }
+
+    /// Regression for `from_str_radix`'s sign-stripping artifact: a leading `'+'` is not a hex
+    /// digit, so `"#+1234567"` (a `'+'` plus 7 valid hex digits, 8 bytes total) must be rejected
+    /// rather than silently parsed as the 7-digit value `0x01234567`.
+    #[test]
+    fn rgba_hex_deserialize_rejects_a_leading_plus_sign() {
+        assert!(serde_json::from_str::<Rgba>("\"#+1234567\"").is_err());
     }
 
     #[test]

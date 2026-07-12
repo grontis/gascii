@@ -7,6 +7,7 @@ rust-version.workspace = true
 [dependencies]
 gascii-core = { path = "../gascii-core" }
 eframe = { workspace = true }
+rfd = { workspace = true }
 
 [dev-dependencies]
 ttf-parser = "0.25" # test-only glyph-coverage backstop for the bundled canvas font

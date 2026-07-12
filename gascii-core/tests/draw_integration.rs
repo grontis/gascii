@@ -6,8 +6,8 @@
 use std::collections::HashSet;
 
 use gascii_core::{
-    builtin_pages, line_cells, validate_width, Cell, Document, Eraser, History, Pencil,
-    PlaneMask, Rgba, Tool, ToolCtx, ToolEvent, ToolResponse,
+    builtin_pages, line_cells, validate_width, Cell, CellEdit, Document, Edit, Eraser, History,
+    Pencil, PlaneMask, Rgba, TextTool, Tool, ToolCtx, ToolEvent, ToolResponse,
 };
 
 fn ctx(mask: PlaneMask, glyph: char, fg: Rgba, bg: Rgba) -> ToolCtx {
@@ -417,6 +417,60 @@ fn stroke_at_the_far_corner_of_a_1024_square_document_commits_and_undoes() {
     for i in 1020..=1023u16 {
         assert_eq!(doc.cell(0, i, i), Some(&Cell::BLANK));
     }
+}
+
+// --- Redo running while a text burst is pending ---
+
+/// Regression for a stale `before` corrupting `History`'s invariant: a redo that mutates a cell a
+/// pending `TextTool` burst has already touched must not leave that burst's pinned `before` value
+/// out of sync with `doc`'s real state. Mirrors exactly what `gascii/src/app.rs`'s `request_redo`
+/// does — `history.redo` applied directly while the burst stays pending, followed by
+/// `Tool::resync` — since `app.rs` has no GUI test harness of its own.
+#[test]
+fn redo_mid_text_burst_touching_an_already_pinned_cell_keeps_before_accurate_through_flush_and_undo() {
+    let mut doc = Document::new(10, 10);
+    let mut history = History::new();
+
+    // A prior edit at (5,5), then undone: it now sits on the redo stack, and doc is back to Blank.
+    let redo_after = Cell { ch: 'Z', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) };
+    history.apply(
+        &mut doc,
+        Edit::Cells(vec![CellEdit { layer: 0, x: 5, y: 5, before: Cell::BLANK, after: redo_after }]),
+    );
+    assert!(history.undo(&mut doc));
+    assert_eq!(doc.cell(0, 5, 5), Some(&Cell::BLANK));
+    assert!(history.can_redo());
+
+    // User switches to Text, clicks (5,5), types 'a' — the burst pins before=Blank (doc's current
+    // value at the moment of first touch).
+    let mut text = TextTool::new();
+    let tctx = ctx(PlaneMask::ALL, 'a', Rgba(1, 2, 3, 255), Rgba(4, 5, 6, 255));
+    text.update(ToolEvent::Press { x: 5, y: 5 }, &tctx, &doc);
+    text.update(ToolEvent::Char('a'), &tctx, &doc);
+
+    // Without committing, the user presses Redo: doc mutates directly under the still-pending
+    // burst, bypassing it entirely. `resync` must re-pin the burst's stale before value.
+    assert!(history.redo(&mut doc));
+    assert_eq!(doc.cell(0, 5, 5), Some(&redo_after));
+    text.resync(&doc, 0);
+
+    let ToolResponse::Commit(Some(edit)) = text.update(ToolEvent::Commit, &tctx, &doc) else {
+        panic!("expected a committed edit");
+    };
+    history.apply(&mut doc, edit);
+    assert_eq!(doc.cell(0, 5, 5).unwrap().ch, 'a');
+
+    // Undo round-trips byte-exact: first undo must restore the redo's value (the doc's real
+    // pre-flush state), not the stale pre-redo Blank the burst originally pinned; second undo
+    // restores the original Blank.
+    assert!(history.undo(&mut doc));
+    assert_eq!(
+        doc.cell(0, 5, 5),
+        Some(&redo_after),
+        "undo of the flushed text edit must restore the redo's value, not a stale pre-redo Blank"
+    );
+    assert!(history.undo(&mut doc));
+    assert_eq!(doc.cell(0, 5, 5), Some(&Cell::BLANK));
 }
 
 #[test]

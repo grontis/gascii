@@ -30,11 +30,11 @@ GASCII is a native desktop editor for ASCII/ANSI art: a character-grid canvas dr
 ### 2.2 Input & tools
 
 - **FR-6** All drawing tools reduce pointer input to Strokes: press→release gestures producing a set of (cell, change) edits, committed atomically.
-- **FR-7** Every tool has three **plane toggles** — write glyph? write fg? write bg? — filtering what each Stroke writes (ADR-0002).
+- **FR-7** Every tool has three **plane toggles** — write glyph? write fg? write bg? — filtering what each Stroke writes (ADR-0002). All three default to on, so a stroke fully replaces the cells it touches; toggling planes off is the opt-in for selective drawing.
 - **FR-8** Tools in v1: pencil (stamp), eraser (stamps Blank through plane toggles), flood fill, rectangle, straight line, text mode, rectangular selection. Density brush modes layer onto the pencil.
 - **FR-9** **Flood fill** fills the 4-connected region of cells *exactly matching* the clicked cell (glyph AND fg AND bg equal). Plane toggles govern only what is written, never the match.
 - **FR-10** **Rectangle/line tools auto-join**: strokes crossing existing box-drawing characters resolve junctions by unioning arm directions (`─`+`│` crossing → `┼`, etc.). v1 ships the single-line box set; in strict-ASCII documents the tools draw `+ - |` with `+` junctions using the same join logic.
-- **FR-11** **Text mode**: click a cell, type; typed characters are width-validated (FR-16); Enter moves to line start below, arrows navigate. A typing burst coalesces into one undo entry.
+- **FR-11** **Text mode**: click a cell, type; typed characters are width-validated (FR-16); Enter moves to line start below, arrows navigate; typing stops at the right edge (no wrap), and Backspace at the anchor column is a no-op. A typing burst coalesces into one undo entry, committed at any session boundary — click-away, tool switch, undo, save/open/export, or window focus loss — never silently discarded.
 - **FR-12** **Selection**: rectangular only. Move lifts cells (leaving Blank) into a floating stamp, dropped on click-away/Enter. Delete clears to Blank.
 - **FR-13** **Clipboard**: copy puts plain text on the system clipboard; internal clipboard additionally preserves colors. Pasting external text goes through width validation and lands as a floating stamp.
 
@@ -48,7 +48,7 @@ GASCII is a native desktop editor for ASCII/ANSI art: a character-grid canvas dr
 ### 2.4 Color
 
 - **FR-18** Truecolor RGBA in the model; pickers offer constrained palettes (ANSI 16, xterm-256, custom) as a *picking* aid; quantization happens only at export (ADR-0002).
-- **FR-19** Active fg/bg swatches with a swap action; pick-color-from-cell (eyedropper) per plane.
+- **FR-19** Active text-color and background swatches (UI labels: "Text Color" / "Background"); pick-color-from-cell (eyedropper) sets both from the clicked cell.
 
 ### 2.5 History
 
@@ -60,14 +60,14 @@ GASCII is a native desktop editor for ASCII/ANSI art: a character-grid canvas dr
 
 ### 2.7 Files & export
 
-- **FR-22** Native format `.gascii`: versioned JSON via serde, round-tripping the entire Document (dimensions, settings, all layers, all cell data) (ADR-0005). Unknown newer versions fail with a clear message.
+- **FR-22** Native format `.gascii`: versioned JSON via serde, round-tripping the entire Document (dimensions, settings, all layers, all cell data) (ADR-0005). Unknown newer versions fail with a clear message. Loading is hardened against malformed or hostile files: invalid input always yields a specific error (never a crash), declared dimensions and layer counts are validated against the maxima (1024×1024 cells, 256 layers) before any allocation, and every loaded glyph passes the same width validation as typed input. Saves are atomic (write to a sibling temp file, then rename), so an interrupted save never corrupts an existing file.
 - **FR-23** v1 exports: **plain text** (compositing flattened, Blank → space, trailing whitespace trimmed, also available as copy-to-clipboard) and **PNG** (rasterized at a chosen cell scale). Post-v1 ladder: ANSI escape text, HTML, REXPaint `.xp`.
 
 ### 2.8 Non-functional
 
 - **NFR-1** **Portability rule:** no platform-specific APIs; cross-platform crates only (e.g. `rfd` for dialogs, `arboard` for clipboard). Must build on Windows/macOS/Linux, developed and tested on Windows; no CI until warranted.
 - **NFR-2** Smooth interactive editing (60 fps target) at 200×100 cells; documents up to 1024×1024 must load and remain usable, with rendering optimizations budgeted, not speculative.
-- **NFR-3** Canvas renders exclusively with bundled **Iosevka Fixed** (ADR-0008); glyph coverage verified by a torture-test sheet during scaffolding. UI chrome font is unconstrained.
+- **NFR-3** Canvas renders exclusively with bundled **Iosevka Fixed** (ADR-0008); glyph coverage of every curated palette range is enforced by automated tests against the embedded font file. UI chrome font is unconstrained.
 - **NFR-4** All bundled assets OFL/permissively licensed; the binary is self-contained (no font/system dependencies).
 - **NFR-5** Startup to interactive canvas < 1 s.
 
@@ -149,7 +149,7 @@ Custom egui widget. v1 approach: per visible cell, paint bg rect then glyph via 
 
 ### 3.6 File format
 
-`.gascii` = JSON: `{version, width, height, settings, layers: [...]}`. Exact cell encoding (string rows + color run-length vs. flat arrays) chosen at implementation for readability/size balance; the contract is FR-22 (full round-trip + mandatory version). Serde with `deny_unknown_fields` off, so older builds tolerate additive fields.
+`.gascii` = JSON: `{version, width, height, settings, layers: [...]}`. Cells are encoded structure-of-arrays per layer: glyphs as one string per row, colors as within-row run-length-encoded `#RRGGBBAA` hex (runs never cross row boundaries, so editing one row never ripples the encoding of others); the contract is FR-22 (full round-trip + mandatory version). Serde with `deny_unknown_fields` off, so older builds tolerate additive fields.
 
 ## 4. Build order (v1 milestones)
 

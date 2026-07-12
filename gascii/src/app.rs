@@ -1,8 +1,10 @@
+use std::path::PathBuf;
 use std::time::Instant;
 
 use eframe::egui;
 use gascii_core::{
-    builtin_pages, Document, Eraser, History, Page, Pencil, PlaneMask, Rgba, Tool,
+    builtin_pages, export_text, load_str, page_available, save_string, Document, Eraser,
+    History, Page, Pencil, PlaneMask, Rgba, TextTool, Tool, ToolEvent, ToolResponse,
 };
 
 use crate::canvas::{self, CanvasRenderer, NaiveRenderer};
@@ -72,6 +74,7 @@ pub(crate) enum ToolKind {
     /// Not a `Tool`: it produces no `Edit`, only app-side color state, so it deliberately
     /// doesn't route through the `Tool` trait.
     Eyedropper,
+    Text,
 }
 
 pub struct GasciiApp {
@@ -90,8 +93,16 @@ pub struct GasciiApp {
     pub(crate) tool: Box<dyn Tool>,
     pub(crate) stroke_active: bool,
     pub(crate) space_pan_active: bool,
+    /// True once `TextTool` has an active click-placed cursor — gates the single-letter
+    /// tool-select keys so typing `'p'`/`'e'`/`'i'`/`'t'` while composing text doesn't switch
+    /// tools.
+    pub(crate) text_editing: bool,
+    /// Previous frame's window-focus state, for edge-detecting focus loss.
+    pub(crate) was_focused: bool,
     pages: Vec<Page>,
     active_page: usize,
+    current_path: Option<PathBuf>,
+    last_error: Option<String>,
     started: Instant,
     first_frame: bool,
 }
@@ -115,8 +126,12 @@ impl GasciiApp {
             tool: Box::new(Pencil::new()),
             stroke_active: false,
             space_pan_active: false,
+            text_editing: false,
+            was_focused: true,
             pages: builtin_pages(),
             active_page: 0,
+            current_path: None,
+            last_error: None,
             started,
             first_frame: true,
         }
@@ -128,6 +143,14 @@ impl GasciiApp {
         if self.stroke_active {
             return;
         }
+        // Flush whenever we're leaving Text mode's old TextTool behind — including re-selecting
+        // Text while already in Text mode, which unconditionally replaces `self.tool` with a
+        // brand-new, empty TextTool below. Without this, re-clicking the toolbar's "Text" button
+        // mid-sentence would silently discard the pending, uncommitted burst. A no-op flush if
+        // nothing is pending (`TextBurst::finish` returns `None` for an empty burst).
+        if self.tool_kind == ToolKind::Text {
+            self.flush_text_tool();
+        }
         self.tool_kind = kind;
         match kind {
             ToolKind::Pencil => self.tool = Box::new(Pencil::new()),
@@ -135,16 +158,67 @@ impl GasciiApp {
             // No Tool object needed: canvas.rs branches around `self.tool` entirely in
             // Eyedropper mode (it produces no Edit).
             ToolKind::Eyedropper => {}
+            ToolKind::Text => self.tool = Box::new(TextTool::new()),
+        }
+        self.text_editing = false;
+    }
+
+    /// Finalizes a pending text-mode burst into one undo entry. A no-op unless text mode has an
+    /// active cursor — called on tool switch, Escape, Undo/Redo, and OS focus loss, so a typing
+    /// session is never silently discarded.
+    pub(crate) fn flush_text_tool(&mut self) {
+        if self.tool_kind != ToolKind::Text {
+            return;
+        }
+        let tctx = crate::canvas::tool_ctx(self);
+        if let ToolResponse::Commit(Some(edit)) = self.tool.update(ToolEvent::Commit, &tctx, &self.doc) {
+            self.history.apply(&mut self.doc, edit);
+        }
+        self.text_editing = false;
+    }
+
+    /// Commits any pending text burst, then undoes the most recent edit. Flushing before undo is
+    /// correct here: it turns "Undo while mid-sentence" into "undo the very edit that was just
+    /// typed" (the same edit the flush just committed), matching ordinary editor conventions.
+    fn request_undo(&mut self) {
+        self.flush_text_tool();
+        self.history.undo(&mut self.doc);
+    }
+
+    /// Redoes the most recently undone edit. Deliberately does *not* flush a pending text burst
+    /// first when a redo is actually available: `History::apply` (which the flush would trigger
+    /// via `flush_text_tool`) unconditionally clears the redo stack, so flushing before redo
+    /// would empty the very stack this is about to pop from — silently turning every Redo press
+    /// mid-sentence into a no-op. Skipping the flush in that case leaves the pending burst
+    /// untouched (still composing, not lost — it commits later at the next structural trigger)
+    /// and lets the requested redo actually happen. If nothing is available to redo, flushing
+    /// anyway is safe and correct: it preserves the "never silently discard typed text" invariant
+    /// with no redo left to interfere with.
+    ///
+    /// A redo applied here mutates `self.doc` directly, bypassing the pending burst entirely — if
+    /// the redone edit touches a cell the burst has already pinned a `before` value for, that
+    /// pinned value goes stale relative to `doc`'s new actual state. `self.tool.resync` re-pins
+    /// every already-touched cell to `doc`'s current value immediately after, so the burst's
+    /// eventual flush produces a `before` that matches `doc`'s real pre-flush state, keeping
+    /// `History`'s invariant intact.
+    fn request_redo(&mut self) {
+        if self.history.can_redo() {
+            self.history.redo(&mut self.doc);
+            let layer = crate::canvas::tool_ctx(self).layer;
+            self.tool.resync(&self.doc, layer);
+        } else {
+            self.flush_text_tool();
         }
     }
 
-    /// Tool-select (`P`/`E`/`I`) and undo/redo keys. Undo/redo are `Ctrl`-modified chords and stay
-    /// global (they won't collide with typing into the color picker's hex field); the
-    /// single-letter tool keys are guarded on no widget having focus so typing into that hex
-    /// field doesn't get swallowed as a tool switch.
+    /// Tool-select (`P`/`E`/`I`/`T`) and undo/redo keys. Undo/redo are `Ctrl`-modified chords and
+    /// stay global (they won't collide with typing into the color picker's hex field); the
+    /// single-letter tool keys are guarded on no widget having focus *and* not being mid-text-edit
+    /// so typing into that hex field, or into the canvas in text mode, doesn't get swallowed as a
+    /// tool switch.
     fn handle_keys(&mut self, ui: &mut egui::Ui) {
-        let focused = ui.memory(|m| m.focused().is_some());
-        let (redo_shift, undo, redo_y, pencil, eraser, eyedropper) = ui.input_mut(|i| {
+        let focused = ui.memory(|m| m.focused().is_some()) || self.text_editing;
+        let (redo_shift, undo, redo_y, pencil, eraser, eyedropper, text) = ui.input_mut(|i| {
             // Cmd/Ctrl+Shift+Z must be consumed before the plain Cmd/Ctrl+Z pattern, since
             // `matches_logically` ignores extra Shift/Alt — checking undo first would swallow
             // the redo shortcut's Z key press.
@@ -154,13 +228,14 @@ impl GasciiApp {
             let pencil = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::P);
             let eraser = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::E);
             let eyedropper = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::I);
-            (redo_shift, undo, redo_y, pencil, eraser, eyedropper)
+            let text = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::T);
+            (redo_shift, undo, redo_y, pencil, eraser, eyedropper, text)
         });
 
         if redo_shift || redo_y {
-            self.history.redo(&mut self.doc);
+            self.request_redo();
         } else if undo {
-            self.history.undo(&mut self.doc);
+            self.request_undo();
         }
         if pencil {
             self.set_tool(ToolKind::Pencil);
@@ -171,14 +246,27 @@ impl GasciiApp {
         if eyedropper {
             self.set_tool(ToolKind::Eyedropper);
         }
+        if text {
+            self.set_tool(ToolKind::Text);
+        }
     }
 
     fn palette_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Palette");
+        if ui.checkbox(&mut self.doc.settings.strict_ascii, "Strict ASCII").changed()
+            && !page_available(&self.pages[self.active_page], &self.doc.settings)
+        {
+            if let Some(ascii_index) = self.pages.iter().position(|p| p.ascii) {
+                self.active_page = ascii_index;
+            }
+        }
         ui.horizontal_wrapped(|ui| {
             for i in 0..self.pages.len() {
                 let name = self.pages[i].name;
-                ui.selectable_value(&mut self.active_page, i, name);
+                let available = page_available(&self.pages[i], &self.doc.settings);
+                ui.add_enabled_ui(available, |ui| {
+                    ui.selectable_value(&mut self.active_page, i, name);
+                });
             }
         });
         ui.separator();
@@ -228,15 +316,116 @@ impl GasciiApp {
             {
                 self.set_tool(ToolKind::Eyedropper);
             }
+            if ui.selectable_label(self.tool_kind == ToolKind::Text, "Text (T)").clicked() {
+                self.set_tool(ToolKind::Text);
+            }
             ui.separator();
 
             if ui.add_enabled(self.history.can_undo(), egui::Button::new("Undo")).clicked() {
-                self.history.undo(&mut self.doc);
+                self.request_undo();
             }
             if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo")).clicked() {
-                self.history.redo(&mut self.doc);
+                self.request_redo();
+            }
+            ui.separator();
+
+            if ui.button("Open").clicked() {
+                self.open_file();
+            }
+            if ui.button("Save").clicked() {
+                self.save_file();
+            }
+            if ui.button("Save As").clicked() {
+                self.save_file_as();
+            }
+            if ui.button("Export Text").clicked() {
+                self.export_text_file();
+            }
+            if ui.button("Copy as Text").clicked() {
+                // Flush first: a pending text burst lives only in `self.tool`'s overlay until
+                // committed into `self.doc` — copying without flushing would silently drop the
+                // just-typed, uncommitted characters from the clipboard contents.
+                self.flush_text_tool();
+                ui.ctx().copy_text(export_text(&self.doc));
             }
         });
+    }
+
+    /// Reads and parses a `.gascii` file picked via a native dialog. A freshly loaded document
+    /// starts with an empty undo history — there is no `before` state for its cells prior to the
+    /// load.
+    fn open_file(&mut self) {
+        let Some(path) = rfd::FileDialog::new().add_filter("GASCII", &["gascii"]).pick_file() else {
+            return;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => match load_str(&contents) {
+                Ok(doc) => {
+                    // Cancel, not flush: the old `self.doc` this burst's `before` values were
+                    // pinned against is about to be discarded, so committing into it is pointless
+                    // — and carrying the same `TextTool` instance (and `text_editing`) forward
+                    // would let it later graft edits, and stale pre-edit `before` values on
+                    // Undo, from the discarded document onto the newly loaded one. Only relevant
+                    // in Text mode; other tools have no cross-frame pending state to strand.
+                    if self.tool_kind == ToolKind::Text {
+                        self.tool = Box::new(TextTool::new());
+                    }
+                    self.text_editing = false;
+                    self.doc = doc;
+                    self.history = History::new();
+                    self.current_path = Some(path);
+                    self.last_error = None;
+                }
+                Err(e) => self.last_error = Some(format!("failed to load {}: {e}", path.display())),
+            },
+            Err(e) => self.last_error = Some(format!("failed to read {}: {e}", path.display())),
+        }
+    }
+
+    fn save_file(&mut self) {
+        // Flush first: Save reads `self.doc` directly, which does not yet contain a pending text
+        // burst's just-typed characters until a commit trigger fires. Also covers the
+        // `save_file_as` delegation below (a no-op double-flush if already flushed).
+        self.flush_text_tool();
+        match self.current_path.clone() {
+            Some(path) => self.write_gascii(&path),
+            None => self.save_file_as(),
+        }
+    }
+
+    fn save_file_as(&mut self) {
+        // Flush first — see `save_file`'s comment. Also reachable directly via the "Save As"
+        // toolbar button, not only through `save_file`'s delegation.
+        self.flush_text_tool();
+        let Some(path) = rfd::FileDialog::new().add_filter("GASCII", &["gascii"]).save_file() else {
+            return;
+        };
+        self.write_gascii(&path);
+    }
+
+    fn write_gascii(&mut self, path: &std::path::Path) {
+        match write_atomic(path, save_string(&self.doc).as_bytes()) {
+            Ok(()) => {
+                self.current_path = Some(path.to_path_buf());
+                self.last_error = None;
+            }
+            Err(e) => self.last_error = Some(format!("failed to save {}: {e}", path.display())),
+        }
+    }
+
+    /// Exports composited plain text to a file. Does not touch `current_path` — that's reserved
+    /// for the native `.gascii` file.
+    fn export_text_file(&mut self) {
+        // Flush first — see `save_file`'s comment; export reads `self.doc` the same way save does.
+        self.flush_text_tool();
+        let Some(path) = rfd::FileDialog::new().add_filter("Text", &["txt"]).save_file() else {
+            return;
+        };
+        if let Err(e) = std::fs::write(&path, export_text(&self.doc)) {
+            self.last_error = Some(format!("failed to export {}: {e}", path.display()));
+        } else {
+            self.last_error = None;
+        }
     }
 
     fn status_bar(&self, ui: &mut egui::Ui) {
@@ -250,8 +439,36 @@ impl GasciiApp {
             ui.label(format!("zoom: {:.0}%", self.viewport.scale() * 100.0));
             ui.separator();
             ui.label(format!("doc: {}x{}", self.doc.width, self.doc.height));
+            if let Some(path) = &self.current_path {
+                ui.separator();
+                ui.label(format!("file: {}", path.display()));
+            }
+            if let Some(err) = &self.last_error {
+                ui.separator();
+                ui.colored_label(egui::Color32::from_rgb(220, 80, 80), err);
+            }
         });
     }
+}
+
+/// Writes `contents` to `path` via write-to-a-sibling-temp-file-then-rename, rather than a direct
+/// `std::fs::write`. An interrupted write (disk full, power loss, crash mid-write) to `path`
+/// directly can leave a truncated/corrupt file behind, clobbering a previously-good save with no
+/// way back; writing to a temp file first and only renaming it into place once the write fully
+/// succeeds means `path` either keeps its old contents or gets the new ones, never something
+/// in-between. The temp file lives next to `path` (same directory) so the final rename is a
+/// same-filesystem move, not a copy.
+fn write_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name"))?;
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(".tmp");
+    let tmp_path = dir.join(tmp_name);
+    std::fs::write(&tmp_path, contents)?;
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
 }
 
 impl eframe::App for GasciiApp {
@@ -268,5 +485,39 @@ impl eframe::App for GasciiApp {
         egui::CentralPanel::default().show(ui, |ui| {
             canvas::show(ui, self);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each test gets its own throwaway directory under the OS temp dir so parallel test runs
+    /// (and repeat local runs) never collide or race on the same path.
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("gascii_write_atomic_test_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn write_atomic_creates_a_new_file_with_exact_contents() {
+        let dir = scratch_dir("create");
+        let path = dir.join("out.gascii");
+        write_atomic(&path, b"hello").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_atomic_overwrites_an_existing_file_and_leaves_no_temp_file_behind() {
+        let dir = scratch_dir("overwrite");
+        let path = dir.join("out.gascii");
+        std::fs::write(&path, b"old contents").unwrap();
+        write_atomic(&path, b"new").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert!(!dir.join("out.gascii.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
