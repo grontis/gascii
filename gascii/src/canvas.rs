@@ -1,5 +1,5 @@
-use eframe::egui::{self, Align2, Color32, Painter, Pos2, Rect, Vec2};
-use gascii_core::{Direction, Document, PendingCell, Rgba, ToolEvent, ToolResponse};
+use eframe::egui::{self, Align2, Color32, Painter, Pos2, Rect, Stroke, StrokeKind, Vec2};
+use gascii_core::{CellRect, Direction, Document, PendingCell, Rgba, SelectionView, ToolEvent, ToolResponse};
 
 use crate::app::{GasciiApp, ToolKind};
 use crate::fonts::canvas_font_id;
@@ -11,6 +11,13 @@ fn color32(c: Rgba) -> Color32 {
 
 /// Background the doc canvas paints onto before compositing transparent Blank cells.
 const DOC_BG: Color32 = Color32::from_rgb(10, 10, 10);
+
+/// Converts an inclusive cell-space rect to the screen-space rect covering all of its cells.
+fn cell_rect_to_screen(r: CellRect, vp: &Viewport, cell: Vec2, origin: Pos2) -> Rect {
+    let min = vp.cell_to_screen(r.x0, r.y0, cell, origin);
+    let max = vp.cell_to_screen(r.x1 + 1, r.y1 + 1, cell, origin);
+    Rect::from_min_max(min, max)
+}
 
 pub trait CanvasRenderer {
     #[allow(clippy::too_many_arguments)]
@@ -24,6 +31,7 @@ pub trait CanvasRenderer {
         visible: (u16, u16, u16, u16),
         pending: &[PendingCell],
         cursor_on: Option<(u16, u16)>,
+        selection: Option<SelectionView>,
     );
 }
 
@@ -41,6 +49,7 @@ impl CanvasRenderer for NaiveRenderer {
         visible: (u16, u16, u16, u16),
         pending: &[PendingCell],
         cursor_on: Option<(u16, u16)>,
+        selection: Option<SelectionView>,
     ) {
         let (x0, y0, x1, y1) = visible;
 
@@ -73,13 +82,26 @@ impl CanvasRenderer for NaiveRenderer {
             }
         }
 
+        // A floating stamp's vacated source region: painted as plain background, after doc cells
+        // and before the pending overlay, so it reads as erased under the float even though the
+        // document itself was never mutated.
+        if let Some(src) = selection.and_then(|s| s.lifted_source) {
+            painter.rect_filled(cell_rect_to_screen(src, vp, cell, origin), 0.0, DOC_BG);
+        }
+
         for p in pending {
             if p.x < x0 || p.x >= x1 || p.y < y0 || p.y >= y1 {
                 continue;
             }
             let rect_min = vp.cell_to_screen(p.x, p.y, cell, origin);
+            let rect = Rect::from_min_size(rect_min, cell);
+            // A pending cell is the exact result the commit will write, so the preview must
+            // fully replace this destination cell down to the canvas background first — a Blank
+            // pending cell (ch ' ', transparent bg) would otherwise leave whatever's already
+            // painted there (the underlying doc glyph, or the vacated-source fill above) showing
+            // through, contradicting what the drop actually produces.
+            painter.rect_filled(rect, 0.0, DOC_BG);
             if p.cell.bg.3 > 0 {
-                let rect = Rect::from_min_size(rect_min, cell);
                 painter.rect_filled(rect, 0.0, color32(p.cell.bg));
             }
             if p.cell.ch != ' ' {
@@ -97,6 +119,11 @@ impl CanvasRenderer for NaiveRenderer {
             let rect_min = vp.cell_to_screen(cx, cy, cell, origin);
             let rect = Rect::from_min_size(rect_min, cell);
             painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 120));
+        }
+
+        if let Some(marquee) = selection.and_then(|s| s.marquee) {
+            let rect = cell_rect_to_screen(marquee, vp, cell, origin);
+            painter.rect_stroke(rect, 0.0, Stroke::new(1.5, Color32::WHITE), StrokeKind::Outside);
         }
     }
 }
@@ -202,6 +229,23 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
                     }
                 }
             }
+        } else if app.tool_kind == ToolKind::Selection {
+            // Unlike the generic branch below, a Selection Press can itself return a committed
+            // edit (clicking away from a floating stamp drops it) — that response must be applied,
+            // not discarded, or a click-away drop would silently vanish.
+            if response.contains_pointer() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    if let Some((x, y)) = app.viewport.screen_to_cell(pos, cell, origin, doc_extent) {
+                        app.stroke_active = true;
+                        stroke_just_started = true;
+                        let tctx = tool_ctx(app);
+                        let resp = app.tool.update(ToolEvent::Press { x, y }, &tctx, &app.doc);
+                        if let ToolResponse::Commit(Some(edit)) = resp {
+                            app.history.apply(&mut app.doc, edit);
+                        }
+                    }
+                }
+            }
         } else if response.contains_pointer() {
             if let Some(pos) = response.interact_pointer_pos() {
                 if let Some((x, y)) = app.viewport.screen_to_cell(pos, cell, origin, doc_extent) {
@@ -265,7 +309,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
                 egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
                     // Escape exits text-edit mode; not just a flush, so it's not routed through
                     // the generic dispatch above.
-                    app.flush_text_tool();
+                    app.flush_active_tool();
                 }
                 egui::Event::Key { key: egui::Key::ArrowUp, pressed: true, .. } => {
                     let tctx = tool_ctx(app);
@@ -288,11 +332,57 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
         }
     }
 
-    // Focus-loss detection: a burst mid-typing must commit, not vanish, when the OS window loses
-    // focus. A no-op via flush_text_tool's own guard when not in text mode.
+    // Selection keyboard routing: Delete clears the float/selection to Blank, Enter drops a
+    // floating stamp, Escape cancels the marquee/float outright without touching the document.
+    // Gated on no widget having focus, mirroring `handle_keys`'s `!focused` guard on the
+    // single-letter tool keys: `TextEdit`'s own key handling (e.g. the hex color popup) reads
+    // events via `filtered_events`, which clones rather than consumes, so an unguarded block here
+    // would also fire on every Delete/Enter/Escape typed into an unrelated focused text field.
+    let selection_keys_focused = ui.memory(|m| m.focused().is_some());
+    if app.tool_kind == ToolKind::Selection && !selection_keys_focused {
+        let events = ui.input(|i| i.events.clone());
+        for ev in events {
+            match ev {
+                egui::Event::Key { key: egui::Key::Delete, pressed: true, .. } => {
+                    let tctx = tool_ctx(app);
+                    let resp = app.tool.update(ToolEvent::Delete, &tctx, &app.doc);
+                    if let ToolResponse::Commit(Some(edit)) = resp {
+                        app.history.apply(&mut app.doc, edit);
+                    }
+                }
+                egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => {
+                    app.flush_active_tool();
+                }
+                egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
+                    let tctx = tool_ctx(app);
+                    app.tool.update(ToolEvent::Cancel, &tctx, &app.doc);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Clipboard paste: lands as a floating Selection stamp regardless of the active tool. Read
+    // (not consumed) alongside the text/selection keyboard blocks above — Event::Paste is never
+    // matched by either of those, so there's no double-handling.
+    let paste_texts: Vec<String> = ui.input(|i| {
+        i.events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::Paste(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    });
+    for text in paste_texts {
+        app.paste_text(&text);
+    }
+
+    // Focus-loss detection: a burst mid-typing or a floating stamp must commit, not vanish, when
+    // the OS window loses focus. A no-op via flush_active_tool's own guard for every other tool.
     let focused = ui.input(|i| i.viewport().focused).unwrap_or(true);
     if app.was_focused && !focused {
-        app.flush_text_tool();
+        app.flush_active_tool();
     }
     app.was_focused = focused;
 
@@ -311,5 +401,6 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
         visible,
         app.tool.pending(),
         cursor_cell,
+        app.tool.selection_overlay(),
     );
 }

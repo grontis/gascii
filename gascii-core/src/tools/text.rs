@@ -149,7 +149,7 @@ impl Tool for TextTool {
                 self.cursor = None;
                 ToolResponse::Idle
             }
-            ToolEvent::Drag { .. } | ToolEvent::Release => ToolResponse::Active, // pointer-only events, irrelevant here
+            ToolEvent::Drag { .. } | ToolEvent::Release | ToolEvent::Delete => ToolResponse::Active, // irrelevant here
         }
     }
 

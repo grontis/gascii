@@ -3,8 +3,9 @@ use std::time::Instant;
 
 use eframe::egui;
 use gascii_core::{
-    builtin_pages, export_text, load_str, page_available, save_string, Document, Eraser,
-    History, Page, Pencil, PlaneMask, Rgba, TextTool, Tool, ToolEvent, ToolResponse,
+    builtin_pages, export_text, load_str, page_available, save_string, CellPatch, Document,
+    Eraser, FloodFill, History, Line, Page, Pencil, PlaneMask, Rectangle, Rgba, SelectionTool,
+    TextTool, Tool, ToolEvent, ToolResponse,
 };
 
 use crate::canvas::{self, CanvasRenderer, NaiveRenderer};
@@ -33,6 +34,14 @@ const ANSI16: [(&str, Rgba); 16] = [
 
 fn color32(c: Rgba) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(c.0, c.1, c.2, c.3)
+}
+
+/// Whether a pasted `Event::Paste` text is still the app's own copy: the OS clipboard is "ours"
+/// exactly when `internal`'s own flattening still matches what came back on paste. Pulled out of
+/// `paste_text` as a pure function so the copy/paste reconciliation decision is unit-testable
+/// without constructing a full `GasciiApp`.
+fn is_own_clipboard_text(text: &str, internal: Option<&CellPatch>) -> bool {
+    internal.is_some_and(|p| p.to_text() == text)
 }
 
 /// A clickable color swatch; clicking opens a popup with ANSI-16 presets plus a full truecolor
@@ -75,6 +84,10 @@ pub(crate) enum ToolKind {
     /// doesn't route through the `Tool` trait.
     Eyedropper,
     Text,
+    Fill,
+    Rectangle,
+    Line,
+    Selection,
 }
 
 pub struct GasciiApp {
@@ -93,12 +106,15 @@ pub struct GasciiApp {
     pub(crate) tool: Box<dyn Tool>,
     pub(crate) stroke_active: bool,
     pub(crate) space_pan_active: bool,
-    /// True once `TextTool` has an active click-placed cursor — gates the single-letter
-    /// tool-select keys so typing `'p'`/`'e'`/`'i'`/`'t'` while composing text doesn't switch
-    /// tools.
+    /// True once `TextTool` has an active click-placed cursor — gates every single-letter
+    /// tool-select key so typing while composing text doesn't switch tools.
     pub(crate) text_editing: bool,
     /// Previous frame's window-focus state, for edge-detecting focus loss.
     pub(crate) was_focused: bool,
+    /// The last region copied via Ctrl+C, kept alongside the plain text written to the OS
+    /// clipboard. A paste whose `Event::Paste` text still matches this patch's own flattening
+    /// pastes the colored version; otherwise it's treated as external plain text.
+    pub(crate) internal_clipboard: Option<CellPatch>,
     pages: Vec<Page>,
     active_page: usize,
     current_path: Option<PathBuf>,
@@ -128,6 +144,7 @@ impl GasciiApp {
             space_pan_active: false,
             text_editing: false,
             was_focused: true,
+            internal_clipboard: None,
             pages: builtin_pages(),
             active_page: 0,
             current_path: None,
@@ -143,13 +160,13 @@ impl GasciiApp {
         if self.stroke_active {
             return;
         }
-        // Flush whenever we're leaving Text mode's old TextTool behind — including re-selecting
-        // Text while already in Text mode, which unconditionally replaces `self.tool` with a
-        // brand-new, empty TextTool below. Without this, re-clicking the toolbar's "Text" button
-        // mid-sentence would silently discard the pending, uncommitted burst. A no-op flush if
-        // nothing is pending (`TextBurst::finish` returns `None` for an empty burst).
-        if self.tool_kind == ToolKind::Text {
-            self.flush_text_tool();
+        // Flush whenever we're leaving a cross-frame tool's (Text or Selection) session behind —
+        // including re-selecting the same tool while already active, which unconditionally
+        // replaces `self.tool` with a brand-new instance below. Without this, re-clicking the
+        // toolbar's "Text"/"Selection" button mid-session would silently discard the pending,
+        // uncommitted burst or float. A no-op flush if nothing is pending.
+        if matches!(self.tool_kind, ToolKind::Text | ToolKind::Selection) {
+            self.flush_active_tool();
         }
         self.tool_kind = kind;
         match kind {
@@ -159,15 +176,20 @@ impl GasciiApp {
             // Eyedropper mode (it produces no Edit).
             ToolKind::Eyedropper => {}
             ToolKind::Text => self.tool = Box::new(TextTool::new()),
+            ToolKind::Fill => self.tool = Box::new(FloodFill::new()),
+            ToolKind::Rectangle => self.tool = Box::new(Rectangle::new()),
+            ToolKind::Line => self.tool = Box::new(Line::new()),
+            ToolKind::Selection => self.tool = Box::new(SelectionTool::new()),
         }
         self.text_editing = false;
     }
 
-    /// Finalizes a pending text-mode burst into one undo entry. A no-op unless text mode has an
-    /// active cursor — called on tool switch, Escape, Undo/Redo, and OS focus loss, so a typing
-    /// session is never silently discarded.
-    pub(crate) fn flush_text_tool(&mut self) {
-        if self.tool_kind != ToolKind::Text {
+    /// Finalizes whatever the active cross-frame tool (Text's burst, Selection's float) has
+    /// pending into one undo entry. A no-op for every other tool kind — called on tool switch,
+    /// Escape, Undo/Redo, save/export/copy, and OS focus loss, so a typing session or a floating
+    /// stamp is never silently discarded.
+    pub(crate) fn flush_active_tool(&mut self) {
+        if !matches!(self.tool_kind, ToolKind::Text | ToolKind::Selection) {
             return;
         }
         let tctx = crate::canvas::tool_ctx(self);
@@ -177,60 +199,132 @@ impl GasciiApp {
         self.text_editing = false;
     }
 
-    /// Commits any pending text burst, then undoes the most recent edit. Flushing before undo is
-    /// correct here: it turns "Undo while mid-sentence" into "undo the very edit that was just
-    /// typed" (the same edit the flush just committed), matching ordinary editor conventions.
+    /// Commits any pending text burst or floating selection, then undoes the most recent edit.
+    /// Flushing before undo is correct here: it turns "Undo mid-session" into "undo the very edit
+    /// that was just committed" (the same edit the flush just committed), matching ordinary
+    /// editor conventions.
     fn request_undo(&mut self) {
-        self.flush_text_tool();
+        self.flush_active_tool();
         self.history.undo(&mut self.doc);
     }
 
-    /// Redoes the most recently undone edit. Deliberately does *not* flush a pending text burst
-    /// first when a redo is actually available: `History::apply` (which the flush would trigger
-    /// via `flush_text_tool`) unconditionally clears the redo stack, so flushing before redo
-    /// would empty the very stack this is about to pop from — silently turning every Redo press
-    /// mid-sentence into a no-op. Skipping the flush in that case leaves the pending burst
-    /// untouched (still composing, not lost — it commits later at the next structural trigger)
-    /// and lets the requested redo actually happen. If nothing is available to redo, flushing
-    /// anyway is safe and correct: it preserves the "never silently discard typed text" invariant
-    /// with no redo left to interfere with.
+    /// Redoes the most recently undone edit. Deliberately does *not* flush a pending text burst or
+    /// floating selection first when a redo is actually available: `History::apply` (which the
+    /// flush would trigger via `flush_active_tool`) unconditionally clears the redo stack, so
+    /// flushing before redo would empty the very stack this is about to pop from — silently
+    /// turning every Redo press mid-session into a no-op. Skipping the flush in that case leaves
+    /// the pending burst/float untouched (still active, not lost — it commits later at the next
+    /// structural trigger) and lets the requested redo actually happen. If nothing is available to
+    /// redo, flushing anyway is safe and correct: it preserves the "never silently discard
+    /// in-progress work" invariant with no redo left to interfere with.
     ///
-    /// A redo applied here mutates `self.doc` directly, bypassing the pending burst entirely — if
-    /// the redone edit touches a cell the burst has already pinned a `before` value for, that
-    /// pinned value goes stale relative to `doc`'s new actual state. `self.tool.resync` re-pins
-    /// every already-touched cell to `doc`'s current value immediately after, so the burst's
-    /// eventual flush produces a `before` that matches `doc`'s real pre-flush state, keeping
-    /// `History`'s invariant intact.
+    /// A redo applied here mutates `self.doc` directly, bypassing the pending tool entirely — for
+    /// `TextTool`, if the redone edit touches a cell the burst has already pinned a `before` value
+    /// for, that pinned value goes stale relative to `doc`'s new actual state; `self.tool.resync`
+    /// re-pins it. `SelectionTool` inherits the trait's default no-op `resync` — its drop reads
+    /// `before` from the document at drop time, not lift time, so there is nothing to re-pin.
     fn request_redo(&mut self) {
         if self.history.can_redo() {
             self.history.redo(&mut self.doc);
             let layer = crate::canvas::tool_ctx(self).layer;
             self.tool.resync(&self.doc, layer);
         } else {
-            self.flush_text_tool();
+            self.flush_active_tool();
         }
     }
 
-    /// Tool-select (`P`/`E`/`I`/`T`) and undo/redo keys. Undo/redo are `Ctrl`-modified chords and
-    /// stay global (they won't collide with typing into the color picker's hex field); the
-    /// single-letter tool keys are guarded on no widget having focus *and* not being mid-text-edit
-    /// so typing into that hex field, or into the canvas in text mode, doesn't get swallowed as a
-    /// tool switch.
+    /// Copies the active selection's cells to both the OS clipboard (plain text) and the app's
+    /// colored internal clipboard. A no-op unless Selection is the active tool with a region
+    /// defined — the "Copy as Text" toolbar button remains the way to copy the whole document.
+    pub(crate) fn copy_selection(&mut self, ctx: &egui::Context) {
+        if self.tool_kind != ToolKind::Selection {
+            return;
+        }
+        // A dropped float's cells must be in `self.doc` before capturing the region.
+        self.flush_active_tool();
+        let Some(rect) = self.tool.selection_overlay().and_then(|v| v.marquee) else {
+            return;
+        };
+        let patch = CellPatch::from_region(&self.doc, rect, 0);
+        ctx.copy_text(patch.to_text());
+        self.internal_clipboard = Some(patch);
+    }
+
+    /// Reconciles a pasted `Event::Paste` text against the internal clipboard: if it matches the
+    /// internal patch's own flattening, the OS clipboard still holds our own colored copy, so that
+    /// gets pasted; otherwise the text came from elsewhere and is treated as external plain text,
+    /// width-validated per character. Either way, the result lands as a floating Selection stamp
+    /// anchored at the hovered cell (or the origin if nothing is hovered).
+    pub(crate) fn paste_text(&mut self, text: &str) {
+        if self.stroke_active {
+            // Another tool's pointer gesture (drag) owns the canvas right now. `set_tool` below
+            // would refuse to switch to Selection while `stroke_active` is true, silently leaving
+            // whatever tool is mid-gesture active — landing the pasted stamp on `accept_stamp`
+            // would then hit that tool's default no-op and discard the clipboard content with no
+            // trace. Skip the paste outright and say so, rather than silently losing it.
+            self.last_error = Some("paste ignored: a drag is in progress".to_string());
+            return;
+        }
+        self.flush_active_tool(); // drop any current float before reading self.doc / switching tools
+        let patch = if is_own_clipboard_text(text, self.internal_clipboard.as_ref()) {
+            self.internal_clipboard.clone().expect("is_own_clipboard_text implies Some")
+        } else {
+            let (patch, dropped) =
+                CellPatch::from_external_text(text, self.active_fg, self.active_bg, &self.doc.settings);
+            if dropped > 0 {
+                self.last_error = Some(format!("paste: {dropped} character(s) rejected"));
+            }
+            patch
+        };
+        if patch.width == 0 || patch.height == 0 {
+            return; // empty clipboard / everything rejected: no float, warning already surfaced
+        }
+        let anchor = self.hovered_cell.unwrap_or((0, 0));
+        if self.tool_kind != ToolKind::Selection {
+            self.set_tool(ToolKind::Selection);
+        }
+        self.tool.accept_stamp(patch, anchor, &self.doc);
+    }
+
+    /// Discards (not commits) whatever cross-frame session the active tool has pending, replacing
+    /// it with a fresh instance. Called when the document itself is about to be replaced (Open):
+    /// a pending burst's or float's `before` values are pinned against the doc that's about to be
+    /// discarded, so committing into the *new* doc would graft stale edits onto unrelated content.
+    fn reset_cross_frame_tool(&mut self) {
+        match self.tool_kind {
+            ToolKind::Text => self.tool = Box::new(TextTool::new()),
+            ToolKind::Selection => self.tool = Box::new(SelectionTool::new()),
+            _ => {}
+        }
+        self.text_editing = false;
+    }
+
+    /// Tool-select (`P`/`E`/`I`/`T`/`F`/`R`/`L`/`S`), undo/redo, and Ctrl+C copy keys. Undo/redo/
+    /// Copy are `Ctrl`-modified chords and stay global (they won't collide with typing into the
+    /// color picker's hex field); the single-letter tool keys are guarded on no widget having
+    /// focus *and* not being mid-text-edit so typing into that hex field, or into the canvas in
+    /// text mode, doesn't get swallowed as a tool switch.
     fn handle_keys(&mut self, ui: &mut egui::Ui) {
         let focused = ui.memory(|m| m.focused().is_some()) || self.text_editing;
-        let (redo_shift, undo, redo_y, pencil, eraser, eyedropper, text) = ui.input_mut(|i| {
-            // Cmd/Ctrl+Shift+Z must be consumed before the plain Cmd/Ctrl+Z pattern, since
-            // `matches_logically` ignores extra Shift/Alt — checking undo first would swallow
-            // the redo shortcut's Z key press.
-            let redo_shift = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z);
-            let undo = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
-            let redo_y = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y);
-            let pencil = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::P);
-            let eraser = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::E);
-            let eyedropper = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::I);
-            let text = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::T);
-            (redo_shift, undo, redo_y, pencil, eraser, eyedropper, text)
-        });
+        let (redo_shift, undo, redo_y, pencil, eraser, eyedropper, text, fill, rect, line, select, copy) =
+            ui.input_mut(|i| {
+                // Cmd/Ctrl+Shift+Z must be consumed before the plain Cmd/Ctrl+Z pattern, since
+                // `matches_logically` ignores extra Shift/Alt — checking undo first would swallow
+                // the redo shortcut's Z key press.
+                let redo_shift = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z);
+                let undo = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
+                let redo_y = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y);
+                let pencil = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::P);
+                let eraser = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::E);
+                let eyedropper = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::I);
+                let text = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::T);
+                let fill = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::F);
+                let rect = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::R);
+                let line = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::L);
+                let select = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::S);
+                let copy = i.consume_key(egui::Modifiers::COMMAND, egui::Key::C);
+                (redo_shift, undo, redo_y, pencil, eraser, eyedropper, text, fill, rect, line, select, copy)
+            });
 
         if redo_shift || redo_y {
             self.request_redo();
@@ -248,6 +342,21 @@ impl GasciiApp {
         }
         if text {
             self.set_tool(ToolKind::Text);
+        }
+        if fill {
+            self.set_tool(ToolKind::Fill);
+        }
+        if rect {
+            self.set_tool(ToolKind::Rectangle);
+        }
+        if line {
+            self.set_tool(ToolKind::Line);
+        }
+        if select {
+            self.set_tool(ToolKind::Selection);
+        }
+        if copy {
+            self.copy_selection(ui.ctx());
         }
     }
 
@@ -319,6 +428,24 @@ impl GasciiApp {
             if ui.selectable_label(self.tool_kind == ToolKind::Text, "Text (T)").clicked() {
                 self.set_tool(ToolKind::Text);
             }
+            if ui.selectable_label(self.tool_kind == ToolKind::Fill, "Fill (F)").clicked() {
+                self.set_tool(ToolKind::Fill);
+            }
+            if ui
+                .selectable_label(self.tool_kind == ToolKind::Rectangle, "Rectangle (R)")
+                .clicked()
+            {
+                self.set_tool(ToolKind::Rectangle);
+            }
+            if ui.selectable_label(self.tool_kind == ToolKind::Line, "Line (L)").clicked() {
+                self.set_tool(ToolKind::Line);
+            }
+            if ui
+                .selectable_label(self.tool_kind == ToolKind::Selection, "Selection (S)")
+                .clicked()
+            {
+                self.set_tool(ToolKind::Selection);
+            }
             ui.separator();
 
             if ui.add_enabled(self.history.can_undo(), egui::Button::new("Undo")).clicked() {
@@ -342,10 +469,11 @@ impl GasciiApp {
                 self.export_text_file();
             }
             if ui.button("Copy as Text").clicked() {
-                // Flush first: a pending text burst lives only in `self.tool`'s overlay until
-                // committed into `self.doc` — copying without flushing would silently drop the
-                // just-typed, uncommitted characters from the clipboard contents.
-                self.flush_text_tool();
+                // Flush first: a pending text burst or floating selection lives only in
+                // `self.tool`'s overlay until committed into `self.doc` — copying without
+                // flushing would silently drop just-typed or just-moved content from the whole-
+                // document clipboard contents.
+                self.flush_active_tool();
                 ui.ctx().copy_text(export_text(&self.doc));
             }
         });
@@ -361,16 +489,13 @@ impl GasciiApp {
         match std::fs::read_to_string(&path) {
             Ok(contents) => match load_str(&contents) {
                 Ok(doc) => {
-                    // Cancel, not flush: the old `self.doc` this burst's `before` values were
-                    // pinned against is about to be discarded, so committing into it is pointless
-                    // — and carrying the same `TextTool` instance (and `text_editing`) forward
-                    // would let it later graft edits, and stale pre-edit `before` values on
-                    // Undo, from the discarded document onto the newly loaded one. Only relevant
-                    // in Text mode; other tools have no cross-frame pending state to strand.
-                    if self.tool_kind == ToolKind::Text {
-                        self.tool = Box::new(TextTool::new());
-                    }
-                    self.text_editing = false;
+                    // Cancel, not flush: the old `self.doc` the active tool's pending burst/float
+                    // `before` values were pinned against is about to be discarded, so committing
+                    // into it is pointless — and carrying the same tool instance (and
+                    // `text_editing`) forward would let it later graft edits, and stale pre-edit
+                    // `before` values on Undo, from the discarded document onto the newly loaded
+                    // one. Only Text and Selection have cross-frame pending state to strand.
+                    self.reset_cross_frame_tool();
                     self.doc = doc;
                     self.history = History::new();
                     self.current_path = Some(path);
@@ -384,9 +509,10 @@ impl GasciiApp {
 
     fn save_file(&mut self) {
         // Flush first: Save reads `self.doc` directly, which does not yet contain a pending text
-        // burst's just-typed characters until a commit trigger fires. Also covers the
-        // `save_file_as` delegation below (a no-op double-flush if already flushed).
-        self.flush_text_tool();
+        // burst's just-typed characters or a floating selection's move until a commit trigger
+        // fires. Also covers the `save_file_as` delegation below (a no-op double-flush if already
+        // flushed).
+        self.flush_active_tool();
         match self.current_path.clone() {
             Some(path) => self.write_gascii(&path),
             None => self.save_file_as(),
@@ -396,7 +522,7 @@ impl GasciiApp {
     fn save_file_as(&mut self) {
         // Flush first — see `save_file`'s comment. Also reachable directly via the "Save As"
         // toolbar button, not only through `save_file`'s delegation.
-        self.flush_text_tool();
+        self.flush_active_tool();
         let Some(path) = rfd::FileDialog::new().add_filter("GASCII", &["gascii"]).save_file() else {
             return;
         };
@@ -417,7 +543,7 @@ impl GasciiApp {
     /// for the native `.gascii` file.
     fn export_text_file(&mut self) {
         // Flush first — see `save_file`'s comment; export reads `self.doc` the same way save does.
-        self.flush_text_tool();
+        self.flush_active_tool();
         let Some(path) = rfd::FileDialog::new().add_filter("Text", &["txt"]).save_file() else {
             return;
         };
@@ -519,5 +645,28 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"new");
         assert!(!dir.join("out.gascii.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn cell(ch: char) -> gascii_core::Cell {
+        gascii_core::Cell { ch, fg: Rgba::WHITE, bg: Rgba::TRANSPARENT }
+    }
+
+    #[test]
+    fn paste_text_matching_the_internal_clipboards_own_flattening_is_recognized_as_own() {
+        let patch = CellPatch { width: 2, height: 1, cells: vec![cell('a'), cell('b')] };
+        let text = patch.to_text();
+        assert!(is_own_clipboard_text(&text, Some(&patch)));
+    }
+
+    #[test]
+    fn paste_text_differing_from_the_internal_clipboard_is_treated_as_external() {
+        let patch = CellPatch { width: 2, height: 1, cells: vec![cell('a'), cell('b')] };
+        assert!(!is_own_clipboard_text("something else entirely", Some(&patch)));
+    }
+
+    #[test]
+    fn paste_text_with_no_internal_clipboard_is_always_external() {
+        assert!(!is_own_clipboard_text("anything", None));
+        assert!(!is_own_clipboard_text("", None));
     }
 }

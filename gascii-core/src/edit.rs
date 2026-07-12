@@ -263,7 +263,7 @@ mod tests {
         assert!(history.can_redo(), "undo must populate the redo stack");
 
         // Simulate "flush a pending edit right before redo": a second, unrelated apply() call
-        // (standing in for flush_text_tool's own History::apply) fires here.
+        // (standing in for flush_active_tool's own History::apply) fires here.
         let edit2 = Edit::Cells(vec![CellEdit {
             layer: 0,
             x: 1,

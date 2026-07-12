@@ -3,15 +3,24 @@
 //! an overlay and hand a finished `Edit` to the caller on release.
 
 mod eraser;
+mod fill;
+mod line;
 mod pencil;
+mod rect;
+mod select;
 mod text;
 
 pub use eraser::Eraser;
+pub use fill::FloodFill;
+pub use line::Line;
 pub use pencil::Pencil;
+pub use rect::Rectangle;
+pub use select::SelectionTool;
 pub use text::TextTool;
 
 use std::collections::HashSet;
 
+use crate::clipboard::CellPatch;
 use crate::edit::{CellEdit, Edit};
 use crate::model::{Cell, Document, Rgba};
 
@@ -81,6 +90,51 @@ pub enum ToolEvent {
     /// Finalize whatever is pending into one `Edit` now; the tool stays active/ready for more
     /// input. Distinct from `Release` (pointer-up) and `Cancel` (discard).
     Commit,
+    /// Clear the active selection/float to Blank. Only `SelectionTool` gives this meaning; other
+    /// tools ignore it like any other irrelevant event.
+    Delete,
+}
+
+/// Inclusive cell rectangle (`x0..=x1`, `y0..=y1`), normalized so `x0<=x1` and `y0<=y1`. Shared by
+/// `SelectionTool`, the renderer's selection overlay, and `CellPatch::from_region`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CellRect {
+    pub x0: u16,
+    pub y0: u16,
+    pub x1: u16,
+    pub y1: u16,
+}
+
+impl CellRect {
+    pub fn from_corners(a: (u16, u16), b: (u16, u16)) -> CellRect {
+        CellRect {
+            x0: a.0.min(b.0),
+            y0: a.1.min(b.1),
+            x1: a.0.max(b.0),
+            y1: a.1.max(b.1),
+        }
+    }
+
+    pub fn contains(&self, x: u16, y: u16) -> bool {
+        x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1
+    }
+
+    pub fn width(&self) -> u16 {
+        self.x1 - self.x0 + 1
+    }
+
+    pub fn height(&self) -> u16 {
+        self.y1 - self.y0 + 1
+    }
+}
+
+/// What the renderer needs beyond `pending` to draw a selection: the marquee outline (current
+/// selection rect, or the floating stamp's current position while one is floating) and the
+/// lifted-source region to paint as vacated background while a stamp floats over it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SelectionView {
+    pub marquee: Option<CellRect>,
+    pub lifted_source: Option<CellRect>,
 }
 
 /// One overlay cell: already the masked *result* cell (what the user will actually get), not the
@@ -108,6 +162,31 @@ pub trait Tool {
     /// (its burst spans multiple frames while idle, unlike `FreehandStroke`, which commits
     /// atomically on release), so it's the only implementor that needs to override this.
     fn resync(&mut self, _doc: &Document, _layer: usize) {}
+    /// Inject a floating stamp (paste) at `at`. Default no-op; only `SelectionTool` overrides it —
+    /// mirrors `resync`'s precedent of a default-no-op hook taking non-`Copy` args that serves a
+    /// single implementor.
+    fn accept_stamp(&mut self, _patch: CellPatch, _at: (u16, u16), _doc: &Document) {}
+    /// Marquee and lifted-source rects for the renderer's selection overlay. Default `None`; only
+    /// `SelectionTool` overrides it.
+    fn selection_overlay(&self) -> Option<SelectionView> {
+        None
+    }
+}
+
+/// Converts a set of overlay cells into a committed `Edit`, dropping any cell whose masked result
+/// already matches the document (so a no-op gesture yields no empty undo entry). Shared by every
+/// tool whose commit is "diff the pending overlay against the current document" — fill,
+/// rectangle, line.
+pub(crate) fn diff_pending(pending: &[PendingCell], doc: &Document, layer: usize) -> Option<Edit> {
+    let mut cell_edits = Vec::with_capacity(pending.len());
+    for p in pending {
+        let before = doc.cell(layer, p.x, p.y).copied().unwrap_or(Cell::BLANK);
+        if before == p.cell {
+            continue;
+        }
+        cell_edits.push(CellEdit { layer, x: p.x, y: p.y, before, after: p.cell });
+    }
+    (!cell_edits.is_empty()).then_some(Edit::Cells(cell_edits))
 }
 
 /// Interpolates cell coordinates from `a` to `b` inclusive, 8-connected, so fast drags don't skip
