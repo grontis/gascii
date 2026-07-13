@@ -23,11 +23,11 @@ impl Tool for Pencil {
         let proposed = Cell { ch: ctx.glyph, fg: ctx.fg, bg: ctx.bg };
         match ev {
             ToolEvent::Press { x, y } => {
-                self.stroke.press(x, y, proposed, ctx.mask, doc, ctx.layer);
+                self.stroke.press(x, y, proposed, ctx, doc);
                 ToolResponse::Active
             }
             ToolEvent::Drag { x, y } => {
-                self.stroke.drag(x, y, proposed, ctx.mask, doc, ctx.layer);
+                self.stroke.drag(x, y, proposed, ctx, doc);
                 ToolResponse::Active
             }
             ToolEvent::Release => ToolResponse::Commit(self.stroke.finish(doc, ctx.layer)),
@@ -59,6 +59,8 @@ mod tests {
             mask,
             density: crate::brush::DensityMode::Fixed(crate::brush::Fixed(1.0)),
             ramp: Vec::new(),
+            size: 1,
+            shape: crate::tools::BrushShape::Square,
         }
     }
 
@@ -211,6 +213,36 @@ mod tests {
             assert!(matches!(resp, ToolResponse::Active));
             assert_eq!(pencil.pending(), pending_before.as_slice());
         }
+    }
+
+    #[test]
+    fn sized_press_stamps_the_full_footprint() {
+        let doc = Document::new(20, 20);
+        let mut pencil = Pencil::new();
+        let mut tctx = ctx(PlaneMask::ALL);
+        tctx.size = 3;
+        pencil.update(ToolEvent::Press { x: 5, y: 5 }, &tctx, &doc);
+        let resp = pencil.update(ToolEvent::Release, &tctx, &doc);
+
+        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
+            panic!("expected a committed edit");
+        };
+        assert_eq!(cells.len(), 9, "size-3 square press covers the 3x3 box");
+    }
+
+    #[test]
+    fn sized_stroke_clips_at_the_document_edge() {
+        let doc = Document::new(20, 20);
+        let mut pencil = Pencil::new();
+        let mut tctx = ctx(PlaneMask::ALL);
+        tctx.size = 3;
+        pencil.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &doc);
+        let resp = pencil.update(ToolEvent::Release, &tctx, &doc);
+
+        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
+            panic!("expected a committed edit");
+        };
+        assert_eq!(cells.len(), 4, "corner press keeps only the in-bounds quadrant");
     }
 
     #[test]

@@ -6,7 +6,9 @@
 
 use std::time::Instant;
 
-use super::{line_cells, FreehandStroke, PendingCell, Tool, ToolCtx, ToolEvent, ToolResponse};
+use std::collections::HashSet;
+
+use super::{footprint, line_cells, FreehandStroke, PendingCell, Tool, ToolCtx, ToolEvent, ToolResponse};
 use crate::brush::{intensity_to_index, DensityMode, IntensitySource, StrokeSample};
 use crate::model::{Cell, Document};
 
@@ -14,12 +16,24 @@ pub struct DensityBrush {
     stroke: FreehandStroke,
     last: Option<(u16, u16)>,
     buf: Vec<(u16, u16)>,
+    fp: Vec<(u16, u16)>,
+    /// Cells covered by the previous path step's footprint. Consecutive footprints along a drag
+    /// overlap almost entirely; without masking that overlap out, every path step would
+    /// re-advance the shared cells and a size-N Buildup drag would saturate the ramp in one pass.
+    prev_fp: HashSet<(u16, u16)>,
     started: Option<Instant>,
 }
 
 impl Default for DensityBrush {
     fn default() -> Self {
-        DensityBrush { stroke: FreehandStroke::new(), last: None, buf: Vec::new(), started: None }
+        DensityBrush {
+            stroke: FreehandStroke::new(),
+            last: None,
+            buf: Vec::new(),
+            fp: Vec::new(),
+            prev_fp: HashSet::new(),
+            started: None,
+        }
     }
 }
 
@@ -28,21 +42,37 @@ impl DensityBrush {
         Self::default()
     }
 
+    /// Stamps the footprint around `(x, y)`, sampling intensity per covered cell (each cell has
+    /// its own current ramp index). A cell is stamped only when the footprint newly enters it —
+    /// cells still covered from the previous path step are skipped, preserving Buildup's
+    /// one-step-per-pass feel at every size. A cell the brush leaves and re-enters counts as a
+    /// genuine revisit and advances again, matching the size-1 backtracking behavior.
     fn stamp_cell(&mut self, x: u16, y: u16, ctx: &ToolCtx, doc: &Document) {
         let timing = self.started.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0);
-        let current = self.stroke.current(x, y, doc, ctx.layer);
-        let current_ramp_index = ctx.ramp.iter().position(|&c| c == current.ch);
-        let sample = StrokeSample { position: (x, y), timing, current_ramp_index, ramp_len: ctx.ramp.len() };
+        let mut fp = std::mem::take(&mut self.fp);
+        footprint((x, y), ctx.size, ctx.shape, &mut fp);
+        for &(fx, fy) in fp.iter() {
+            if self.prev_fp.contains(&(fx, fy)) {
+                continue;
+            }
+            let current = self.stroke.current(fx, fy, doc, ctx.layer);
+            let current_ramp_index = ctx.ramp.iter().position(|&c| c == current.ch);
+            let sample =
+                StrokeSample { position: (fx, fy), timing, current_ramp_index, ramp_len: ctx.ramp.len() };
 
-        let mut density = ctx.density; // Copy — a local mutable copy is fine for &mut self.sample
-        let intensity = match &mut density {
-            DensityMode::Fixed(f) => f.sample(&sample),
-            DensityMode::Buildup(b) => b.sample(&sample),
-        };
-        let idx = intensity_to_index(intensity, ctx.ramp.len());
-        let ch = ctx.ramp.get(idx).copied().unwrap_or(ctx.glyph); // defensive: empty-ramp fallback
-        let proposed = Cell { ch, fg: ctx.fg, bg: ctx.bg };
-        self.stroke.stamp(x, y, proposed, ctx.mask, doc, ctx.layer);
+            let mut density = ctx.density; // Copy — a local mutable copy is fine for &mut self.sample
+            let intensity = match &mut density {
+                DensityMode::Fixed(f) => f.sample(&sample),
+                DensityMode::Buildup(b) => b.sample(&sample),
+            };
+            let idx = intensity_to_index(intensity, ctx.ramp.len());
+            let ch = ctx.ramp.get(idx).copied().unwrap_or(ctx.glyph); // defensive: empty-ramp fallback
+            let proposed = Cell { ch, fg: ctx.fg, bg: ctx.bg };
+            self.stroke.stamp(fx, fy, proposed, ctx.mask, doc, ctx.layer);
+        }
+        self.prev_fp.clear();
+        self.prev_fp.extend(fp.iter().copied());
+        self.fp = fp;
     }
 }
 
@@ -51,6 +81,7 @@ impl Tool for DensityBrush {
         match ev {
             ToolEvent::Press { x, y } => {
                 self.stroke.begin();
+                self.prev_fp.clear();
                 self.started = Some(Instant::now());
                 self.stamp_cell(x, y, ctx, doc);
                 self.last = Some((x, y));
@@ -74,12 +105,14 @@ impl Tool for DensityBrush {
             ToolEvent::Release => {
                 let edit = self.stroke.finish(doc, ctx.layer);
                 self.last = None;
+                self.prev_fp.clear();
                 self.started = None;
                 ToolResponse::Commit(edit)
             }
             ToolEvent::Cancel => {
                 self.stroke.cancel();
                 self.last = None;
+                self.prev_fp.clear();
                 self.started = None;
                 ToolResponse::Idle
             }
@@ -108,6 +141,8 @@ mod tests {
             mask: PlaneMask::ALL,
             density,
             ramp: ramp.chars().collect(),
+            size: 1,
+            shape: crate::tools::BrushShape::Square,
         }
     }
 
@@ -215,6 +250,46 @@ mod tests {
         let resp = brush2.update(ToolEvent::Release, &tctx, &doc);
         apply(&mut doc, resp);
         assert_eq!(ch_at(&doc, 2, 2), 'c', "a fresh stroke must continue from the doc's current step");
+    }
+
+    #[test]
+    fn wide_buildup_drag_advances_each_covered_cell_exactly_once_per_pass() {
+        let mut doc = Document::new(20, 20);
+        let mut tctx = ctx(DensityMode::Buildup(Buildup), "abcd");
+        tctx.size = 3;
+        let mut brush = DensityBrush::new();
+        brush.update(ToolEvent::Press { x: 2, y: 2 }, &tctx, &doc);
+        for x in 3..=8u16 {
+            brush.update(ToolEvent::Drag { x, y: 2 }, &tctx, &doc);
+        }
+        let resp = brush.update(ToolEvent::Release, &tctx, &doc);
+        apply(&mut doc, resp);
+        // Consecutive footprints overlap 6 of 9 cells; only newly entered cells advance, so one
+        // straight pass leaves the whole swept band at step 0 — never saturated.
+        for y in 1..=3u16 {
+            for x in 1..=9u16 {
+                assert_eq!(ch_at(&doc, x, y), 'a', "cell ({x},{y}) must advance exactly once");
+            }
+        }
+    }
+
+    #[test]
+    fn wide_buildup_reentry_after_leaving_advances_again() {
+        let mut doc = Document::new(30, 30);
+        let mut tctx = ctx(DensityMode::Buildup(Buildup), "abcd");
+        tctx.size = 3;
+        let mut brush = DensityBrush::new();
+        // Out and far enough back that the start cell leaves the footprint before re-entry.
+        brush.update(ToolEvent::Press { x: 2, y: 2 }, &tctx, &doc);
+        for x in 3..=10u16 {
+            brush.update(ToolEvent::Drag { x, y: 2 }, &tctx, &doc);
+        }
+        for x in (2..=9u16).rev() {
+            brush.update(ToolEvent::Drag { x, y: 2 }, &tctx, &doc);
+        }
+        let resp = brush.update(ToolEvent::Release, &tctx, &doc);
+        apply(&mut doc, resp);
+        assert_eq!(ch_at(&doc, 2, 2), 'b', "left and re-entered: advances a second time");
     }
 
     #[test]

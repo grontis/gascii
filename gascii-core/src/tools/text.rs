@@ -160,6 +160,10 @@ impl Tool for TextTool {
     fn resync(&mut self, doc: &Document, layer: usize) {
         self.burst.resync(doc, layer);
     }
+
+    fn caret(&self) -> Option<(u16, u16)> {
+        self.cursor
+    }
 }
 
 #[cfg(test)]
@@ -176,6 +180,8 @@ mod tests {
             mask,
             density: crate::brush::DensityMode::Fixed(crate::brush::Fixed(1.0)),
             ramp: Vec::new(),
+            size: 1,
+            shape: crate::tools::BrushShape::Square,
         }
     }
 
@@ -371,6 +377,22 @@ mod tests {
         assert_eq!(second_cells.len(), 1);
         assert_eq!((second_cells[0].x, second_cells[0].y), (1, 0));
         assert_eq!(second_cells[0].after.ch, 'b');
+    }
+
+    #[test]
+    fn caret_tracks_the_cursor_through_a_session_and_clears_on_cancel() {
+        let doc = Document::new(20, 20);
+        let mut tool = TextTool::new();
+        let tctx = ctx(PlaneMask::ALL);
+        assert_eq!(tool.caret(), None, "no caret before the first click");
+        tool.update(ToolEvent::Press { x: 5, y: 5 }, &tctx, &doc);
+        assert_eq!(tool.caret(), Some((5, 5)));
+        tool.update(ToolEvent::Char('a'), &tctx, &doc);
+        assert_eq!(tool.caret(), Some((6, 5)), "caret advances with typing");
+        tool.update(ToolEvent::Enter, &tctx, &doc);
+        assert_eq!(tool.caret(), Some((5, 6)), "Enter returns to the anchor column");
+        tool.update(ToolEvent::Cancel, &tctx, &doc);
+        assert_eq!(tool.caret(), None, "cancel clears the caret");
     }
 
     #[test]

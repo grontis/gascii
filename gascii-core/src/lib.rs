@@ -25,7 +25,7 @@ pub use join::{arms_of, char_of, join as join_arms, ArmSet};
 pub use model::{Cell, DocExtent, DocSettings, Document, Layer, Rgba};
 pub use palette::{allowed_in, builtin_pages, page_available, validate_width, EntryReject, Page, WidthReject};
 pub use tools::{
-    eyedrop, line_cells, mask_apply, CellRect, DensityBrush, Direction, Eraser, FloodFill, Line,
-    Pencil, PendingCell, PlaneMask, Rectangle, SelectionTool, SelectionView, TextTool, Tool,
-    ToolCtx, ToolEvent, ToolResponse,
+    eyedrop, footprint, line_cells, mask_apply, BrushShape, CellRect, DensityBrush, Direction,
+    Eraser, FloodFill, Line, Pencil, PendingCell, PlaneMask, Rectangle, SelectionTool,
+    SelectionView, TextTool, Tool, ToolCtx, ToolEvent, ToolResponse, MAX_TOOL_SIZE,
 };

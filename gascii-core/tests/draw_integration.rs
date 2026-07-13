@@ -6,13 +6,13 @@
 use std::collections::HashSet;
 
 use gascii_core::{
-    builtin_pages, line_cells, validate_width, Cell, CellEdit, DensityMode, Document, Edit,
+    builtin_pages, line_cells, validate_width, BrushShape, Cell, CellEdit, DensityMode, Document, Edit,
     Eraser, Fixed, History, Pencil, PlaneMask, Rgba, TextTool, Tool, ToolCtx, ToolEvent,
     ToolResponse,
 };
 
 fn ctx(mask: PlaneMask, glyph: char, fg: Rgba, bg: Rgba) -> ToolCtx {
-    ToolCtx { layer: 0, glyph, fg, bg, mask, density: DensityMode::Fixed(Fixed(1.0)), ramp: Vec::new() }
+    ToolCtx { layer: 0, glyph, fg, bg, mask, density: DensityMode::Fixed(Fixed(1.0)), ramp: Vec::new(), size: 1, shape: BrushShape::Square }
 }
 
 /// Drives a full press -> drag(...) -> release gesture through `tool`, committing the result (if

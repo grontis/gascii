@@ -286,6 +286,8 @@ mod tests {
             mask: PlaneMask::ALL,
             density: crate::brush::DensityMode::Fixed(crate::brush::Fixed(1.0)),
             ramp: Vec::new(),
+            size: 1,
+            shape: crate::tools::BrushShape::Square,
         }
     }
 

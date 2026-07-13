@@ -4,9 +4,9 @@ use std::time::Instant;
 use eframe::egui;
 use gascii_core::{
     builtin_pages, builtin_ramps, export_text, load_str, page_available, resize_document,
-    save_string, Buildup, CellPatch, DensityBrush, DensityMode, Document, EntryReject, Eraser,
-    Fixed, FloodFill, History, Line, Page, Pencil, PlaneMask, Ramp, Rectangle, ResizeError, Rgba,
-    SelectionTool, TextTool, Tool, ToolEvent, ToolResponse, WidthReject,
+    save_string, BrushShape, Buildup, CellPatch, DensityBrush, DensityMode, Document, EntryReject,
+    Eraser, Fixed, FloodFill, History, Line, Page, Pencil, PlaneMask, Ramp, Rectangle, ResizeError,
+    Rgba, SelectionTool, TextTool, Tool, ToolEvent, ToolResponse, WidthReject, MAX_TOOL_SIZE,
 };
 
 use crate::canvas::{self, CanvasRenderer, NaiveRenderer};
@@ -47,6 +47,18 @@ fn color32(c: Rgba) -> egui::Color32 {
 /// without constructing a full `GasciiApp`.
 fn is_own_clipboard_text(text: &str, internal: Option<&CellPatch>) -> bool {
     internal.is_some_and(|p| p.to_text() == text)
+}
+
+/// Size drag-value + Square/Circle picker for one `StampSettings`. Appears twice in the tool row
+/// (active tool and right-click tool), hence the `id_salt` scope.
+fn stamp_controls(ui: &mut egui::Ui, stamp: &mut StampSettings, id_salt: &str, hover: &str) {
+    ui.push_id(id_salt, |ui| {
+        ui.label("Size");
+        ui.add(egui::DragValue::new(&mut stamp.size).range(1..=MAX_TOOL_SIZE))
+            .on_hover_text(hover);
+        ui.selectable_value(&mut stamp.shape, BrushShape::Square, "Square");
+        ui.selectable_value(&mut stamp.shape, BrushShape::Circle, "Circle");
+    });
 }
 
 /// A clickable color swatch; clicking opens a popup with ANSI-16 presets plus a full truecolor
@@ -96,10 +108,72 @@ pub(crate) enum ToolKind {
     Brush,
 }
 
+/// Footprint settings one sized tool remembers: its stamp width and shape. Every sized tool —
+/// and every right-click tool option — keeps its own copy, so switching tools never drags a
+/// surprising size along.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct StampSettings {
+    pub size: u16,
+    pub shape: BrushShape,
+}
+
+impl Default for StampSettings {
+    fn default() -> Self {
+        StampSettings { size: 1, shape: BrushShape::Square }
+    }
+}
+
+/// Slot in `GasciiApp::tool_stamps` for a sized tool; `None` for tools without a footprint.
+pub(crate) fn sized_slot(kind: ToolKind) -> Option<usize> {
+    match kind {
+        ToolKind::Pencil => Some(0),
+        ToolKind::Eraser => Some(1),
+        ToolKind::Line => Some(2),
+        ToolKind::Brush => Some(3),
+        _ => None,
+    }
+}
+
+/// Number of sized tools — `tool_stamps`' length.
+pub(crate) const SIZED_TOOL_COUNT: usize = 4;
+
+/// Tools whose stamp obeys the size/shape footprint controls.
+pub(crate) fn tool_is_sized(kind: ToolKind) -> bool {
+    sized_slot(kind).is_some()
+}
+
+/// Tools that get a hover marker previewing exactly which cell(s) their next application lands
+/// on. Selection is excluded — its press starts a marquee/move gesture, not a cell stamp, and a
+/// stamp-shaped marker would promise the wrong semantics.
+pub(crate) fn tool_shows_hover(kind: ToolKind) -> bool {
+    !matches!(kind, ToolKind::Selection)
+}
+
+/// One entry of `STROKE_TOOLS`: kind, display name, and constructor in a single row, so the
+/// three can never drift apart.
+pub(crate) struct StrokeTool {
+    pub kind: ToolKind,
+    pub name: &'static str,
+    pub make: fn() -> Box<dyn Tool>,
+}
+
+/// The plain pointer-stroke tools — the single source of truth for their names and constructors,
+/// used by `set_tool` and by the right-click selector (index 0, Eraser, is the right-click
+/// default). All qualify for right-click driving because their `Press` never returns an edit, so
+/// the generic press/drag/release lifecycle fits every one of them. Text/Selection/Eyedropper
+/// need bespoke routing and stay primary-button-only.
+pub(crate) const STROKE_TOOLS: [StrokeTool; 6] = [
+    StrokeTool { kind: ToolKind::Eraser, name: "Eraser", make: || Box::new(Eraser::new()) },
+    StrokeTool { kind: ToolKind::Pencil, name: "Pencil", make: || Box::new(Pencil::new()) },
+    StrokeTool { kind: ToolKind::Fill, name: "Fill", make: || Box::new(FloodFill::new()) },
+    StrokeTool { kind: ToolKind::Line, name: "Line", make: || Box::new(Line::new()) },
+    StrokeTool { kind: ToolKind::Rectangle, name: "Rectangle", make: || Box::new(Rectangle::new()) },
+    StrokeTool { kind: ToolKind::Brush, name: "Brush", make: || Box::new(DensityBrush::new()) },
+];
+
 pub struct GasciiApp {
     pub(crate) doc: Document,
     pub(crate) viewport: Viewport,
-    pub(crate) cursor: (u16, u16),
     pub(crate) hovered_cell: Option<(u16, u16)>,
     pub(crate) renderer: Box<dyn CanvasRenderer>,
     pub(crate) pending_fit: bool,
@@ -110,6 +184,20 @@ pub struct GasciiApp {
     pub(crate) mask: PlaneMask,
     pub(crate) tool_kind: ToolKind,
     pub(crate) tool: Box<dyn Tool>,
+    /// Per-tool footprint settings for the sized primary tools, indexed by `sized_slot` — each
+    /// tool remembers its own size/shape across switches.
+    pub(crate) tool_stamps: [StampSettings; SIZED_TOOL_COUNT],
+    /// Per-option footprint settings for the right-click tool, indexed like `right_click_tool`.
+    /// Fully independent of `tool_stamps`: sizing the right-click Eraser never resizes the
+    /// primary Eraser, and vice versa.
+    pub(crate) rc_stamps: [StampSettings; STROKE_TOOLS.len()],
+    /// Index into `STROKE_TOOLS`: what a secondary-button stroke draws with. An index (not a
+    /// `ToolKind`) so a non-stroke kind is unrepresentable here by construction.
+    pub(crate) right_click_tool: usize,
+    /// The transient tool instance a secondary-button stroke drives, `Some` only while that
+    /// stroke is in flight. `self.tool` (and any pending text burst or floating selection) stays
+    /// untouched underneath it.
+    pub(crate) rc_tool: Option<Box<dyn Tool>>,
     pub(crate) stroke_active: bool,
     pub(crate) space_pan_active: bool,
     /// True once `TextTool` has an active click-placed cursor — gates every single-letter
@@ -146,7 +234,6 @@ impl GasciiApp {
         Self {
             doc: Document::default_document(),
             viewport: Viewport::default(),
-            cursor: (0, 0),
             hovered_cell: None,
             renderer: Box::new(NaiveRenderer),
             pending_fit: false,
@@ -157,6 +244,10 @@ impl GasciiApp {
             mask: PlaneMask::default(),
             tool_kind: ToolKind::Pencil,
             tool: Box::new(Pencil::new()),
+            tool_stamps: [StampSettings::default(); SIZED_TOOL_COUNT],
+            rc_stamps: [StampSettings::default(); STROKE_TOOLS.len()],
+            right_click_tool: 0, // STROKE_TOOLS[0]: Eraser
+            rc_tool: None,
             stroke_active: false,
             space_pan_active: false,
             text_editing: false,
@@ -179,10 +270,36 @@ impl GasciiApp {
         }
     }
 
+    /// Whether any pointer gesture — primary stroke or right-click stroke — currently owns the
+    /// canvas.
+    pub(crate) fn stroke_in_progress(&self) -> bool {
+        self.stroke_active || self.rc_tool.is_some()
+    }
+
+    /// The `STROKE_TOOLS` entry the right-click gesture draws with. The min-clamp is pure
+    /// robustness — only the selector combo writes the index, always in range.
+    pub(crate) fn right_click_entry(&self) -> &'static StrokeTool {
+        &STROKE_TOOLS[self.rc_index()]
+    }
+
+    fn rc_index(&self) -> usize {
+        self.right_click_tool.min(STROKE_TOOLS.len() - 1)
+    }
+
+    /// The active tool's own footprint settings (the identity default for unsized tools).
+    pub(crate) fn active_stamp(&self) -> StampSettings {
+        sized_slot(self.tool_kind).map(|i| self.tool_stamps[i]).unwrap_or_default()
+    }
+
+    /// The right-click tool's own footprint settings — independent of the primary tools'.
+    pub(crate) fn rc_stamp(&self) -> StampSettings {
+        self.rc_stamps[self.rc_index()]
+    }
+
     /// Rebuilds `self.tool` for the new kind. A no-op while a stroke is active: the pointer is
     /// captured by the in-progress gesture, so tool switching is suppressed mid-stroke.
     fn set_tool(&mut self, kind: ToolKind) {
-        if self.stroke_active {
+        if self.stroke_in_progress() {
             return;
         }
         // Flush whenever we're leaving a cross-frame tool's (Text or Selection) session behind —
@@ -195,17 +312,18 @@ impl GasciiApp {
         }
         self.tool_kind = kind;
         match kind {
-            ToolKind::Pencil => self.tool = Box::new(Pencil::new()),
-            ToolKind::Eraser => self.tool = Box::new(Eraser::new()),
             // No Tool object needed: canvas.rs branches around `self.tool` entirely in
             // Eyedropper mode (it produces no Edit).
             ToolKind::Eyedropper => {}
             ToolKind::Text => self.tool = Box::new(TextTool::new()),
-            ToolKind::Fill => self.tool = Box::new(FloodFill::new()),
-            ToolKind::Rectangle => self.tool = Box::new(Rectangle::new()),
-            ToolKind::Line => self.tool = Box::new(Line::new()),
             ToolKind::Selection => self.tool = Box::new(SelectionTool::new()),
-            ToolKind::Brush => self.tool = Box::new(DensityBrush::new()),
+            // Every remaining kind is a stroke tool; `stroke_tools_cover_every_stroke_kind`
+            // pins that the lookup can't miss.
+            _ => {
+                if let Some(entry) = STROKE_TOOLS.iter().find(|e| e.kind == kind) {
+                    self.tool = (entry.make)();
+                }
+            }
         }
         self.text_editing = false;
     }
@@ -294,7 +412,7 @@ impl GasciiApp {
     /// width-validated per character. Either way, the result lands as a floating Selection stamp
     /// anchored at the hovered cell (or the origin if nothing is hovered).
     pub(crate) fn paste_text(&mut self, text: &str) {
-        if self.stroke_active {
+        if self.stroke_in_progress() {
             // Another tool's pointer gesture (drag) owns the canvas right now. `set_tool` below
             // would refuse to switch to Selection while `stroke_active` is true, silently leaving
             // whatever tool is mid-gesture active — landing the pasted stamp on `accept_stamp`
@@ -334,6 +452,10 @@ impl GasciiApp {
             ToolKind::Selection => self.tool = Box::new(SelectionTool::new()),
             _ => {}
         }
+        // A right-click stroke's pending cells are pinned against the doc being discarded too —
+        // drop the transient tool outright so a release after the swap can't graft the old
+        // document's stroke onto the new one.
+        self.rc_tool = None;
         self.text_editing = false;
     }
 
@@ -344,7 +466,7 @@ impl GasciiApp {
     /// text mode, doesn't get swallowed as a tool switch.
     fn handle_keys(&mut self, ui: &mut egui::Ui) {
         let focused = ui.memory(|m| m.focused().is_some()) || self.text_editing;
-        let (redo_shift, undo, redo_y, pencil, eraser, eyedropper, text, fill, rect, line, select, brush, copy) =
+        let (redo_shift, undo, redo_y, save, pencil, eraser, eyedropper, text, fill, rect, line, select, brush, copy) =
             ui.input_mut(|i| {
                 // Cmd/Ctrl+Shift+Z must be consumed before the plain Cmd/Ctrl+Z pattern, since
                 // `matches_logically` ignores extra Shift/Alt — checking undo first would swallow
@@ -352,6 +474,7 @@ impl GasciiApp {
                 let redo_shift = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z);
                 let undo = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
                 let redo_y = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y);
+                let save = i.consume_key(egui::Modifiers::COMMAND, egui::Key::S);
                 let pencil = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::P);
                 let eraser = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::E);
                 let eyedropper = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::I);
@@ -362,13 +485,21 @@ impl GasciiApp {
                 let select = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::S);
                 let brush = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::B);
                 let copy = i.consume_key(egui::Modifiers::COMMAND, egui::Key::C);
-                (redo_shift, undo, redo_y, pencil, eraser, eyedropper, text, fill, rect, line, select, brush, copy)
+                (redo_shift, undo, redo_y, save, pencil, eraser, eyedropper, text, fill, rect, line, select, brush, copy)
             });
 
-        if redo_shift || redo_y {
-            self.request_redo();
-        } else if undo {
-            self.request_undo();
+        // Undo/redo mid-pointer-gesture would mutate the document under the stroke's pinned
+        // `before` values — the eventual commit would write stale planes back over the undone
+        // state. Ignored until the gesture ends; the menu items disable themselves the same way.
+        if !self.stroke_in_progress() {
+            if redo_shift || redo_y {
+                self.request_redo();
+            } else if undo {
+                self.request_undo();
+            }
+        }
+        if save {
+            self.save_file();
         }
         if pencil {
             self.set_tool(ToolKind::Pencil);
@@ -402,6 +533,26 @@ impl GasciiApp {
         }
         if self.tool_kind == ToolKind::Brush && !focused {
             self.handle_brush_intensity_keys(ui);
+        }
+        // `[`/`]` adjust the ACTIVE tool's own stamp. The right-click tool's stamp is
+        // deliberately not key-bound — it has its own control in the tool row, and one
+        // unambiguous key target beats a mode-dependent one.
+        if let Some(slot) = sized_slot(self.tool_kind) {
+            if !focused {
+                let (shrink, grow) = ui.input_mut(|i| {
+                    (
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::OpenBracket),
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::CloseBracket),
+                    )
+                });
+                let stamp = &mut self.tool_stamps[slot];
+                if shrink {
+                    stamp.size = stamp.size.saturating_sub(1).max(1);
+                }
+                if grow {
+                    stamp.size = (stamp.size + 1).min(MAX_TOOL_SIZE);
+                }
+            }
         }
     }
 
@@ -517,97 +668,135 @@ impl GasciiApp {
         }
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui) {
+    fn menu_bar(&mut self, ui: &mut egui::Ui) {
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                if ui.button("Open…").clicked() {
+                    self.open_file();
+                }
+                ui.separator();
+                if ui.add(egui::Button::new("Save").shortcut_text("Ctrl+S")).clicked() {
+                    self.save_file();
+                }
+                if ui.button("Save As…").clicked() {
+                    self.save_file_as();
+                }
+                ui.separator();
+                if ui.button("Export Text…").clicked() {
+                    self.export_text_file();
+                }
+                if ui.button("Export PNG…").clicked() {
+                    // Not the authoritative flush — harmless dialog-open convenience only. The
+                    // dialog is non-modal, so more edits can happen while it's open;
+                    // `export_png_file` (fired by the dialog's own "Export…" button) re-flushes
+                    // immediately before reading `self.doc`, which is the flush that matters.
+                    self.flush_active_tool();
+                    self.png_dialog_open = true;
+                }
+            });
+            ui.menu_button("Edit", |ui| {
+                // Disabled mid-gesture for the same reason handle_keys ignores Ctrl+Z/Y then:
+                // an undo under an in-flight stroke's pinned `before` values commits stale cells.
+                let no_stroke = !self.stroke_in_progress();
+                let undo = egui::Button::new("Undo").shortcut_text("Ctrl+Z");
+                if ui.add_enabled(self.history.can_undo() && no_stroke, undo).clicked() {
+                    self.request_undo();
+                }
+                let redo = egui::Button::new("Redo").shortcut_text("Ctrl+Y");
+                if ui.add_enabled(self.history.can_redo() && no_stroke, redo).clicked() {
+                    self.request_redo();
+                }
+                ui.separator();
+                let can_copy = self.tool_kind == ToolKind::Selection
+                    && self.tool.selection_overlay().and_then(|v| v.marquee).is_some();
+                let copy = egui::Button::new("Copy Selection").shortcut_text("Ctrl+C");
+                if ui.add_enabled(can_copy, copy).clicked() {
+                    self.copy_selection(ui.ctx());
+                }
+                if ui.button("Copy All as Text").clicked() {
+                    // Flush first: a pending text burst or floating selection lives only in
+                    // `self.tool`'s overlay until committed into `self.doc` — copying without
+                    // flushing would silently drop just-typed or just-moved content from the
+                    // whole-document clipboard contents.
+                    self.flush_active_tool();
+                    ui.ctx().copy_text(export_text(&self.doc));
+                }
+                ui.separator();
+                if ui.button("Resize Canvas…").clicked() {
+                    // Reads self.doc for the current extent, which a pending burst/float doesn't
+                    // change (extent is fixed regardless), but flushing keeps the dialog's initial
+                    // W/H consistent with whatever's about to be committed anyway.
+                    self.flush_active_tool();
+                    self.resize_w = self.doc.width;
+                    self.resize_h = self.doc.height;
+                    self.resize_dialog_open = true;
+                }
+            });
+            ui.menu_button("View", |ui| {
+                if ui.button("Fit to Window").clicked() {
+                    self.pending_fit = true;
+                }
+            });
+        });
+    }
+
+    fn tool_row(&mut self, ui: &mut egui::Ui) {
+        const TOOLS: [(ToolKind, &str, &str); 9] = [
+            (ToolKind::Pencil, "Pencil (P)", "Draw the active glyph"),
+            (ToolKind::Eraser, "Eraser (E)", "Erase cells to blank"),
+            (
+                ToolKind::Eyedropper,
+                "Eyedropper (I)",
+                "Click a cell to pick up its text and background colors",
+            ),
+            (ToolKind::Text, "Text (T)", "Click to place a cursor, then type"),
+            (ToolKind::Fill, "Fill (F)", "Flood-fill a connected region"),
+            (ToolKind::Rectangle, "Rectangle (R)", "Drag a box outline; joins box-drawing art"),
+            (ToolKind::Line, "Line (L)", "Drag a straight line; joins box-drawing art"),
+            (ToolKind::Selection, "Selection (S)", "Drag a region to move, copy, or delete"),
+            (ToolKind::Brush, "Brush (B)", "Paint density ramps"),
+        ];
         ui.horizontal(|ui| {
-            if ui.button("Fit to Window").clicked() {
-                self.pending_fit = true;
+            ui.label("Left Click Tool:");
+            for (kind, label, tip) in TOOLS {
+                if ui.selectable_label(self.tool_kind == kind, label).on_hover_text(tip).clicked() {
+                    self.set_tool(kind);
+                }
             }
             ui.separator();
 
-            if ui.selectable_label(self.tool_kind == ToolKind::Pencil, "Pencil (P)").clicked() {
-                self.set_tool(ToolKind::Pencil);
+            // The active tool's own footprint controls. Each sized tool remembers its own
+            // size/shape, so these always show and edit exactly the stamp the next primary
+            // stroke will use.
+            if let Some(slot) = sized_slot(self.tool_kind) {
+                stamp_controls(
+                    ui,
+                    &mut self.tool_stamps[slot],
+                    "salt_active",
+                    "Stamp width in cells for the active tool ([ and ] to adjust)",
+                );
+                ui.separator();
             }
-            if ui.selectable_label(self.tool_kind == ToolKind::Eraser, "Eraser (E)").clicked() {
-                self.set_tool(ToolKind::Eraser);
-            }
-            if ui
-                .selectable_label(self.tool_kind == ToolKind::Eyedropper, "Eyedropper (I)")
-                .clicked()
-            {
-                self.set_tool(ToolKind::Eyedropper);
-            }
-            if ui.selectable_label(self.tool_kind == ToolKind::Text, "Text (T)").clicked() {
-                self.set_tool(ToolKind::Text);
-            }
-            if ui.selectable_label(self.tool_kind == ToolKind::Fill, "Fill (F)").clicked() {
-                self.set_tool(ToolKind::Fill);
-            }
-            if ui
-                .selectable_label(self.tool_kind == ToolKind::Rectangle, "Rectangle (R)")
-                .clicked()
-            {
-                self.set_tool(ToolKind::Rectangle);
-            }
-            if ui.selectable_label(self.tool_kind == ToolKind::Line, "Line (L)").clicked() {
-                self.set_tool(ToolKind::Line);
-            }
-            if ui
-                .selectable_label(self.tool_kind == ToolKind::Selection, "Selection (S)")
-                .clicked()
-            {
-                self.set_tool(ToolKind::Selection);
-            }
-            if ui.selectable_label(self.tool_kind == ToolKind::Brush, "Brush (B)").clicked() {
-                self.set_tool(ToolKind::Brush);
-            }
-            ui.separator();
 
-            if ui.add_enabled(self.history.can_undo(), egui::Button::new("Undo")).clicked() {
-                self.request_undo();
-            }
-            if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo")).clicked() {
-                self.request_redo();
-            }
-            ui.separator();
-
-            if ui.button("Open").clicked() {
-                self.open_file();
-            }
-            if ui.button("Save").clicked() {
-                self.save_file();
-            }
-            if ui.button("Save As").clicked() {
-                self.save_file_as();
-            }
-            if ui.button("Export Text").clicked() {
-                self.export_text_file();
-            }
-            if ui.button("Copy as Text").clicked() {
-                // Flush first: a pending text burst or floating selection lives only in
-                // `self.tool`'s overlay until committed into `self.doc` — copying without
-                // flushing would silently drop just-typed or just-moved content from the whole-
-                // document clipboard contents.
-                self.flush_active_tool();
-                ui.ctx().copy_text(export_text(&self.doc));
-            }
-            ui.separator();
-
-            if ui.button("Resize…").clicked() {
-                // Reads self.doc for the current extent, which a pending burst/float doesn't
-                // change (extent is fixed regardless), but flushing keeps the dialog's initial
-                // W/H consistent with whatever's about to be committed anyway.
-                self.flush_active_tool();
-                self.resize_w = self.doc.width;
-                self.resize_h = self.doc.height;
-                self.resize_dialog_open = true;
-            }
-            if ui.button("Export PNG").clicked() {
-                // Not the authoritative flush — harmless dialog-open convenience only. The dialog
-                // is non-modal, so more edits can happen while it's open; `export_png_file` (fired
-                // by the dialog's own "Export…" button) re-flushes immediately before reading
-                // `self.doc`, which is the flush that actually matters.
-                self.flush_active_tool();
-                self.png_dialog_open = true;
+            ui.label("Right Click Tool:");
+            let rc_idx = self.right_click_tool.min(STROKE_TOOLS.len() - 1);
+            egui::ComboBox::from_id_salt("right_click_tool")
+                .selected_text(STROKE_TOOLS[rc_idx].name)
+                .show_ui(ui, |ui| {
+                    for (i, entry) in STROKE_TOOLS.iter().enumerate() {
+                        ui.selectable_value(&mut self.right_click_tool, i, entry.name);
+                    }
+                });
+            // The right-click tool's own footprint controls, independent of the primary tools' —
+            // visible whenever the right-click tool is sized, so a right-click stroke never
+            // draws with an invisible footprint.
+            if tool_is_sized(STROKE_TOOLS[rc_idx].kind) {
+                stamp_controls(
+                    ui,
+                    &mut self.rc_stamps[rc_idx],
+                    "salt_rc",
+                    "Stamp width in cells for the right-click tool",
+                );
             }
         });
     }
@@ -835,7 +1024,10 @@ impl eframe::App for GasciiApp {
         }
         self.handle_keys(ui);
 
-        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
+        egui::Panel::top("toolbar").show(ui, |ui| {
+            self.menu_bar(ui);
+            self.tool_row(ui);
+        });
         egui::Panel::left("palette").show(ui, |ui| self.palette_panel(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         egui::CentralPanel::default().show(ui, |ui| {
@@ -883,6 +1075,55 @@ mod tests {
 
     fn cell(ch: char) -> gascii_core::Cell {
         gascii_core::Cell { ch, fg: Rgba::WHITE, bg: Rgba::TRANSPARENT }
+    }
+
+    /// Pins the `sized_slot` mapping: sized kinds get distinct in-range slots, unsized get none —
+    /// a duplicated or out-of-range slot would silently alias two tools' stamp settings.
+    #[test]
+    fn sized_slots_are_distinct_and_in_range() {
+        let sized = [ToolKind::Pencil, ToolKind::Eraser, ToolKind::Line, ToolKind::Brush];
+        let mut seen = std::collections::HashSet::new();
+        for kind in sized {
+            let slot = sized_slot(kind).expect("sized kind must have a slot");
+            assert!(slot < SIZED_TOOL_COUNT);
+            assert!(seen.insert(slot), "slot {slot} assigned twice");
+        }
+        for kind in [
+            ToolKind::Eyedropper,
+            ToolKind::Text,
+            ToolKind::Fill,
+            ToolKind::Rectangle,
+            ToolKind::Selection,
+        ] {
+            assert_eq!(sized_slot(kind), None, "{kind:?} must not have a stamp slot");
+        }
+    }
+
+    /// Pins `set_tool`'s `_` arm: every ToolKind that isn't special-cased (Text/Selection/
+    /// Eyedropper) must have a STROKE_TOOLS entry, or selecting it would silently keep the old
+    /// tool. Also pins the right-click default at index 0.
+    #[test]
+    fn stroke_tools_cover_every_stroke_kind() {
+        let all = [
+            ToolKind::Pencil,
+            ToolKind::Eraser,
+            ToolKind::Eyedropper,
+            ToolKind::Text,
+            ToolKind::Fill,
+            ToolKind::Rectangle,
+            ToolKind::Line,
+            ToolKind::Selection,
+            ToolKind::Brush,
+        ];
+        for kind in all {
+            let special = matches!(kind, ToolKind::Text | ToolKind::Selection | ToolKind::Eyedropper);
+            assert_eq!(
+                STROKE_TOOLS.iter().any(|e| e.kind == kind),
+                !special,
+                "{kind:?} must appear in STROKE_TOOLS exactly when it isn't special-cased"
+            );
+        }
+        assert_eq!(STROKE_TOOLS[0].kind, ToolKind::Eraser, "right-click default");
     }
 
     #[test]

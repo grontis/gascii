@@ -5,12 +5,12 @@
 //! neither of those reaches: persistence interacting with the tool pipeline and undo history.
 
 use gascii_core::{
-    export_text, load_str, save_string, Cell, DensityMode, Document, DocSettings, Edit, Eraser,
+    export_text, load_str, save_string, BrushShape, Cell, DensityMode, Document, DocSettings, Edit, Eraser,
     Fixed, History, Pencil, PlaneMask, Rgba, TextTool, Tool, ToolCtx, ToolEvent, ToolResponse,
 };
 
 fn ctx(mask: PlaneMask, glyph: char, fg: Rgba, bg: Rgba) -> ToolCtx {
-    ToolCtx { layer: 0, glyph, fg, bg, mask, density: DensityMode::Fixed(Fixed(1.0)), ramp: Vec::new() }
+    ToolCtx { layer: 0, glyph, fg, bg, mask, density: DensityMode::Fixed(Fixed(1.0)), ramp: Vec::new(), size: 1, shape: BrushShape::Square }
 }
 
 fn stroke(tool: &mut dyn Tool, history: &mut History, doc: &mut Document, tctx: &ToolCtx, path: &[(u16, u16)]) {

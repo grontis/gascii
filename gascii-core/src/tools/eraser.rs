@@ -25,11 +25,11 @@ impl Tool for Eraser {
         let proposed = Cell::BLANK;
         match ev {
             ToolEvent::Press { x, y } => {
-                self.stroke.press(x, y, proposed, ctx.mask, doc, ctx.layer);
+                self.stroke.press(x, y, proposed, ctx, doc);
                 ToolResponse::Active
             }
             ToolEvent::Drag { x, y } => {
-                self.stroke.drag(x, y, proposed, ctx.mask, doc, ctx.layer);
+                self.stroke.drag(x, y, proposed, ctx, doc);
                 ToolResponse::Active
             }
             ToolEvent::Release => ToolResponse::Commit(self.stroke.finish(doc, ctx.layer)),
@@ -61,6 +61,8 @@ mod tests {
             mask,
             density: crate::brush::DensityMode::Fixed(crate::brush::Fixed(1.0)),
             ramp: Vec::new(),
+            size: 1,
+            shape: crate::tools::BrushShape::Square,
         }
     }
 

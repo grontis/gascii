@@ -5,13 +5,13 @@
 //! own unit tests reach. Complements the other `*_integration.rs` suites.
 
 use gascii_core::{
-    builtin_ramps, load_str, resize_document, save_string, Buildup, Cell, CellPatch, DensityBrush,
+    builtin_ramps, load_str, resize_document, save_string, BrushShape, Buildup, Cell, CellPatch, DensityBrush,
     DensityMode, Document, DocSettings, Edit, Fixed, History, Pencil, PlaneMask, ResizeError, Rgba,
     SelectionTool, TextTool, Tool, ToolCtx, ToolEvent, ToolResponse,
 };
 
 fn ctx(density: DensityMode, ramp: &str, mask: PlaneMask, glyph: char, fg: Rgba, bg: Rgba) -> ToolCtx {
-    ToolCtx { layer: 0, glyph, fg, bg, mask, density, ramp: ramp.chars().collect() }
+    ToolCtx { layer: 0, glyph, fg, bg, mask, density, ramp: ramp.chars().collect(), size: 1, shape: BrushShape::Square }
 }
 
 fn fixed_ctx(mask: PlaneMask, glyph: char, fg: Rgba, bg: Rgba) -> ToolCtx {

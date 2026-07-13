@@ -1,8 +1,11 @@
 //! Straight-line tool: a horizontal or vertical run auto-joins existing box-drawing art the same
 //! way the rectangle tool's border does. A diagonal run has no single-line box glyph, so it stamps
-//! the active glyph directly with no join.
+//! the active glyph directly with no join. At sizes above 1 the run is a thick band, not a
+//! single box-drawing run, so every size>1 stroke stamps the active glyph with no join.
 
-use super::{diff_pending, line_cells, mask_apply, PendingCell, Tool, ToolCtx, ToolEvent, ToolResponse};
+use std::collections::HashSet;
+
+use super::{diff_pending, footprint, line_cells, mask_apply, PendingCell, Tool, ToolCtx, ToolEvent, ToolResponse};
 use crate::join::{join, ArmSet};
 use crate::model::{Cell, Document};
 
@@ -11,6 +14,8 @@ pub struct Line {
     anchor: Option<(u16, u16)>,
     pending: Vec<PendingCell>,
     buf: Vec<(u16, u16)>,
+    fp: Vec<(u16, u16)>,
+    seen: HashSet<(u16, u16)>,
 }
 
 impl Line {
@@ -23,6 +28,12 @@ impl Line {
         self.pending.clear();
         let mut buf = std::mem::take(&mut self.buf);
         line_cells(anchor, cur, &mut buf);
+
+        if ctx.size > 1 {
+            self.recompute_thick(&buf, ctx, doc);
+            self.buf = buf;
+            return;
+        }
 
         let strict = doc.settings.strict_ascii;
         let horizontal = anchor.1 == cur.1;
@@ -43,6 +54,25 @@ impl Line {
             self.pending.push(PendingCell { x, y, cell: mask_apply(before, proposed, ctx.mask) });
         }
         self.buf = buf;
+    }
+
+    /// Size>1 path: the footprint swept along the run, deduped (adjacent footprints overlap), the
+    /// active glyph stamped directly.
+    fn recompute_thick(&mut self, path: &[(u16, u16)], ctx: &ToolCtx, doc: &Document) {
+        self.seen.clear();
+        let mut fp = std::mem::take(&mut self.fp);
+        for &(x, y) in path {
+            footprint((x, y), ctx.size, ctx.shape, &mut fp);
+            for &(fx, fy) in fp.iter() {
+                if !doc.in_bounds(fx, fy) || !self.seen.insert((fx, fy)) {
+                    continue;
+                }
+                let before = doc.cell(ctx.layer, fx, fy).copied().unwrap_or(Cell::BLANK);
+                let proposed = Cell { ch: ctx.glyph, fg: ctx.fg, bg: ctx.bg };
+                self.pending.push(PendingCell { x: fx, y: fy, cell: mask_apply(before, proposed, ctx.mask) });
+            }
+        }
+        self.fp = fp;
     }
 }
 
@@ -93,6 +123,8 @@ mod tests {
             mask,
             density: crate::brush::DensityMode::Fixed(crate::brush::Fixed(1.0)),
             ramp: Vec::new(),
+            size: 1,
+            shape: crate::tools::BrushShape::Square,
         }
     }
 
@@ -192,6 +224,29 @@ mod tests {
             panic!("expected a committed edit");
         };
         assert!(cells.iter().all(|c| c.after.ch == '|'));
+    }
+
+    #[test]
+    fn thick_line_stamps_the_glyph_directly_with_no_join_and_no_duplicates() {
+        let mut doc = Document::new(10, 10);
+        for y in 0..10u16 {
+            doc.set_cell(0, 5, y, Cell { ch: '│', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        }
+        let mut tctx = ctx(PlaneMask::ALL, '#');
+        tctx.size = 3;
+        let mut line = drag(&doc, &tctx, (2, 3), (8, 3));
+        let resp = line.update(ToolEvent::Release, &tctx, &doc);
+        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
+            panic!("expected a committed edit");
+        };
+        // Footprints widen the 7-column run to columns 1..=9 and rows 2..=4: 9×3 cells, every
+        // one '#', no box-joins.
+        assert_eq!(cells.len(), 27);
+        assert!(cells.iter().all(|c| c.after.ch == '#'), "size>1 must stamp the glyph, never join");
+        let mut coords: Vec<(u16, u16)> = cells.iter().map(|c| (c.x, c.y)).collect();
+        coords.sort();
+        coords.dedup();
+        assert_eq!(coords.len(), 27, "overlapping footprints must be deduped");
     }
 
     #[test]

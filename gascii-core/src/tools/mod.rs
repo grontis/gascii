@@ -58,6 +58,48 @@ pub fn mask_apply(before: Cell, proposed: Cell, mask: PlaneMask) -> Cell {
     }
 }
 
+/// Footprint shape of a sized stroke: the cells one stamp covers around its center.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BrushShape {
+    #[default]
+    Square,
+    Circle,
+}
+
+/// Upper bound for `ToolCtx::size`.
+pub const MAX_TOOL_SIZE: u16 = 16;
+
+/// Cells covered by one `size`-wide stamp centered on `center`, written into the caller-provided
+/// `out` (cleared first). A size-N stamp spans an N×N box around the center (an even N biases
+/// right/down, since a cell grid has no true center cell for it); `Circle` keeps only cells within
+/// a disc of diameter N, shrunk a touch so the disc sheds its bounding box's corners (a size-3
+/// circle is a plus, not the full 3×3). Cells that would fall off the u16 grid are dropped here;
+/// document-bounds clipping stays the caller's job.
+pub fn footprint(center: (u16, u16), size: u16, shape: BrushShape, out: &mut Vec<(u16, u16)>) {
+    out.clear();
+    let size = size.clamp(1, MAX_TOOL_SIZE) as i32;
+    let lo = -((size - 1) / 2);
+    let hi = size / 2;
+    let c = (lo + hi) as f32 / 2.0;
+    let r = size as f32 / 2.0 - 0.1;
+    for dy in lo..=hi {
+        for dx in lo..=hi {
+            if shape == BrushShape::Circle {
+                let (fx, fy) = (dx as f32 - c, dy as f32 - c);
+                if fx * fx + fy * fy > r * r {
+                    continue;
+                }
+            }
+            let x = center.0 as i32 + dx;
+            let y = center.1 as i32 + dy;
+            if x < 0 || y < 0 || x > u16::MAX as i32 || y > u16::MAX as i32 {
+                continue;
+            }
+            out.push((x as u16, y as u16));
+        }
+    }
+}
+
 /// Read-only draw state a `Tool` needs each event. App-level state — never recorded in history.
 /// Not `Copy` — `ramp` is an owned `Vec<char>` (only the density brush reads `density`/`ramp`;
 /// every other tool ignores them).
@@ -70,6 +112,11 @@ pub struct ToolCtx {
     pub mask: PlaneMask,
     pub density: crate::brush::DensityMode,
     pub ramp: Vec<char>,
+    /// Stamp width in cells for the sized tools (pencil, eraser, line, density brush); every
+    /// other tool ignores it. Clamped to `1..=MAX_TOOL_SIZE` at the footprint.
+    pub size: u16,
+    /// Footprint shape for the sized tools; ignored wherever `size` is.
+    pub shape: BrushShape,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -177,6 +224,12 @@ pub trait Tool {
     fn selection_overlay(&self) -> Option<SelectionView> {
         None
     }
+    /// Cell where a text caret should render while this tool has one active. May sit one column
+    /// past the document's right edge (a full row typed) — display clamping is the renderer's
+    /// job. Default `None`; only `TextTool` overrides it.
+    fn caret(&self) -> Option<(u16, u16)> {
+        None
+    }
 }
 
 /// Converts a set of overlay cells into a committed `Edit`, dropping any cell whose masked result
@@ -186,6 +239,12 @@ pub trait Tool {
 pub(crate) fn diff_pending(pending: &[PendingCell], doc: &Document, layer: usize) -> Option<Edit> {
     let mut cell_edits = Vec::with_capacity(pending.len());
     for p in pending {
+        // The document can shrink between stamp and commit (a resize applied while a right-click
+        // stroke is in flight) — a cell that fell outside is dropped, not committed as a phantom
+        // out-of-bounds edit with a fabricated Blank `before`.
+        if !doc.in_bounds(p.x, p.y) {
+            continue;
+        }
         let before = doc.cell(layer, p.x, p.y).copied().unwrap_or(Cell::BLANK);
         if before == p.cell {
             continue;
@@ -239,6 +298,7 @@ pub(crate) struct FreehandStroke {
     before: HashMap<(u16, u16), Cell>,
     last: Option<(u16, u16)>,
     buf: Vec<(u16, u16)>,
+    fp: Vec<(u16, u16)>,
 }
 
 impl FreehandStroke {
@@ -249,6 +309,7 @@ impl FreehandStroke {
             before: HashMap::new(),
             last: None,
             buf: Vec::new(),
+            fp: Vec::new(),
         }
     }
 
@@ -292,35 +353,35 @@ impl FreehandStroke {
             .unwrap_or_else(|| doc.cell(layer, x, y).copied().unwrap_or(Cell::BLANK))
     }
 
-    pub(crate) fn press(
-        &mut self,
-        x: u16,
-        y: u16,
-        proposed: Cell,
-        mask: PlaneMask,
-        doc: &Document,
-        layer: usize,
-    ) {
+    /// Stamps the full `ctx.size`/`ctx.shape` footprint around `(x, y)` — the sized-tool
+    /// counterpart of a single `stamp`.
+    fn stamp_footprint(&mut self, x: u16, y: u16, proposed: Cell, ctx: &ToolCtx, doc: &Document) {
+        let mut fp = std::mem::take(&mut self.fp);
+        footprint((x, y), ctx.size, ctx.shape, &mut fp);
+        for &(fx, fy) in fp.iter() {
+            self.stamp(fx, fy, proposed, ctx.mask, doc, ctx.layer);
+        }
+        self.fp = fp;
+    }
+
+    pub(crate) fn press(&mut self, x: u16, y: u16, proposed: Cell, ctx: &ToolCtx, doc: &Document) {
         self.begin();
-        if self.stamp(x, y, proposed, mask, doc, layer) {
+        self.stamp_footprint(x, y, proposed, ctx, doc);
+        if doc.in_bounds(x, y) {
             self.last = Some((x, y));
         }
     }
 
-    pub(crate) fn drag(
-        &mut self,
-        x: u16,
-        y: u16,
-        proposed: Cell,
-        mask: PlaneMask,
-        doc: &Document,
-        layer: usize,
-    ) {
+    pub(crate) fn drag(&mut self, x: u16, y: u16, proposed: Cell, ctx: &ToolCtx, doc: &Document) {
         let from = self.last.unwrap_or((x, y));
         let mut buf = std::mem::take(&mut self.buf);
         line_cells(from, (x, y), &mut buf);
-        for &(cx, cy) in buf.iter() {
-            self.stamp(cx, cy, proposed, mask, doc, layer);
+        // Skip buf[0]: it always duplicates the previous call's (or Press's) last-stamped cell,
+        // whose footprint is already fully stamped — re-stamping is a no-op for the constant
+        // proposed cell here, just size²-cells' worth of wasted hash traffic every frame the
+        // pointer holds still (Drag fires every frame the button is down, not only on movement).
+        for &(cx, cy) in buf.iter().skip(1) {
+            self.stamp_footprint(cx, cy, proposed, ctx, doc);
         }
         self.buf = buf;
         self.last = Some((x, y));
@@ -331,6 +392,10 @@ impl FreehandStroke {
     pub(crate) fn finish(&mut self, doc: &Document, layer: usize) -> Option<Edit> {
         let mut cell_edits = Vec::with_capacity(self.pending.len());
         for p in &self.pending {
+            // Same shrink-between-stamp-and-commit guard as `diff_pending`.
+            if !doc.in_bounds(p.x, p.y) {
+                continue;
+            }
             let before = doc.cell(layer, p.x, p.y).copied().unwrap_or(Cell::BLANK);
             if before == p.cell {
                 continue;
@@ -558,6 +623,106 @@ mod tests {
             let dy = w[1].1 as i32 - w[0].1 as i32;
             assert!(dx <= 1 && dy <= 1, "gap between {:?} and {:?}", w[0], w[1]);
         }
+    }
+
+    // --- shrink-between-stamp-and-commit guards ---
+
+    fn sized_ctx() -> ToolCtx {
+        ToolCtx {
+            layer: 0,
+            glyph: '#',
+            fg: Rgba::WHITE,
+            bg: Rgba::TRANSPARENT,
+            mask: PlaneMask::ALL,
+            density: crate::brush::DensityMode::Fixed(crate::brush::Fixed(1.0)),
+            ramp: Vec::new(),
+            size: 1,
+            shape: BrushShape::Square,
+        }
+    }
+
+    #[test]
+    fn freehand_finish_drops_cells_beyond_a_shrunken_document() {
+        let big = Document::new(10, 10);
+        let small = Document::new(5, 5);
+        let ctx = sized_ctx();
+        let proposed = c('#', Rgba::WHITE, Rgba::TRANSPARENT);
+        let mut stroke = FreehandStroke::new();
+        stroke.press(2, 2, proposed, &ctx, &big);
+        stroke.drag(8, 2, proposed, &ctx, &big);
+        let edit = stroke.finish(&small, 0).expect("in-bounds cells still commit");
+        let Edit::Cells(cells) = edit else { panic!("expected Edit::Cells") };
+        assert!(cells.iter().all(|e| e.x < 5 && e.y < 5), "no phantom out-of-bounds edits");
+        let xs: Vec<u16> = cells.iter().map(|e| e.x).collect();
+        assert_eq!(xs.len(), 3, "only the surviving columns 2..=4 commit");
+    }
+
+    #[test]
+    fn diff_pending_drops_cells_beyond_a_shrunken_document() {
+        let small = Document::new(5, 5);
+        let pending = vec![
+            PendingCell { x: 2, y: 2, cell: c('#', Rgba::WHITE, Rgba::TRANSPARENT) },
+            PendingCell { x: 8, y: 2, cell: c('#', Rgba::WHITE, Rgba::TRANSPARENT) },
+        ];
+        let edit = diff_pending(&pending, &small, 0).expect("the in-bounds cell still commits");
+        let Edit::Cells(cells) = edit else { panic!("expected Edit::Cells") };
+        assert_eq!(cells.len(), 1);
+        assert_eq!((cells[0].x, cells[0].y), (2, 2));
+    }
+
+    // --- footprint ---
+
+    #[test]
+    fn footprint_size_1_is_the_center_cell_for_both_shapes() {
+        let mut out = Vec::new();
+        for shape in [BrushShape::Square, BrushShape::Circle] {
+            footprint((5, 5), 1, shape, &mut out);
+            assert_eq!(out, vec![(5, 5)]);
+        }
+    }
+
+    #[test]
+    fn footprint_size_3_square_is_the_full_3x3_box() {
+        let mut out = Vec::new();
+        footprint((5, 5), 3, BrushShape::Square, &mut out);
+        assert_eq!(out.len(), 9);
+        for x in 4..=6u16 {
+            for y in 4..=6u16 {
+                assert!(out.contains(&(x, y)));
+            }
+        }
+    }
+
+    #[test]
+    fn footprint_size_3_circle_is_a_plus_not_the_full_box() {
+        let mut out = Vec::new();
+        footprint((5, 5), 3, BrushShape::Circle, &mut out);
+        let cells = set_of(&out);
+        assert_eq!(cells, set_of(&[(5, 5), (4, 5), (6, 5), (5, 4), (5, 6)]));
+    }
+
+    #[test]
+    fn footprint_even_size_biases_right_and_down() {
+        let mut out = Vec::new();
+        footprint((5, 5), 2, BrushShape::Square, &mut out);
+        assert_eq!(set_of(&out), set_of(&[(5, 5), (6, 5), (5, 6), (6, 6)]));
+    }
+
+    #[test]
+    fn footprint_clips_at_the_grid_origin() {
+        let mut out = Vec::new();
+        footprint((0, 0), 3, BrushShape::Square, &mut out);
+        assert_eq!(set_of(&out), set_of(&[(0, 0), (1, 0), (0, 1), (1, 1)]));
+    }
+
+    #[test]
+    fn footprint_circle_size_5_sheds_bounding_box_corners() {
+        let mut out = Vec::new();
+        footprint((10, 10), 5, BrushShape::Circle, &mut out);
+        let cells = set_of(&out);
+        assert!(!cells.contains(&(8, 8)), "corner must be outside the disc");
+        assert!(cells.contains(&(8, 10)), "edge midpoints are inside");
+        assert!(cells.contains(&(9, 9)), "inner diagonal is inside");
     }
 
     #[test]

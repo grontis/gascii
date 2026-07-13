@@ -1,5 +1,8 @@
 use eframe::egui::{self, Align2, Color32, Painter, Pos2, Rect, Stroke, StrokeKind, Vec2};
-use gascii_core::{CellRect, Direction, Document, PendingCell, Rgba, SelectionView, ToolEvent, ToolResponse};
+use gascii_core::{
+    CellRect, Direction, DocExtent, Document, History, PendingCell, Rgba, SelectionView, Tool,
+    ToolCtx, ToolEvent, ToolResponse,
+};
 
 use crate::app::{GasciiApp, ToolKind};
 use crate::fonts::canvas_font_id;
@@ -20,6 +23,8 @@ fn cell_rect_to_screen(r: CellRect, vp: &Viewport, cell: Vec2, origin: Pos2) -> 
 }
 
 pub trait CanvasRenderer {
+    /// `hover` is the cells the active tool's next application would land on — the hovered cell,
+    /// expanded to the tool's footprint for sized tools; empty when no marker should show.
     #[allow(clippy::too_many_arguments)]
     fn paint(
         &mut self,
@@ -30,6 +35,7 @@ pub trait CanvasRenderer {
         cell: Vec2,
         visible: (u16, u16, u16, u16),
         pending: &[PendingCell],
+        hover: &[(u16, u16)],
         cursor_on: Option<(u16, u16)>,
         selection: Option<SelectionView>,
     );
@@ -48,6 +54,7 @@ impl CanvasRenderer for NaiveRenderer {
         cell: Vec2,
         visible: (u16, u16, u16, u16),
         pending: &[PendingCell],
+        hover: &[(u16, u16)],
         cursor_on: Option<(u16, u16)>,
         selection: Option<SelectionView>,
     ) {
@@ -115,6 +122,24 @@ impl CanvasRenderer for NaiveRenderer {
             }
         }
 
+        // Hover marker: a light wash plus a faint per-cell outline over every cell the next
+        // application would touch — the outline keeps the footprint legible over colored art
+        // where the wash alone would drown.
+        for &(hx, hy) in hover {
+            if hx < x0 || hx >= x1 || hy < y0 || hy >= y1 {
+                continue;
+            }
+            let rect_min = vp.cell_to_screen(hx, hy, cell, origin);
+            let rect = Rect::from_min_size(rect_min, cell);
+            painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 40));
+            painter.rect_stroke(
+                rect,
+                0.0,
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 110)),
+                StrokeKind::Inside,
+            );
+        }
+
         if let Some((cx, cy)) = cursor_on {
             let rect_min = vp.cell_to_screen(cx, cy, cell, origin);
             let rect = Rect::from_min_size(rect_min, cell);
@@ -134,7 +159,49 @@ pub fn cursor_blink_on(ui: &egui::Ui) -> bool {
     (t * 2.0) as i64 % 2 == 0
 }
 
+/// Outcome of `drive_stroke_tail` for the caller's ownership bookkeeping.
+struct StrokeTail {
+    ended: bool,
+    committed: bool,
+}
+
+/// The drag/release tail of a pointer-stroke lifecycle, shared by the primary and right-click
+/// gestures so there is exactly one copy of this state machine. Press-time ownership stays with
+/// each caller — that half genuinely differs per button (tool special cases, space-pan
+/// arbitration).
+#[allow(clippy::too_many_arguments)]
+fn drive_stroke_tail(
+    tool: &mut dyn Tool,
+    doc: &mut Document,
+    history: &mut History,
+    viewport: &Viewport,
+    tctx: &ToolCtx,
+    response: &egui::Response,
+    cell: Vec2,
+    origin: Pos2,
+    doc_extent: DocExtent,
+    down: bool,
+    just_started: bool,
+    ends: bool,
+) -> StrokeTail {
+    if down && !just_started {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let (x, y) = viewport.screen_to_cell_clamped(pos, cell, origin, doc_extent);
+            tool.update(ToolEvent::Drag { x, y }, tctx, doc);
+        }
+    }
+    let mut committed = false;
+    if ends {
+        if let ToolResponse::Commit(Some(edit)) = tool.update(ToolEvent::Release, tctx, doc) {
+            history.apply(doc, edit);
+            committed = true;
+        }
+    }
+    StrokeTail { ended: ends, committed }
+}
+
 pub(crate) fn tool_ctx(app: &GasciiApp) -> gascii_core::ToolCtx {
+    let stamp = app.active_stamp();
     gascii_core::ToolCtx {
         layer: 0,
         glyph: app.active_glyph,
@@ -143,7 +210,16 @@ pub(crate) fn tool_ctx(app: &GasciiApp) -> gascii_core::ToolCtx {
         mask: app.mask,
         density: app.density_mode,
         ramp: app.ramps[app.active_ramp].chars.clone(),
+        size: stamp.size,
+        shape: stamp.shape,
     }
+}
+
+/// `ToolCtx` for the right-click stroke: identical to `tool_ctx` except the footprint comes from
+/// the right-click tool's own stamp settings, never the active tool's.
+fn rc_tool_ctx(app: &GasciiApp) -> gascii_core::ToolCtx {
+    let stamp = app.rc_stamp();
+    gascii_core::ToolCtx { size: stamp.size, shape: stamp.shape, ..tool_ctx(app) }
 }
 
 pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
@@ -191,8 +267,17 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
     // Known gap: release is detected from pointer state, so an OS-level focus loss mid-drag with
     // no synthetic mouse-up (e.g. alt-tab while dragging) can leave
     // `stroke_active`/`space_pan_active` stuck until the next primary press.
-    let (primary_pressed, primary_down, primary_released) =
-        ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.primary_released()));
+    let (primary_pressed, primary_down, primary_released, secondary_pressed, secondary_down, secondary_released) =
+        ui.input(|i| {
+            (
+                i.pointer.primary_pressed(),
+                i.pointer.primary_down(),
+                i.pointer.primary_released(),
+                i.pointer.secondary_pressed(),
+                i.pointer.secondary_down(),
+                i.pointer.secondary_released(),
+            )
+        });
     let gesture_ends = primary_released || !primary_down;
 
     // Tracks whether this frame's Press branch just started a stroke, so the Drag branch below
@@ -200,7 +285,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
     // Drag for the press that just happened — one pointer event in, one Tool event out per frame.
     let mut stroke_just_started = false;
 
-    if !app.stroke_active && !app.space_pan_active && primary_pressed {
+    if !app.stroke_in_progress() && !app.space_pan_active && primary_pressed {
         if space {
             app.space_pan_active = true;
         } else if app.tool_kind == ToolKind::Eyedropper {
@@ -268,21 +353,70 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
             app.space_pan_active = false;
         }
     } else if app.stroke_active {
-        if primary_down && !stroke_just_started {
-            if let Some(pos) = response.interact_pointer_pos() {
-                let (x, y) = app.viewport.screen_to_cell_clamped(pos, cell, origin, doc_extent);
-                let tctx = tool_ctx(app);
-                app.tool.update(ToolEvent::Drag { x, y }, &tctx, &app.doc);
-            }
-        }
-        if gesture_ends {
-            let tctx = tool_ctx(app);
-            let resp = app.tool.update(ToolEvent::Release, &tctx, &app.doc);
-            if let ToolResponse::Commit(Some(edit)) = resp {
-                app.history.apply(&mut app.doc, edit);
-            }
+        let tctx = tool_ctx(app);
+        let tail = drive_stroke_tail(
+            app.tool.as_mut(),
+            &mut app.doc,
+            &mut app.history,
+            &app.viewport,
+            &tctx,
+            &response,
+            cell,
+            origin,
+            doc_extent,
+            primary_down,
+            stroke_just_started,
+            gesture_ends,
+        );
+        if tail.ended {
             app.stroke_active = false;
         }
+    }
+
+    // Right-click stroke: press-time ownership for a transient instance of the configured
+    // right-click tool; the drag/release tail is the shared `drive_stroke_tail`. `app.tool` —
+    // including a pending text burst or floating selection — stays untouched underneath it, so a
+    // quick right-click erase never disturbs an in-progress session.
+    let mut rc_just_started = false;
+    if !app.stroke_in_progress() && !app.space_pan_active && secondary_pressed && !space && response.contains_pointer()
+    {
+        if let Some(pos) = response.interact_pointer_pos() {
+            if let Some((x, y)) = app.viewport.screen_to_cell(pos, cell, origin, doc_extent) {
+                let mut rc = (app.right_click_entry().make)();
+                let tctx = rc_tool_ctx(app);
+                // Press on a stroke tool never returns an edit (that's the property that gates
+                // STROKE_TOOLS membership), so the response can be dropped.
+                rc.update(ToolEvent::Press { x, y }, &tctx, &app.doc);
+                app.rc_tool = Some(rc);
+                rc_just_started = true;
+            }
+        }
+    }
+    if let Some(mut rc) = app.rc_tool.take() {
+        let tctx = rc_tool_ctx(app);
+        let tail = drive_stroke_tail(
+            rc.as_mut(),
+            &mut app.doc,
+            &mut app.history,
+            &app.viewport,
+            &tctx,
+            &response,
+            cell,
+            origin,
+            doc_extent,
+            secondary_down,
+            rc_just_started,
+            secondary_released || !secondary_down,
+        );
+        if tail.committed {
+            // The committed cells bypassed `app.tool`; a pending text burst's pinned `before`
+            // values may now be stale — re-pin them, same as after a mid-burst redo.
+            app.tool.resync(&app.doc, tctx.layer);
+        }
+        if !tail.ended {
+            app.rc_tool = Some(rc);
+        }
+        // Otherwise `app.rc_tool` stays `None`: the gesture is over, the transient tool dropped.
     }
 
     // Text-mode keyboard routing: translates raw input events to ToolEvents, fed to app.tool the
@@ -402,14 +536,66 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
             app.stroke_active = false;
             app.space_pan_active = false;
         }
+        // A right-click stroke has the same no-synthetic-mouse-up gap on focus loss.
+        if let Some(mut rc) = app.rc_tool.take() {
+            let tctx = rc_tool_ctx(app);
+            rc.update(ToolEvent::Cancel, &tctx, &app.doc);
+        }
     }
     app.was_focused = focused;
 
     let visible = app.viewport.visible_cell_rect(painter.clip_rect(), cell, origin, doc_extent);
 
-    ctx.request_repaint_after(std::time::Duration::from_millis(500));
-    let on = cursor_blink_on(ui);
-    let cursor_cell = Some(app.cursor).filter(|_| on);
+    // The text caret: only the Text tool has one, at its click-placed cursor, and only while the
+    // session still accepts keystrokes (`text_editing` — the same gate the keyboard routing
+    // uses, so the caret can never advertise a session whose typing would be dropped or consumed
+    // as tool-switch keys; a flush ends both together). Clamped for display — the tool's cursor
+    // may sit one column past the right edge after typing a full row. The blink is the only
+    // animation that needs unprompted repaints, so the 500ms wakeup is gated on it showing.
+    let caret = (app.tool_kind == ToolKind::Text && app.text_editing)
+        .then(|| app.tool.caret())
+        .flatten()
+        .map(|(x, y)| (x.min(app.doc.width.saturating_sub(1)), y.min(app.doc.height.saturating_sub(1))));
+    if caret.is_some() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+    }
+    let caret_cell = caret.filter(|_| cursor_blink_on(ui));
+
+    // Hover marker: the cells the active tool's next click/stroke would land on, footprint-
+    // expanded for sized tools using the ACTIVE tool's own stamp (a right-click stroke's
+    // footprint differs, but hover can't know which button is coming — the left-click tool is
+    // the honest default). Hidden while any gesture owns the canvas: mid-stroke, the pending
+    // overlay is already the real preview.
+    let mut hover_cells: Vec<(u16, u16)> = Vec::new();
+    if let Some((hx, hy)) = app.hovered_cell {
+        if !app.stroke_in_progress()
+            && !app.space_pan_active
+            && crate::app::tool_shows_hover(app.tool_kind)
+        {
+            if crate::app::tool_is_sized(app.tool_kind) {
+                let stamp = app.active_stamp();
+                gascii_core::footprint((hx, hy), stamp.size, stamp.shape, &mut hover_cells);
+                hover_cells.retain(|&(x, y)| app.doc.in_bounds(x, y));
+            } else {
+                hover_cells.push((hx, hy));
+            }
+        }
+    }
+
+    // Overlay ordering = commit ordering: the rc stroke commits at its release, while a pending
+    // burst/float commits later and therefore wins any overlap — so it must paint on TOP of the
+    // rc overlay, or the preview would promise an outcome (e.g. a typed char erased) that the
+    // commits then reverse. The concat clone is skipped in the common no-burst case.
+    let mut combined;
+    let pending: &[PendingCell] = match &app.rc_tool {
+        Some(rc) if !app.tool.pending().is_empty() => {
+            combined = rc.pending().to_vec();
+            combined.extend_from_slice(app.tool.pending());
+            &combined
+        }
+        Some(rc) => rc.pending(),
+        None => app.tool.pending(),
+    };
 
     app.renderer.paint(
         &painter,
@@ -418,8 +604,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
         origin,
         cell,
         visible,
-        app.tool.pending(),
-        cursor_cell,
+        pending,
+        &hover_cells,
+        caret_cell,
         app.tool.selection_overlay(),
     );
 }
