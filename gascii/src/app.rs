@@ -4,9 +4,9 @@ use std::time::Instant;
 use eframe::egui;
 use gascii_core::{
     builtin_pages, builtin_ramps, export_text, load_str, page_available, resize_document,
-    save_string, Buildup, CellPatch, DensityBrush, DensityMode, Document, Eraser, Fixed,
-    FloodFill, History, Line, Page, Pencil, PlaneMask, Ramp, Rectangle, ResizeError, Rgba,
-    SelectionTool, TextTool, Tool, ToolEvent, ToolResponse,
+    save_string, Buildup, CellPatch, DensityBrush, DensityMode, Document, EntryReject, Eraser,
+    Fixed, FloodFill, History, Line, Page, Pencil, PlaneMask, Ramp, Rectangle, ResizeError, Rgba,
+    SelectionTool, TextTool, Tool, ToolEvent, ToolResponse, WidthReject,
 };
 
 use crate::canvas::{self, CanvasRenderer, NaiveRenderer};
@@ -208,6 +208,18 @@ impl GasciiApp {
             ToolKind::Brush => self.tool = Box::new(DensityBrush::new()),
         }
         self.text_editing = false;
+    }
+
+    /// Surfaces a rejected typed character in the status bar. The rejection itself already
+    /// happens inside the tool's entry validation — this is only the visible-warning half.
+    pub(crate) fn warn_rejected_char(&mut self, ch: char, reject: EntryReject) {
+        let why = match reject {
+            EntryReject::Width(WidthReject::Control) => "control character",
+            EntryReject::Width(WidthReject::ZeroWidth) => "zero-width character",
+            EntryReject::Width(WidthReject::DoubleWidth) => "wider than one cell",
+            EntryReject::NonAscii => "non-ASCII in a strict-ASCII document",
+        };
+        self.last_error = Some(format!("typed {ch:?} rejected: {why}"));
     }
 
     /// Finalizes whatever the active cross-frame tool (Text's burst, Selection's float) has

@@ -58,7 +58,10 @@ pub fn page_available(page: &Page, settings: &DocSettings) -> bool {
 /// glyph-coverage tests).
 pub fn builtin_pages() -> Vec<Page> {
     let ascii: Vec<char> = (0x0020u32..=0x007E).filter_map(char::from_u32).collect();
-    let box_drawing: Vec<char> = "─│┌┐└┘├┤┬┴┼".chars().collect();
+    // The full Box Drawing block: single/double/heavy lines, rounded corners, dashes, diagonals.
+    // The rectangle/line tools' auto-join only understands the single-line subset; the rest are
+    // for direct placement.
+    let box_drawing: Vec<char> = (0x2500u32..=0x257F).filter_map(char::from_u32).collect();
     let blocks_shades: Vec<char> = "░▒▓█▀▄▌▐".chars().collect();
 
     vec![
@@ -130,6 +133,17 @@ mod tests {
         let pages = builtin_pages();
         let ascii_page = pages.iter().find(|p| p.name == "ASCII").unwrap();
         assert_eq!(ascii_page.glyphs.len(), 95);
+    }
+
+    #[test]
+    fn box_drawing_page_spans_the_entire_box_drawing_block() {
+        let pages = builtin_pages();
+        let box_page = pages.iter().find(|p| p.name == "Box Drawing").unwrap();
+        assert_eq!(box_page.glyphs.len(), 128);
+        for cp in 0x2500u32..=0x257F {
+            let ch = char::from_u32(cp).unwrap();
+            assert!(box_page.glyphs.contains(&ch), "missing box-drawing glyph: {ch:?} (U+{cp:04X})");
+        }
     }
 
     #[test]

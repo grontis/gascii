@@ -293,6 +293,12 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
             match ev {
                 egui::Event::Text(s) => {
                     for ch in s.chars() {
+                        // The tool's own entry validation drops a rejected character either way;
+                        // this pre-check exists solely to make the drop visible instead of silent.
+                        if let Err(reject) = gascii_core::allowed_in(ch, &app.doc.settings) {
+                            app.warn_rejected_char(ch, reject);
+                            continue;
+                        }
                         let tctx = tool_ctx(app);
                         let resp = app.tool.update(ToolEvent::Char(ch), &tctx, &app.doc);
                         if let ToolResponse::Commit(Some(edit)) = resp {

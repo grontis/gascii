@@ -31,7 +31,7 @@ GASCII is a native desktop editor for ASCII/ANSI art: a character-grid canvas dr
 
 - **FR-6** All drawing tools reduce pointer input to Strokes: press→release gestures producing a set of (cell, change) edits, committed atomically.
 - **FR-7** Every tool has three **plane toggles** — write glyph? write fg? write bg? — filtering what each Stroke writes (ADR-0002). All three default to on, so a stroke fully replaces the cells it touches; toggling planes off is the opt-in for selective drawing.
-- **FR-8** Tools in v1: pencil (stamp), eraser (stamps Blank through plane toggles), flood fill, rectangle, straight line, text mode, rectangular selection. Density brush modes layer onto the pencil.
+- **FR-8** Tools in v1: pencil (stamp), eraser (stamps Blank through plane toggles), flood fill, rectangle, straight line, text mode, rectangular selection, and the density brush (its own tool, sharing the pencil's stroke pipeline).
 - **FR-9** **Flood fill** fills the 4-connected region of cells *exactly matching* the clicked cell (glyph AND fg AND bg equal). Plane toggles govern only what is written, never the match.
 - **FR-10** **Rectangle/line tools auto-join**: strokes crossing existing box-drawing characters resolve junctions by unioning arm directions (`─`+`│` crossing → `┼`, etc.). v1 ships the single-line box set; in strict-ASCII documents the tools draw `+ - |` with `+` junctions using the same join logic. The ASCII encoding is lossy by design: re-crossing an existing `+`/`-`/`|` does not recover its arms (a `+` has no single well-defined arm set), so the incoming stroke's arms win.
 - **FR-11** **Text mode**: click a cell, type; typed characters are width-validated (FR-16); Enter moves to line start below, arrows navigate; typing stops at the right edge (no wrap), and Backspace at the anchor column is a no-op. A typing burst coalesces into one undo entry, committed at any session boundary — click-away, tool switch, undo, save/open/export, or window focus loss — never silently discarded.
@@ -47,7 +47,7 @@ GASCII is a native desktop editor for ASCII/ANSI art: a character-grid canvas dr
 
 ### 2.4 Color
 
-- **FR-18** Truecolor RGBA in the model; pickers offer constrained palettes (ANSI 16, xterm-256, custom) as a *picking* aid; quantization happens only at export (ADR-0002).
+- **FR-18** Truecolor RGBA in the model; pickers offer constrained palettes (ANSI 16 and custom truecolor in v1; xterm-256 deferred post-v1) as a *picking* aid; quantization happens only at export (ADR-0002).
 - **FR-19** Active text-color and background swatches (UI labels: "Text Color" / "Background"); pick-color-from-cell (eyedropper) sets both from the clicked cell.
 
 ### 2.5 History
