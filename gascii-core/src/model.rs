@@ -79,6 +79,12 @@ impl Layer {
     pub fn cells(&self) -> &[Cell] {
         &self.cells
     }
+    /// Builds a Layer directly from an already-shaped, row-major cell buffer. The caller owns the
+    /// width/height bookkeeping (same externally-tracked-dimensions convention `blank()` already
+    /// relies on) — used by `resize_document` to assemble a resized layer's contents.
+    pub(crate) fn from_cells(cells: Vec<Cell>) -> Self {
+        Layer { cells }
+    }
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]

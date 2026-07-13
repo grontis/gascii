@@ -90,7 +90,15 @@ mod tests {
     use crate::tools::PlaneMask;
 
     fn ctx(mask: PlaneMask, glyph: char, fg: Rgba, bg: Rgba) -> ToolCtx {
-        ToolCtx { layer: 0, glyph, fg, bg, mask }
+        ToolCtx {
+            layer: 0,
+            glyph,
+            fg,
+            bg,
+            mask,
+            density: crate::brush::DensityMode::Fixed(crate::brush::Fixed(1.0)),
+            ramp: Vec::new(),
+        }
     }
 
     fn press_release(doc: &Document, tctx: &ToolCtx, at: (u16, u16)) -> ToolResponse {

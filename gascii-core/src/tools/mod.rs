@@ -2,6 +2,7 @@
 //! edits. Tools never mutate the `Document` directly — they accumulate `PendingCell`s for
 //! an overlay and hand a finished `Edit` to the caller on release.
 
+mod density_brush;
 mod eraser;
 mod fill;
 mod line;
@@ -10,6 +11,7 @@ mod rect;
 mod select;
 mod text;
 
+pub use density_brush::DensityBrush;
 pub use eraser::Eraser;
 pub use fill::FloodFill;
 pub use line::Line;
@@ -18,7 +20,7 @@ pub use rect::Rectangle;
 pub use select::SelectionTool;
 pub use text::TextTool;
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use crate::clipboard::CellPatch;
 use crate::edit::{CellEdit, Edit};
@@ -57,13 +59,17 @@ pub fn mask_apply(before: Cell, proposed: Cell, mask: PlaneMask) -> Cell {
 }
 
 /// Read-only draw state a `Tool` needs each event. App-level state — never recorded in history.
-#[derive(Clone, Copy, Debug)]
+/// Not `Copy` — `ramp` is an owned `Vec<char>` (only the density brush reads `density`/`ramp`;
+/// every other tool ignores them).
+#[derive(Clone, Debug)]
 pub struct ToolCtx {
     pub layer: usize,
     pub glyph: char,
     pub fg: Rgba,
     pub bg: Rgba,
     pub mask: PlaneMask,
+    pub density: crate::brush::DensityMode,
+    pub ramp: Vec<char>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -219,10 +225,18 @@ pub fn line_cells(a: (u16, u16), b: (u16, u16), out: &mut Vec<(u16, u16)>) {
     }
 }
 
-/// Shared freehand accumulator behind pencil/eraser — they differ only in the proposed cell.
+/// Shared freehand accumulator behind pencil/eraser/the density brush. Pencil/eraser propose a
+/// constant cell for the whole gesture; the density brush's proposed cell varies per revisit
+/// (Buildup advances one ramp step each pass), so a revisited cell is always recomputed and
+/// (over)written rather than deduped by first touch.
 pub(crate) struct FreehandStroke {
     pending: Vec<PendingCell>,
-    seen: HashSet<(u16, u16)>,
+    /// `(x,y) -> position in `pending``, so a revisit updates the existing entry in place instead
+    /// of appending a duplicate.
+    index: HashMap<(u16, u16), usize>,
+    /// The document's value at first touch this stroke, pinned so every revisit's `mask_apply`
+    /// still references the true pre-stroke cell, not an intermediate in-stroke write.
+    before: HashMap<(u16, u16), Cell>,
     last: Option<(u16, u16)>,
     buf: Vec<(u16, u16)>,
 }
@@ -231,7 +245,8 @@ impl FreehandStroke {
     pub(crate) fn new() -> Self {
         FreehandStroke {
             pending: Vec::new(),
-            seen: HashSet::new(),
+            index: HashMap::new(),
+            before: HashMap::new(),
             last: None,
             buf: Vec::new(),
         }
@@ -239,25 +254,42 @@ impl FreehandStroke {
 
     fn begin(&mut self) {
         self.pending.clear();
-        self.seen.clear();
+        self.index.clear();
+        self.before.clear();
         self.last = None;
     }
 
-    /// First-write-wins: a cell revisited within one stroke is not re-stamped, so a constant
-    /// proposed cell (pencil/eraser) never yields a duplicate `CellEdit`. Returns whether `(x, y)`
-    /// was in-bounds (and therefore a candidate for tracking as the stroke's last-visited cell),
-    /// regardless of whether it was actually a fresh stamp or a `seen`-set repeat.
+    /// Always recomputes and (over)writes `(x,y)`'s pending entry. Behaviorally identical to the
+    /// old first-write-wins dedup for a constant `proposed` (pencil/eraser: overwriting with the
+    /// same masked result is a no-op); load-bearing for a `proposed` that varies per revisit
+    /// (the density brush). Returns whether `(x, y)` was in-bounds.
     fn stamp(&mut self, x: u16, y: u16, proposed: Cell, mask: PlaneMask, doc: &Document, layer: usize) -> bool {
         if !doc.in_bounds(x, y) {
             return false;
         }
-        if !self.seen.insert((x, y)) {
-            return true;
-        }
-        let before = doc.cell(layer, x, y).copied().unwrap_or(Cell::BLANK);
+        let before = *self
+            .before
+            .entry((x, y))
+            .or_insert_with(|| doc.cell(layer, x, y).copied().unwrap_or(Cell::BLANK));
         let after = mask_apply(before, proposed, mask);
-        self.pending.push(PendingCell { x, y, cell: after });
+        match self.index.get(&(x, y)) {
+            Some(&i) => self.pending[i].cell = after,
+            None => {
+                self.index.insert((x, y), self.pending.len());
+                self.pending.push(PendingCell { x, y, cell: after });
+            }
+        }
         true
+    }
+
+    /// The stroke's in-progress value for `(x,y)`: the pending overlay's value if touched already
+    /// this stroke, else the document's untouched value. What `Buildup` reads to know "one step
+    /// higher than what."
+    pub(crate) fn current(&self, x: u16, y: u16, doc: &Document, layer: usize) -> Cell {
+        self.index
+            .get(&(x, y))
+            .map(|&i| self.pending[i].cell)
+            .unwrap_or_else(|| doc.cell(layer, x, y).copied().unwrap_or(Cell::BLANK))
     }
 
     pub(crate) fn press(
@@ -306,7 +338,8 @@ impl FreehandStroke {
             cell_edits.push(CellEdit { layer, x: p.x, y: p.y, before, after: p.cell });
         }
         self.pending.clear();
-        self.seen.clear();
+        self.index.clear();
+        self.before.clear();
         self.last = None;
         if cell_edits.is_empty() {
             None
@@ -317,7 +350,8 @@ impl FreehandStroke {
 
     pub(crate) fn cancel(&mut self) {
         self.pending.clear();
-        self.seen.clear();
+        self.index.clear();
+        self.before.clear();
         self.last = None;
     }
 

@@ -2,7 +2,7 @@
 //! the only thing that ever writes `Edit::after`/`before` cells back into a `Document`, so the doc
 //! and the undo/redo stacks can never drift out of sync.
 
-use crate::model::{Cell, Document};
+use crate::model::{Cell, DocExtent, Document, Layer};
 
 /// A single cell's before/after value, addressed by layer + coordinate.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -14,13 +14,25 @@ pub struct CellEdit {
     pub after: Cell,
 }
 
+/// A full-document snapshot: extent plus every layer's contents. Backs `Edit::Resize`'s
+/// before/after — deliberately a whole-snapshot swap rather than a diff (resize is a rare,
+/// deliberate action, not a per-frame hot path; see `resize_document`'s own docs).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DocSnapshot {
+    pub extent: DocExtent,
+    pub layers: Vec<Layer>,
+}
+
 /// A single undoable Document mutation. `#[non_exhaustive]` because further mutation kinds (e.g.
-/// resize, layer ops) join as new variants without touching the `Cells` path or `History`'s
+/// layer ops) join as new variants without touching the `Cells`/`Resize` paths or `History`'s
 /// apply/undo/redo mechanics, which are already variant-agnostic.
 #[non_exhaustive]
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Edit {
     Cells(Vec<CellEdit>),
+    /// A document-extent change (grow or shrink), top-left anchored. `before`/`after` are full
+    /// snapshots so undo/redo restore cropped-away cells exactly, not just the extent.
+    Resize { before: DocSnapshot, after: DocSnapshot },
 }
 
 fn apply_forward(doc: &mut Document, edit: &Edit) {
@@ -29,6 +41,11 @@ fn apply_forward(doc: &mut Document, edit: &Edit) {
             for c in cells {
                 doc.set_cell(c.layer, c.x, c.y, c.after);
             }
+        }
+        Edit::Resize { after, .. } => {
+            doc.width = after.extent.width;
+            doc.height = after.extent.height;
+            doc.layers = after.layers.clone();
         }
     }
 }
@@ -39,6 +56,11 @@ fn apply_backward(doc: &mut Document, edit: &Edit) {
             for c in cells {
                 doc.set_cell(c.layer, c.x, c.y, c.before);
             }
+        }
+        Edit::Resize { before, .. } => {
+            doc.width = before.extent.width;
+            doc.height = before.extent.height;
+            doc.layers = before.layers.clone();
         }
     }
 }
@@ -344,5 +366,37 @@ mod tests {
         assert!(history.can_undo());
         assert!(history.undo(&mut doc));
         assert_eq!(doc.cell(0, 0, 0), Some(&Cell::BLANK));
+    }
+
+    #[test]
+    fn resize_edit_apply_and_undo_swap_extent_and_layers_wholesale() {
+        let mut doc = Document::new(5, 5);
+        doc.set_cell(0, 0, 0, cell('a'));
+        let before = DocSnapshot { extent: doc.extent(), layers: doc.layers.clone() };
+
+        // Simulate a grow that preserves top-left content and pads the rest.
+        let after_cells: Vec<Cell> = {
+            let mut cells = vec![Cell::BLANK; 8 * 8];
+            cells[0] = cell('a');
+            cells
+        };
+        let after_layer = Layer::from_cells(after_cells);
+        let after = DocSnapshot { extent: DocExtent { width: 8, height: 8 }, layers: vec![after_layer] };
+
+        let mut history = History::new();
+        history.apply(&mut doc, Edit::Resize { before: before.clone(), after: after.clone() });
+        assert_eq!(doc.width, 8);
+        assert_eq!(doc.height, 8);
+        assert_eq!(doc.cell(0, 0, 0), Some(&cell('a')));
+        assert_eq!(doc.cell(0, 7, 7), Some(&Cell::BLANK));
+
+        assert!(history.undo(&mut doc));
+        assert_eq!(doc.width, 5);
+        assert_eq!(doc.height, 5);
+        assert_eq!(doc.cell(0, 0, 0), Some(&cell('a')));
+
+        assert!(history.redo(&mut doc));
+        assert_eq!(doc.width, 8);
+        assert_eq!(doc.height, 8);
     }
 }

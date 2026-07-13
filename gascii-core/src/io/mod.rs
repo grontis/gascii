@@ -2,6 +2,7 @@
 //! `Document::layers` into one flattened sheet of `Cell`s; every exporter builds on it rather
 //! than re-walking layers itself.
 
+pub mod export_png;
 pub mod export_text;
 pub mod gascii_json;
 

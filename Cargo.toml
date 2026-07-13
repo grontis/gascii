@@ -13,6 +13,8 @@ serde_json = "1"
 unicode-width = "0.2.2"
 eframe = "0.35"
 rfd = "0.17"
+fontdue = "0.9"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

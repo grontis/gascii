@@ -4,12 +4,13 @@
 //! by covering the structural tools through the same real Tool/History pipeline.
 
 use gascii_core::{
-    load_str, save_string, Cell, CellPatch, CellRect, Document, DocSettings, FloodFill, History,
-    Line, PlaneMask, Rectangle, Rgba, SelectionTool, Tool, ToolCtx, ToolEvent, ToolResponse,
+    load_str, save_string, Cell, CellPatch, CellRect, DensityMode, Document, DocSettings, Fixed,
+    FloodFill, History, Line, PlaneMask, Rectangle, Rgba, SelectionTool, Tool, ToolCtx, ToolEvent,
+    ToolResponse,
 };
 
 fn ctx(mask: PlaneMask, glyph: char, fg: Rgba, bg: Rgba) -> ToolCtx {
-    ToolCtx { layer: 0, glyph, fg, bg, mask }
+    ToolCtx { layer: 0, glyph, fg, bg, mask, density: DensityMode::Fixed(Fixed(1.0)), ramp: Vec::new() }
 }
 
 /// Drives a full press -> drag(...) -> release gesture, committing the result (if any) into

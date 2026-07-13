@@ -57,6 +57,8 @@ mod tests {
             fg: Rgba(1, 2, 3, 255),
             bg: Rgba(4, 5, 6, 255),
             mask,
+            density: crate::brush::DensityMode::Fixed(crate::brush::Fixed(1.0)),
+            ramp: Vec::new(),
         }
     }
 

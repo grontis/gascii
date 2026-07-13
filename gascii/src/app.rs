@@ -3,14 +3,19 @@ use std::time::Instant;
 
 use eframe::egui;
 use gascii_core::{
-    builtin_pages, export_text, load_str, page_available, save_string, CellPatch, Document,
-    Eraser, FloodFill, History, Line, Page, Pencil, PlaneMask, Rectangle, Rgba, SelectionTool,
-    TextTool, Tool, ToolEvent, ToolResponse,
+    builtin_pages, builtin_ramps, export_text, load_str, page_available, resize_document,
+    save_string, Buildup, CellPatch, DensityBrush, DensityMode, Document, Eraser, Fixed,
+    FloodFill, History, Line, Page, Pencil, PlaneMask, Ramp, Rectangle, ResizeError, Rgba,
+    SelectionTool, TextTool, Tool, ToolEvent, ToolResponse,
 };
 
 use crate::canvas::{self, CanvasRenderer, NaiveRenderer};
 use crate::fonts;
+use crate::png_export;
 use crate::viewport::Viewport;
+
+/// PNG export cell-scale presets offered to the user, in pixels per cell.
+const PNG_SCALE_PRESETS: [u32; 5] = [8, 16, 24, 32, 48];
 
 /// ANSI 16-color presets offered as a picking aid alongside the truecolor picker.
 const ANSI16: [(&str, Rgba); 16] = [
@@ -88,6 +93,7 @@ pub(crate) enum ToolKind {
     Rectangle,
     Line,
     Selection,
+    Brush,
 }
 
 pub struct GasciiApp {
@@ -117,6 +123,17 @@ pub struct GasciiApp {
     pub(crate) internal_clipboard: Option<CellPatch>,
     pages: Vec<Page>,
     active_page: usize,
+    /// Built-in Ramps, populated at startup — the density brush's glyph sources.
+    pub(crate) ramps: Vec<Ramp>,
+    /// Index into `ramps`: the brush's currently active ramp.
+    pub(crate) active_ramp: usize,
+    /// The brush's active intensity source (Fixed level or Buildup).
+    pub(crate) density_mode: DensityMode,
+    resize_dialog_open: bool,
+    resize_w: u16,
+    resize_h: u16,
+    png_dialog_open: bool,
+    png_cell_px: u32,
     current_path: Option<PathBuf>,
     last_error: Option<String>,
     started: Instant,
@@ -147,6 +164,14 @@ impl GasciiApp {
             internal_clipboard: None,
             pages: builtin_pages(),
             active_page: 0,
+            ramps: builtin_ramps(),
+            active_ramp: 0,
+            density_mode: DensityMode::Fixed(Fixed(1.0)),
+            resize_dialog_open: false,
+            resize_w: Document::DEFAULT_WIDTH,
+            resize_h: Document::DEFAULT_HEIGHT,
+            png_dialog_open: false,
+            png_cell_px: PNG_SCALE_PRESETS[1], // 16px/cell default
             current_path: None,
             last_error: None,
             started,
@@ -180,6 +205,7 @@ impl GasciiApp {
             ToolKind::Rectangle => self.tool = Box::new(Rectangle::new()),
             ToolKind::Line => self.tool = Box::new(Line::new()),
             ToolKind::Selection => self.tool = Box::new(SelectionTool::new()),
+            ToolKind::Brush => self.tool = Box::new(DensityBrush::new()),
         }
         self.text_editing = false;
     }
@@ -306,7 +332,7 @@ impl GasciiApp {
     /// text mode, doesn't get swallowed as a tool switch.
     fn handle_keys(&mut self, ui: &mut egui::Ui) {
         let focused = ui.memory(|m| m.focused().is_some()) || self.text_editing;
-        let (redo_shift, undo, redo_y, pencil, eraser, eyedropper, text, fill, rect, line, select, copy) =
+        let (redo_shift, undo, redo_y, pencil, eraser, eyedropper, text, fill, rect, line, select, brush, copy) =
             ui.input_mut(|i| {
                 // Cmd/Ctrl+Shift+Z must be consumed before the plain Cmd/Ctrl+Z pattern, since
                 // `matches_logically` ignores extra Shift/Alt — checking undo first would swallow
@@ -322,8 +348,9 @@ impl GasciiApp {
                 let rect = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::R);
                 let line = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::L);
                 let select = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::S);
+                let brush = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::B);
                 let copy = i.consume_key(egui::Modifiers::COMMAND, egui::Key::C);
-                (redo_shift, undo, redo_y, pencil, eraser, eyedropper, text, fill, rect, line, select, copy)
+                (redo_shift, undo, redo_y, pencil, eraser, eyedropper, text, fill, rect, line, select, brush, copy)
             });
 
         if redo_shift || redo_y {
@@ -355,8 +382,42 @@ impl GasciiApp {
         if select {
             self.set_tool(ToolKind::Selection);
         }
+        if brush {
+            self.set_tool(ToolKind::Brush);
+        }
         if copy {
             self.copy_selection(ui.ctx());
+        }
+        if self.tool_kind == ToolKind::Brush && !focused {
+            self.handle_brush_intensity_keys(ui);
+        }
+    }
+
+    /// Number keys `1`-`9` -> Fixed intensity 0.1-0.9, `0` -> 1.0. Only consumed while Brush is
+    /// the active tool and no widget has focus — pressing a digit implicitly switches into Fixed
+    /// mode at that level even if Buildup was active, since reaching for a number key expresses
+    /// "I want this exact intensity now."
+    fn handle_brush_intensity_keys(&mut self, ui: &mut egui::Ui) {
+        const DIGIT_KEYS: [(egui::Key, f32); 10] = [
+            (egui::Key::Num1, 0.1),
+            (egui::Key::Num2, 0.2),
+            (egui::Key::Num3, 0.3),
+            (egui::Key::Num4, 0.4),
+            (egui::Key::Num5, 0.5),
+            (egui::Key::Num6, 0.6),
+            (egui::Key::Num7, 0.7),
+            (egui::Key::Num8, 0.8),
+            (egui::Key::Num9, 0.9),
+            (egui::Key::Num0, 1.0),
+        ];
+        let level = ui.input_mut(|i| {
+            DIGIT_KEYS
+                .iter()
+                .find(|&&(key, _)| i.consume_key(egui::Modifiers::NONE, key))
+                .map(|&(_, level)| level)
+        });
+        if let Some(level) = level {
+            self.density_mode = DensityMode::Fixed(Fixed(level));
         }
     }
 
@@ -404,6 +465,44 @@ impl GasciiApp {
         ui.checkbox(&mut self.mask.glyph, "Glyph");
         ui.checkbox(&mut self.mask.fg, "Text Color");
         ui.checkbox(&mut self.mask.bg, "Background");
+
+        if self.tool_kind == ToolKind::Brush {
+            ui.separator();
+            self.brush_panel(ui);
+        }
+    }
+
+    /// Ramp picker, Fixed/Buildup mode selector, and intensity slider — visible only while the
+    /// density brush is the active tool.
+    fn brush_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Brush");
+        egui::ComboBox::from_label("Ramp")
+            .selected_text(self.ramps[self.active_ramp].name)
+            .show_ui(ui, |ui| {
+                for i in 0..self.ramps.len() {
+                    ui.selectable_value(&mut self.active_ramp, i, self.ramps[i].name);
+                }
+            });
+
+        let mut is_buildup = matches!(self.density_mode, DensityMode::Buildup(_));
+        ui.horizontal(|ui| {
+            if ui.selectable_label(!is_buildup, "Fixed").clicked() {
+                is_buildup = false;
+            }
+            if ui.selectable_label(is_buildup, "Buildup").clicked() {
+                is_buildup = true;
+            }
+        });
+        if is_buildup {
+            self.density_mode = DensityMode::Buildup(Buildup);
+        } else {
+            let mut level = match self.density_mode {
+                DensityMode::Fixed(Fixed(level)) => level,
+                DensityMode::Buildup(_) => 1.0,
+            };
+            ui.add(egui::Slider::new(&mut level, 0.0..=1.0).text("Intensity"));
+            self.density_mode = DensityMode::Fixed(Fixed(level));
+        }
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
@@ -446,6 +545,9 @@ impl GasciiApp {
             {
                 self.set_tool(ToolKind::Selection);
             }
+            if ui.selectable_label(self.tool_kind == ToolKind::Brush, "Brush (B)").clicked() {
+                self.set_tool(ToolKind::Brush);
+            }
             ui.separator();
 
             if ui.add_enabled(self.history.can_undo(), egui::Button::new("Undo")).clicked() {
@@ -476,7 +578,123 @@ impl GasciiApp {
                 self.flush_active_tool();
                 ui.ctx().copy_text(export_text(&self.doc));
             }
+            ui.separator();
+
+            if ui.button("Resize…").clicked() {
+                // Reads self.doc for the current extent, which a pending burst/float doesn't
+                // change (extent is fixed regardless), but flushing keeps the dialog's initial
+                // W/H consistent with whatever's about to be committed anyway.
+                self.flush_active_tool();
+                self.resize_w = self.doc.width;
+                self.resize_h = self.doc.height;
+                self.resize_dialog_open = true;
+            }
+            if ui.button("Export PNG").clicked() {
+                // Not the authoritative flush — harmless dialog-open convenience only. The dialog
+                // is non-modal, so more edits can happen while it's open; `export_png_file` (fired
+                // by the dialog's own "Export…" button) re-flushes immediately before reading
+                // `self.doc`, which is the flush that actually matters.
+                self.flush_active_tool();
+                self.png_dialog_open = true;
+            }
         });
+    }
+
+    /// Bounded W/H entry, top-left anchored (grow pads Blank, shrink crops bottom/right); Apply
+    /// pushes exactly one undo entry via `resize_document`, Cancel closes without touching the
+    /// document.
+    fn resize_dialog(&mut self, ctx: &egui::Context) {
+        if !self.resize_dialog_open {
+            return;
+        }
+        let mut open = self.resize_dialog_open;
+        egui::Window::new("Resize").open(&mut open).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Width");
+                ui.add(egui::DragValue::new(&mut self.resize_w).range(1..=Document::MAX_WIDTH));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Height");
+                ui.add(egui::DragValue::new(&mut self.resize_h).range(1..=Document::MAX_HEIGHT));
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Apply").clicked() {
+                    // Resize reads/replaces self.doc directly — flush any pending burst/float
+                    // into the pre-resize document first, same trigger-table discipline as
+                    // Save/Export/Copy.
+                    self.flush_active_tool();
+                    match resize_document(&self.doc, self.resize_w, self.resize_h) {
+                        Ok(Some(edit)) => {
+                            self.history.apply(&mut self.doc, edit);
+                            self.last_error = None;
+                            self.resize_dialog_open = false;
+                        }
+                        Ok(None) => self.resize_dialog_open = false, // same extent: silent close
+                        Err(ResizeError::ZeroExtent) => {
+                            self.last_error = Some("resize: width and height must be at least 1".to_string());
+                        }
+                        Err(ResizeError::TooLarge { max_width, max_height, .. }) => {
+                            self.last_error =
+                                Some(format!("resize: exceeds the {max_width}x{max_height} maximum"));
+                        }
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    self.resize_dialog_open = false;
+                }
+            });
+        });
+        self.resize_dialog_open &= open;
+    }
+
+    /// A cell-scale preset picker; on confirm, opens a native save dialog and writes the
+    /// rasterized PNG bytes.
+    fn png_export_dialog(&mut self, ctx: &egui::Context) {
+        if !self.png_dialog_open {
+            return;
+        }
+        let mut open = self.png_dialog_open;
+        let mut do_export = false;
+        egui::Window::new("Export PNG").open(&mut open).show(ctx, |ui| {
+            ui.label("Pixels per cell:");
+            ui.horizontal(|ui| {
+                for &scale in &PNG_SCALE_PRESETS {
+                    ui.selectable_value(&mut self.png_cell_px, scale, format!("{scale}px"));
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Export…").clicked() {
+                    do_export = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    self.png_dialog_open = false;
+                }
+            });
+        });
+        self.png_dialog_open &= open;
+        if do_export {
+            self.export_png_file();
+            self.png_dialog_open = false;
+        }
+    }
+
+    /// Rasterizes and writes the current document to a user-picked `.png` file at
+    /// `self.png_cell_px` pixels per cell. Reads `self.doc` directly, so it flushes any pending
+    /// burst/float first — the dialog is a non-modal `egui::Window`, so the canvas stays
+    /// interactive while it's open and a Text/Selection edit can still be in flight at the moment
+    /// "Export…" is actually clicked, not just when the dialog was opened.
+    fn export_png_file(&mut self) {
+        self.flush_active_tool();
+        let Some(path) = rfd::FileDialog::new().add_filter("PNG", &["png"]).save_file() else {
+            return;
+        };
+        match png_export::export_png(&self.doc, self.png_cell_px) {
+            Ok(bytes) => match std::fs::write(&path, bytes) {
+                Ok(()) => self.last_error = None,
+                Err(e) => self.last_error = Some(format!("failed to write {}: {e}", path.display())),
+            },
+            Err(e) => self.last_error = Some(format!("PNG export failed: {e}")),
+        }
     }
 
     /// Reads and parses a `.gascii` file picked via a native dialog. A freshly loaded document
@@ -611,6 +829,10 @@ impl eframe::App for GasciiApp {
         egui::CentralPanel::default().show(ui, |ui| {
             canvas::show(ui, self);
         });
+
+        let ctx = ui.ctx().clone();
+        self.resize_dialog(&ctx);
+        self.png_export_dialog(&ctx);
     }
 }
 

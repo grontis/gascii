@@ -21,7 +21,7 @@ GASCII is a native desktop editor for ASCII/ANSI art: a character-grid canvas dr
 
 ### 2.1 Document & data model
 
-- **FR-1** A Document has fixed, explicit canvas dimensions (width × height in cells), resizable via an undoable resize operation. Default new-document size: **80×25**. No auto-grow, no infinite canvas.
+- **FR-1** A Document has fixed, explicit canvas dimensions (width × height in cells), resizable via an undoable resize operation — top-left anchored: growing pads with Blank at the bottom/right, shrinking crops from the bottom/right, and undo restores cropped content exactly. Default new-document size: **80×25**. No auto-grow, no infinite canvas.
 - **FR-2** A Document contains an ordered stack of Layers; v1 always creates exactly one and exposes no layer UI (ADR-0006).
 - **FR-3** Each Cell stores `{ch: char, fg: Rgba, bg: Rgba}` with 8-bit alpha (ADR-0002).
 - **FR-4** The canonical empty cell is **Blank** = space glyph + fully transparent bg; there is no null cell state (ADR-0007). Erasing writes Blank; compositing and export trimming test blankness.
@@ -43,7 +43,7 @@ GASCII is a native desktop editor for ASCII/ANSI art: a character-grid canvas dr
 - **FR-14** The Palette is organized in curated Pages: **ASCII** (95 printable), **Box drawing** (U+2500 block), **Blocks/shades** (`░▒▓█ ▀▄▌▐`…). Future: Braille patterns. All curated glyphs are single-width (ADR-0003).
 - **FR-15** **Ramps** are first-class palette objects: ordered light→dark char sequences (e.g. ` .:-=+*#%@`, `░▒▓█`). Built-ins ship in v1; user-defined ramps may follow.
 - **FR-16** Any character entering a Document (palette, typing, paste, import) is validated single-width via `unicode-width`; double-width and combining characters are rejected (dropped with a visible warning), never stored (ADR-0003).
-- **FR-17** The **density brush** exposes one intensity parameter (0.0–1.0) indexing the active Ramp. Intensity sources are pluggable (ADR-0004). v1 ships **Fixed** (slider + number-key shortcuts) and **Buildup** (each pass advances a cell one ramp step). Falloff, speed, and pressure are post-v1 sources; nothing else may depend on pressure.
+- **FR-17** The **density brush** exposes one intensity parameter (0.0–1.0) indexing the active Ramp. Intensity sources are pluggable (ADR-0004). v1 ships **Fixed** (slider + number-key shortcuts: `1`–`9` → 0.1–0.9, `0` → 1.0) and **Buildup** (each pass advances a cell one ramp step; a cell's ramp position is its glyph's index in the active ramp, and a glyph not on the ramp starts at the lightest step). Falloff, speed, and pressure are post-v1 sources; nothing else may depend on pressure.
 
 ### 2.4 Color
 
@@ -61,7 +61,7 @@ GASCII is a native desktop editor for ASCII/ANSI art: a character-grid canvas dr
 ### 2.7 Files & export
 
 - **FR-22** Native format `.gascii`: versioned JSON via serde, round-tripping the entire Document (dimensions, settings, all layers, all cell data) (ADR-0005). Unknown newer versions fail with a clear message. Loading is hardened against malformed or hostile files: invalid input always yields a specific error (never a crash), declared dimensions and layer counts are validated against the maxima (1024×1024 cells, 256 layers) before any allocation, and every loaded glyph passes the same width validation as typed input. Saves are atomic (write to a sibling temp file, then rename), so an interrupted save never corrupts an existing file.
-- **FR-23** v1 exports: **plain text** (compositing flattened, Blank → space, trailing whitespace trimmed, also available as copy-to-clipboard) and **PNG** (rasterized at a chosen cell scale). Post-v1 ladder: ANSI escape text, HTML, REXPaint `.xp`.
+- **FR-23** v1 exports: **plain text** (compositing flattened, Blank → space, trailing whitespace trimmed, also available as copy-to-clipboard) and **PNG** (rasterized at a chosen cell scale; straight-alpha output with Blank cells transparent, no baked-in editor background). PNG output dimensions are validated with overflow-safe math against a total-pixel cap before any buffer is allocated — a user-chosen scale is untrusted input like any other. Post-v1 ladder: ANSI escape text, HTML, REXPaint `.xp`.
 
 ### 2.8 Non-functional
 

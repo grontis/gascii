@@ -278,7 +278,15 @@ mod tests {
     use crate::tools::PlaneMask;
 
     fn ctx() -> ToolCtx {
-        ToolCtx { layer: 0, glyph: '#', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT, mask: PlaneMask::ALL }
+        ToolCtx {
+            layer: 0,
+            glyph: '#',
+            fg: Rgba::WHITE,
+            bg: Rgba::TRANSPARENT,
+            mask: PlaneMask::ALL,
+            density: crate::brush::DensityMode::Fixed(crate::brush::Fixed(1.0)),
+            ramp: Vec::new(),
+        }
     }
 
     fn cell(ch: char) -> Cell {
@@ -346,7 +354,7 @@ mod tests {
         sel.update(ToolEvent::Press { x: 3, y: 3 }, &tctx, &doc); // lift
         sel.update(ToolEvent::Drag { x: 4, y: 3 }, &tctx, &doc); // move +1 in x (partial overlap)
         let resp = sel.update(ToolEvent::Commit, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit");
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit") else { panic!("expected an Edit::Cells") };
 
         let coords: std::collections::HashSet<(u16, u16)> = cells.iter().map(|c| (c.x, c.y)).collect();
         assert_eq!(cells.len(), coords.len(), "each touched cell must appear exactly once");
@@ -368,7 +376,7 @@ mod tests {
         sel.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &doc); // lift
         sel.update(ToolEvent::Drag { x: 10, y: 10 }, &tctx, &doc); // move far away (disjoint)
         let resp = sel.update(ToolEvent::Commit, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit");
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit") else { panic!("expected an Edit::Cells") };
         assert_eq!(cells.len(), 8, "4 source cells blanked + 4 destination cells written, fully disjoint");
 
         let mut history = crate::edit::History::new();
@@ -398,7 +406,7 @@ mod tests {
         sel.update(ToolEvent::Press { x: 3, y: 3 }, &tctx, &doc); // lift
         sel.update(ToolEvent::Drag { x: 6, y: 6 }, &tctx, &doc); // shift +3, pushes off the 5x5 canvas
         let resp = sel.update(ToolEvent::Commit, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit");
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit") else { panic!("expected an Edit::Cells") };
 
         // All 4 source cells must be blanked regardless of how much of the destination survived.
         for y in 3..5u16 {
@@ -425,7 +433,7 @@ mod tests {
         sel.update(ToolEvent::Drag { x: 5, y: 5 }, &tctx, &doc); // move elsewhere
 
         let resp = sel.update(ToolEvent::Delete, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a blank-source edit");
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a blank-source edit") else { panic!("expected an Edit::Cells") };
         assert_eq!(cells.len(), 4);
         assert!(cells.iter().all(|c| c.after == Cell::BLANK));
         // The destination region (5,5)-(6,6) must be untouched — the float's content is discarded.
@@ -442,7 +450,7 @@ mod tests {
         sel.update(ToolEvent::Release, &tctx, &doc);
 
         let resp = sel.update(ToolEvent::Delete, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a blank edit");
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a blank edit") else { panic!("expected an Edit::Cells") };
         assert_eq!(cells.len(), 4);
         assert!(cells.iter().all(|c| c.after == Cell::BLANK));
     }
@@ -485,7 +493,7 @@ mod tests {
         assert_eq!(sel.pending().len(), 4);
 
         let resp = sel.update(ToolEvent::Commit, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a write edit");
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a write edit") else { panic!("expected an Edit::Cells") };
         assert_eq!(cells.len(), 4, "a pasted stamp has no source, so drop only writes the destination");
         for c in &cells {
             assert!((3..5).contains(&c.x) && (3..5).contains(&c.y));
@@ -509,7 +517,7 @@ mod tests {
         doc.set_cell(0, 6, 6, externally_written);
 
         let resp = sel.update(ToolEvent::Commit, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit");
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit") else { panic!("expected an Edit::Cells") };
         let dest_edit = cells.iter().find(|c| c.x == 6 && c.y == 6).unwrap();
         assert_eq!(dest_edit.before, externally_written, "before must reflect doc's post-mutation state");
     }
@@ -528,7 +536,7 @@ mod tests {
         // Click far away from the floating stamp.
         let resp = sel.update(ToolEvent::Press { x: 9, y: 9 }, &tctx, &doc);
         let edit = commit_edit(resp).expect("click-away must drop the float as a committed edit");
-        let Edit::Cells(cells) = edit;
+        let Edit::Cells(cells) = edit else { panic!("expected an Edit::Cells") };
         assert!(cells.iter().any(|c| c.x == 5 && c.y == 5), "the drop must include the destination write");
 
         // A brand-new marquee now starts at the click point.
@@ -553,7 +561,7 @@ mod tests {
         sel.update(ToolEvent::Press { x: 1, y: 1 }, &tctx, &doc); // lift
         sel.update(ToolEvent::Drag { x: 6, y: 1 }, &tctx, &doc); // move +5 onto filled dest (6,1)-(7,1)
         let resp = sel.update(ToolEvent::Commit, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit");
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit") else { panic!("expected an Edit::Cells") };
 
         let dest_blank = cells.iter().find(|c| c.x == 6 && c.y == 1).expect("dest cell under the float's Blank must be edited");
         assert_eq!(dest_blank.after, Cell::BLANK, "a Blank patch cell must overwrite the destination, not leave it showing through");
@@ -581,7 +589,7 @@ mod tests {
         let patch = CellPatch { width: 2, height: 1, cells: vec![cell('Q'), Cell::BLANK] };
         sel.accept_stamp(patch, (3, 3), &doc);
         let resp = sel.update(ToolEvent::Commit, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a write edit");
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a write edit") else { panic!("expected an Edit::Cells") };
 
         let blank_edit = cells.iter().find(|c| c.x == 4 && c.y == 3).expect("dest cell under the pasted Blank must be edited");
         assert_eq!(blank_edit.after, Cell::BLANK);

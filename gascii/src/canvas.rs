@@ -141,6 +141,8 @@ pub(crate) fn tool_ctx(app: &GasciiApp) -> gascii_core::ToolCtx {
         fg: app.active_fg,
         bg: app.active_bg,
         mask: app.mask,
+        density: app.density_mode,
+        ramp: app.ramps[app.active_ramp].chars.clone(),
     }
 }
 
@@ -379,10 +381,21 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
     }
 
     // Focus-loss detection: a burst mid-typing or a floating stamp must commit, not vanish, when
-    // the OS window loses focus. A no-op via flush_active_tool's own guard for every other tool.
+    // the OS window loses focus (flush_active_tool is a no-op for every other tool). Additionally,
+    // an in-progress pointer gesture (stroke or space-pan) has no synthetic mouse-up on an OS-level
+    // focus loss (e.g. alt-tabbing mid-drag) — left alone, `stroke_active`/`space_pan_active` would
+    // stay stuck until the next primary press. Cancel the gesture outright so the tool and the app
+    // both return to a clean idle state; this guards different flags than flush_active_tool (burst/
+    // float vs. pointer-gesture ownership) so both run on the same focus-loss edge.
     let focused = ui.input(|i| i.viewport().focused).unwrap_or(true);
     if app.was_focused && !focused {
         app.flush_active_tool();
+        if app.stroke_active || app.space_pan_active {
+            let tctx = tool_ctx(app);
+            app.tool.update(ToolEvent::Cancel, &tctx, &app.doc);
+            app.stroke_active = false;
+            app.space_pan_active = false;
+        }
     }
     app.was_focused = focused;
 

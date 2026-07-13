@@ -168,7 +168,15 @@ mod tests {
     use crate::model::{DocSettings, Rgba};
 
     fn ctx(mask: PlaneMask) -> ToolCtx {
-        ToolCtx { layer: 0, glyph: '#', fg: Rgba(1, 2, 3, 255), bg: Rgba(4, 5, 6, 255), mask }
+        ToolCtx {
+            layer: 0,
+            glyph: '#',
+            fg: Rgba(1, 2, 3, 255),
+            bg: Rgba(4, 5, 6, 255),
+            mask,
+            density: crate::brush::DensityMode::Fixed(crate::brush::Fixed(1.0)),
+            ramp: Vec::new(),
+        }
     }
 
     fn commit_edit(resp: ToolResponse) -> Option<Edit> {
@@ -200,7 +208,7 @@ mod tests {
         }
         let resp = tool.update(ToolEvent::Commit, &tctx, &doc);
         let edit = commit_edit(resp).expect("expected a committed edit");
-        let Edit::Cells(cells) = edit;
+        let Edit::Cells(cells) = edit else { panic!("expected an Edit::Cells") };
         assert_eq!(cells.len(), 3);
         let mut chars: Vec<char> = cells.iter().map(|c| c.after.ch).collect();
         chars.sort();
@@ -218,7 +226,7 @@ mod tests {
         tool.update(ToolEvent::Char('b'), &tctx, &doc);
         let resp = tool.update(ToolEvent::Commit, &tctx, &doc);
         let edit = commit_edit(resp).unwrap();
-        let Edit::Cells(cells) = edit;
+        let Edit::Cells(cells) = edit else { panic!("expected an Edit::Cells") };
         let b_cell = cells.iter().find(|c| c.after.ch == 'b').unwrap();
         assert_eq!((b_cell.x, b_cell.y), (5, 1), "Enter must return to the anchor column, not 0");
     }
@@ -271,7 +279,7 @@ mod tests {
         tool.update(ToolEvent::Char('b'), &tctx, &doc); // no-op: cursor.x >= width
         let resp = tool.update(ToolEvent::Commit, &tctx, &doc);
         let edit = commit_edit(resp).unwrap();
-        let Edit::Cells(cells) = edit;
+        let Edit::Cells(cells) = edit else { panic!("expected an Edit::Cells") };
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0].after.ch, 'a', "second Char must not overwrite — cursor already past width");
     }
@@ -333,7 +341,7 @@ mod tests {
         tool.update(ToolEvent::Char('a'), &tctx, &doc);
         let resp = tool.update(ToolEvent::Press { x: 10, y: 10 }, &tctx, &doc);
         let edit = commit_edit(resp).expect("click-away must flush the old burst");
-        let Edit::Cells(cells) = edit;
+        let Edit::Cells(cells) = edit else { panic!("expected an Edit::Cells") };
         assert_eq!(cells.len(), 1);
         assert_eq!((cells[0].x, cells[0].y), (0, 0));
 
@@ -352,14 +360,14 @@ mod tests {
         tool.update(ToolEvent::Char('a'), &tctx, &doc); // cursor -> (1,0)
         let resp = tool.update(ToolEvent::Commit, &tctx, &doc);
         let first_edit = commit_edit(resp).unwrap();
-        let Edit::Cells(first_cells) = first_edit;
+        let Edit::Cells(first_cells) = first_edit else { panic!("expected an Edit::Cells") };
         assert_eq!(first_cells.len(), 1);
 
         // Cursor stays put (no Press happened), so typing lands at (1,0), a fresh burst.
         tool.update(ToolEvent::Char('b'), &tctx, &doc);
         let resp2 = tool.update(ToolEvent::Commit, &tctx, &doc);
         let second_edit = commit_edit(resp2).unwrap();
-        let Edit::Cells(second_cells) = second_edit;
+        let Edit::Cells(second_cells) = second_edit else { panic!("expected an Edit::Cells") };
         assert_eq!(second_cells.len(), 1);
         assert_eq!((second_cells[0].x, second_cells[0].y), (1, 0));
         assert_eq!(second_cells[0].after.ch, 'b');
@@ -417,7 +425,7 @@ mod tests {
 
         let resp = tool.update(ToolEvent::Commit, &tctx, &doc);
         let edit = commit_edit(resp).unwrap();
-        let Edit::Cells(cells) = edit;
+        let Edit::Cells(cells) = edit else { panic!("expected an Edit::Cells") };
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0].before, externally_written, "resync must re-pin before to doc's post-mutation value");
         assert_eq!(cells[0].after.ch, 'a');
@@ -438,7 +446,7 @@ mod tests {
 
         let resp = tool.update(ToolEvent::Commit, &tctx, &doc);
         let edit = commit_edit(resp).unwrap();
-        let Edit::Cells(cells) = edit;
+        let Edit::Cells(cells) = edit else { panic!("expected an Edit::Cells") };
         assert_eq!(cells.len(), 1, "resync must not pull in cells the burst never touched");
         assert_eq!((cells[0].x, cells[0].y), (5, 5));
     }
@@ -454,7 +462,7 @@ mod tests {
         tool.update(ToolEvent::Char('b'), &tctx, &doc); // rewrites (5,5)='b' again
         let resp = tool.update(ToolEvent::Commit, &tctx, &doc);
         let edit = commit_edit(resp).unwrap();
-        let Edit::Cells(cells) = edit;
+        let Edit::Cells(cells) = edit else { panic!("expected an Edit::Cells") };
         assert_eq!(cells.len(), 1, "one cell touched three times within a burst is still one CellEdit");
         assert_eq!(cells[0].before, Cell::BLANK, "before must be the pre-burst value, not an intermediate");
         assert_eq!(cells[0].after.ch, 'b');

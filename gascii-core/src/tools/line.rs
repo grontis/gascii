@@ -85,7 +85,15 @@ mod tests {
     use crate::tools::PlaneMask;
 
     fn ctx(mask: PlaneMask, glyph: char) -> ToolCtx {
-        ToolCtx { layer: 0, glyph, fg: Rgba::WHITE, bg: Rgba::TRANSPARENT, mask }
+        ToolCtx {
+            layer: 0,
+            glyph,
+            fg: Rgba::WHITE,
+            bg: Rgba::TRANSPARENT,
+            mask,
+            density: crate::brush::DensityMode::Fixed(crate::brush::Fixed(1.0)),
+            ramp: Vec::new(),
+        }
     }
 
     fn drag(doc: &Document, tctx: &ToolCtx, from: (u16, u16), to: (u16, u16)) -> Line {
