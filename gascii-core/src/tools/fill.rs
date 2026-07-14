@@ -182,15 +182,15 @@ mod tests {
     }
 
     #[test]
-    fn glyph_only_mask_fills_glyph_but_preserves_existing_fg_and_bg_per_cell() {
+    fn glyph_only_mask_fills_glyph_and_its_text_color_but_preserves_existing_bg_per_cell() {
         let mut doc = Document::new(3, 1);
         // Three Blank-glyph cells that differ only in fg — but the match is by glyph+fg+bg, so
         // this is actually three separate 1-cell regions, not one connected match.
-        doc.set_cell(0, 0, 0, Cell { ch: ' ', fg: Rgba(1, 1, 1, 255), bg: Rgba::TRANSPARENT });
-        doc.set_cell(0, 1, 0, Cell { ch: ' ', fg: Rgba(2, 2, 2, 255), bg: Rgba::TRANSPARENT });
-        doc.set_cell(0, 2, 0, Cell { ch: ' ', fg: Rgba(1, 1, 1, 255), bg: Rgba::TRANSPARENT });
+        doc.set_cell(0, 0, 0, Cell { ch: ' ', fg: Rgba(1, 1, 1, 255), bg: Rgba(7, 7, 7, 255) });
+        doc.set_cell(0, 1, 0, Cell { ch: ' ', fg: Rgba(2, 2, 2, 255), bg: Rgba(7, 7, 7, 255) });
+        doc.set_cell(0, 2, 0, Cell { ch: ' ', fg: Rgba(1, 1, 1, 255), bg: Rgba(7, 7, 7, 255) });
 
-        let mask = PlaneMask { glyph: true, fg: false, bg: false };
+        let mask = PlaneMask { glyph: true, bg: false };
         let tctx = ctx(mask, '#', Rgba(9, 9, 9, 255), Rgba(9, 9, 9, 255));
         let resp = press_release(&doc, &tctx, (0, 0));
         let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
@@ -200,7 +200,8 @@ mod tests {
         // outside the match region even though it's adjacent.
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0].after.ch, '#');
-        assert_eq!(cells[0].after.fg, Rgba(1, 1, 1, 255), "fg masked off: keeps existing per-cell fg");
+        assert_eq!(cells[0].after.fg, Rgba(9, 9, 9, 255), "text color follows the glyph plane");
+        assert_eq!(cells[0].after.bg, Rgba(7, 7, 7, 255), "bg masked off: keeps existing per-cell bg");
     }
 
     #[test]
@@ -209,9 +210,8 @@ mod tests {
         let proposed_fg = Rgba(10, 20, 30, 255);
         let proposed_bg = Rgba(40, 50, 60, 255);
         for mask in [
-            PlaneMask { glyph: true, fg: false, bg: false },
-            PlaneMask { glyph: false, fg: true, bg: false },
-            PlaneMask { glyph: false, fg: false, bg: true },
+            PlaneMask { glyph: true, bg: false },
+            PlaneMask { glyph: false, bg: true },
             PlaneMask::ALL,
         ] {
             let tctx = ctx(mask, '@', proposed_fg, proposed_bg);
@@ -221,7 +221,7 @@ mod tests {
             };
             for c in &cells {
                 assert_eq!(c.after.ch == '@', mask.glyph);
-                assert_eq!(c.after.fg == proposed_fg, mask.fg);
+                assert_eq!(c.after.fg == proposed_fg, mask.glyph, "text color follows the glyph plane");
                 assert_eq!(c.after.bg == proposed_bg, mask.bg);
             }
         }

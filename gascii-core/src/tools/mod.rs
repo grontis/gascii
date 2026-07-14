@@ -26,22 +26,23 @@ use crate::clipboard::CellPatch;
 use crate::edit::{CellEdit, Edit};
 use crate::model::{Cell, Document, Rgba};
 
-/// Filters what a stroke *writes*: glyph / fg / bg, independently. It only ever gates writes —
-/// anything that reads or compares cells does so unmasked.
+/// Filters what a stroke *writes*: the glyph (always drawn in its own text color) and the
+/// background, independently. It only ever gates writes — anything that reads or compares cells
+/// does so unmasked.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PlaneMask {
+    /// Writes the glyph together with its text color — the two are inseparable.
     pub glyph: bool,
-    pub fg: bool,
     pub bg: bool,
 }
 
 impl PlaneMask {
-    pub const ALL: PlaneMask = PlaneMask { glyph: true, fg: true, bg: true };
+    pub const ALL: PlaneMask = PlaneMask { glyph: true, bg: true };
 }
 
 impl Default for PlaneMask {
-    /// All planes on — a stroke fully replaces the cell (glyph, fg, and bg), matching the
-    /// REXPaint/ANSI-editor convention that drawing on top of existing art doesn't leave stray
+    /// All planes on — a stroke fully replaces the cell (glyph, its text color, and bg), matching
+    /// the REXPaint/ANSI-editor convention that drawing on top of existing art doesn't leave stray
     /// old-bg fringe behind. Individual planes can still be toggled off for selective drawing.
     fn default() -> Self {
         PlaneMask::ALL
@@ -49,11 +50,11 @@ impl Default for PlaneMask {
 }
 
 /// Applies `mask` to decide, per plane, whether `proposed` or the pre-existing `before` value
-/// wins.
+/// wins. The glyph and its text color share one plane: writing the glyph writes its color too.
 pub fn mask_apply(before: Cell, proposed: Cell, mask: PlaneMask) -> Cell {
     Cell {
         ch: if mask.glyph { proposed.ch } else { before.ch },
-        fg: if mask.fg { proposed.fg } else { before.fg },
+        fg: if mask.glyph { proposed.fg } else { before.fg },
         bg: if mask.bg { proposed.bg } else { before.bg },
     }
 }
@@ -443,7 +444,7 @@ mod tests {
     fn mask_apply_all_false_is_identity_over_before() {
         let before = c('a', Rgba::WHITE, Rgba::TRANSPARENT);
         let proposed = c('b', Rgba(1, 2, 3, 255), Rgba(4, 5, 6, 255));
-        let mask = PlaneMask { glyph: false, fg: false, bg: false };
+        let mask = PlaneMask { glyph: false, bg: false };
         assert_eq!(mask_apply(before, proposed, mask), before);
     }
 
@@ -455,68 +456,24 @@ mod tests {
     }
 
     #[test]
-    fn mask_apply_glyph_only() {
+    fn mask_apply_glyph_only_writes_glyph_and_its_text_color_but_not_bg() {
         let before = c('a', Rgba::WHITE, Rgba::TRANSPARENT);
         let proposed = c('b', Rgba(1, 2, 3, 255), Rgba(4, 5, 6, 255));
-        let mask = PlaneMask { glyph: true, fg: false, bg: false };
+        let mask = PlaneMask { glyph: true, bg: false };
         let result = mask_apply(before, proposed, mask);
         assert_eq!(result.ch, 'b');
-        assert_eq!(result.fg, before.fg);
+        assert_eq!(result.fg, proposed.fg, "text color follows the glyph");
         assert_eq!(result.bg, before.bg);
     }
 
     #[test]
-    fn mask_apply_fg_only() {
+    fn mask_apply_bg_only_writes_bg_but_leaves_glyph_and_its_text_color() {
         let before = c('a', Rgba::WHITE, Rgba::TRANSPARENT);
         let proposed = c('b', Rgba(1, 2, 3, 255), Rgba(4, 5, 6, 255));
-        let mask = PlaneMask { glyph: false, fg: true, bg: false };
+        let mask = PlaneMask { glyph: false, bg: true };
         let result = mask_apply(before, proposed, mask);
         assert_eq!(result.ch, before.ch);
-        assert_eq!(result.fg, proposed.fg);
-        assert_eq!(result.bg, before.bg);
-    }
-
-    #[test]
-    fn mask_apply_bg_only() {
-        let before = c('a', Rgba::WHITE, Rgba::TRANSPARENT);
-        let proposed = c('b', Rgba(1, 2, 3, 255), Rgba(4, 5, 6, 255));
-        let mask = PlaneMask { glyph: false, fg: false, bg: true };
-        let result = mask_apply(before, proposed, mask);
-        assert_eq!(result.ch, before.ch);
-        assert_eq!(result.fg, before.fg);
-        assert_eq!(result.bg, proposed.bg);
-    }
-
-    #[test]
-    fn mask_apply_glyph_fg_combo() {
-        let before = c('a', Rgba::WHITE, Rgba::TRANSPARENT);
-        let proposed = c('b', Rgba(1, 2, 3, 255), Rgba(4, 5, 6, 255));
-        let mask = PlaneMask { glyph: true, fg: true, bg: false };
-        let result = mask_apply(before, proposed, mask);
-        assert_eq!(result.ch, 'b');
-        assert_eq!(result.fg, proposed.fg);
-        assert_eq!(result.bg, before.bg);
-    }
-
-    #[test]
-    fn mask_apply_glyph_bg_combo() {
-        let before = c('a', Rgba::WHITE, Rgba::TRANSPARENT);
-        let proposed = c('b', Rgba(1, 2, 3, 255), Rgba(4, 5, 6, 255));
-        let mask = PlaneMask { glyph: true, fg: false, bg: true };
-        let result = mask_apply(before, proposed, mask);
-        assert_eq!(result.ch, 'b');
-        assert_eq!(result.fg, before.fg);
-        assert_eq!(result.bg, proposed.bg);
-    }
-
-    #[test]
-    fn mask_apply_fg_bg_combo() {
-        let before = c('a', Rgba::WHITE, Rgba::TRANSPARENT);
-        let proposed = c('b', Rgba(1, 2, 3, 255), Rgba(4, 5, 6, 255));
-        let mask = PlaneMask { glyph: false, fg: true, bg: true };
-        let result = mask_apply(before, proposed, mask);
-        assert_eq!(result.ch, before.ch);
-        assert_eq!(result.fg, proposed.fg);
+        assert_eq!(result.fg, before.fg, "text color stays put when the glyph plane is off");
         assert_eq!(result.bg, proposed.bg);
     }
 
@@ -524,7 +481,6 @@ mod tests {
     fn plane_mask_default_is_all_planes_on() {
         let mask = PlaneMask::default();
         assert!(mask.glyph);
-        assert!(mask.fg);
         assert!(mask.bg);
         assert_eq!(mask, PlaneMask::ALL);
     }

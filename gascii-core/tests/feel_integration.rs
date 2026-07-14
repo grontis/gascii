@@ -255,11 +255,11 @@ fn buildup_stroke_over_mixed_on_ramp_off_ramp_and_blank_cells_commits_as_one_edi
 }
 
 #[test]
-fn fixed_intensity_with_a_glyph_only_mask_writes_the_ramp_glyph_but_preserves_the_cells_existing_colors() {
+fn fixed_intensity_with_a_glyph_only_mask_writes_the_ramp_glyph_and_its_text_color_but_preserves_the_bg() {
     let mut doc = Document::new(3, 3);
     let existing = Cell { ch: 'Q', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) };
     doc.set_cell(0, 1, 1, existing);
-    let glyph_only = PlaneMask { glyph: true, fg: false, bg: false };
+    let glyph_only = PlaneMask { glyph: true, bg: false };
     let tctx = ctx(
         DensityMode::Fixed(Fixed(1.0)),
         " .:-=+*#%@",
@@ -274,7 +274,7 @@ fn fixed_intensity_with_a_glyph_only_mask_writes_the_ramp_glyph_but_preserves_th
 
     let result = doc.cell(0, 1, 1).unwrap();
     assert_eq!(result.ch, '@', "Fixed(1.0) over a 10-char ramp lands on the last (darkest) glyph");
-    assert_eq!(result.fg, existing.fg, "glyph-only mask must preserve the cell's original fg");
+    assert_eq!(result.fg, Rgba(255, 0, 0, 255), "text color follows the glyph plane");
     assert_eq!(result.bg, existing.bg, "glyph-only mask must preserve the cell's original bg");
 }
 

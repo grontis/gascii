@@ -53,7 +53,7 @@ fn full_lifecycle_round_trip_through_mixed_tool_pipeline_preserves_document_and_
     stroke(&mut pencil2, &mut history, &mut doc, &base, &[(5, 5)]);
 
     // 3. Pencil, glyph+fg only (bg off): overwrites (5,5)'s glyph/fg but must leave its bg intact.
-    let glyph_fg_only = ctx(PlaneMask { glyph: true, fg: true, bg: false }, 'Q', Rgba(1, 2, 3, 255), Rgba(200, 200, 200, 255));
+    let glyph_fg_only = ctx(PlaneMask { glyph: true, bg: false }, 'Q', Rgba(1, 2, 3, 255), Rgba(200, 200, 200, 255));
     let mut pencil3 = Pencil::new();
     stroke(&mut pencil3, &mut history, &mut doc, &glyph_fg_only, &[(5, 5)]);
     assert_eq!(doc.cell(0, 5, 5).unwrap().bg, Rgba(11, 22, 33, 255), "sanity: selective stroke preserved bg pre-save");
@@ -65,7 +65,7 @@ fn full_lifecycle_round_trip_through_mixed_tool_pipeline_preserves_document_and_
     assert_eq!(doc.cell(0, 1, 3).unwrap().ch, 'i');
 
     // 5. Eraser, bg-only: clears just the bg plane of (0,0), leaving its glyph/fg from step 1.
-    let bg_only_erase = ctx(PlaneMask { glyph: false, fg: false, bg: true }, ' ', Rgba::WHITE, Rgba::TRANSPARENT);
+    let bg_only_erase = ctx(PlaneMask { glyph: false, bg: true }, ' ', Rgba::WHITE, Rgba::TRANSPARENT);
     let mut eraser = Eraser::new();
     stroke(&mut eraser, &mut history, &mut doc, &bg_only_erase, &[(0, 0)]);
     assert_eq!(doc.cell(0, 0, 0).unwrap().ch, '#', "sanity: bg-only erase left the glyph alone");

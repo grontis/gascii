@@ -88,10 +88,10 @@ mod tests {
     }
 
     #[test]
-    fn glyph_only_erase_blanks_char_keeps_fg_bg() {
+    fn glyph_only_erase_blanks_char_and_text_color_keeps_bg() {
         let doc = painted_doc();
         let existing = *doc.cell(0, 5, 5).unwrap();
-        let mask = PlaneMask { glyph: true, fg: false, bg: false };
+        let mask = PlaneMask { glyph: true, bg: false };
         let mut eraser = Eraser::new();
         let ctx = ctx(mask);
         eraser.update(ToolEvent::Press { x: 5, y: 5 }, &ctx, &doc);
@@ -101,15 +101,15 @@ mod tests {
             panic!("expected a committed edit");
         };
         assert_eq!(cells[0].after.ch, ' ');
-        assert_eq!(cells[0].after.fg, existing.fg);
-        assert_eq!(cells[0].after.bg, existing.bg);
+        assert_eq!(cells[0].after.fg, Cell::BLANK.fg, "text color is cleared alongside the glyph");
+        assert_eq!(cells[0].after.bg, existing.bg, "bg masked off");
     }
 
     #[test]
     fn bg_only_erase_clears_bg_keeps_glyph_fg() {
         let doc = painted_doc();
         let existing = *doc.cell(0, 5, 5).unwrap();
-        let mask = PlaneMask { glyph: false, fg: false, bg: true };
+        let mask = PlaneMask { glyph: false, bg: true };
         let mut eraser = Eraser::new();
         let ctx = ctx(mask);
         eraser.update(ToolEvent::Press { x: 5, y: 5 }, &ctx, &doc);

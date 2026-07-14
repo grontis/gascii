@@ -615,7 +615,6 @@ impl GasciiApp {
 
         ui.label("Write:");
         ui.checkbox(&mut self.mask.glyph, "Glyph");
-        ui.checkbox(&mut self.mask.fg, "Text Color");
         ui.checkbox(&mut self.mask.bg, "Background");
 
         if self.tool_kind == ToolKind::Brush {

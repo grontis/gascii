@@ -27,7 +27,7 @@ One grid position holding a single code point plus foreground and background col
 _Avoid_: Pixel, tile, character (that's the glyph it holds)
 
 **Plane**:
-One of the three independently-writable components of a Cell: glyph, foreground, background. Every tool can toggle which planes it writes.
+A writable component of a Cell that a tool can independently toggle: the glyph (drawn together with its text color — the two are inseparable) or the background. Every tool can choose which planes it writes.
 _Avoid_: Channel, layer (a Layer is a full canvas sheet, if/when added)
 
 ### Input & tools

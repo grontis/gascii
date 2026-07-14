@@ -218,7 +218,7 @@ fn moving_or_pasting_a_stamp_writes_full_cells_regardless_of_the_active_plane_ma
     let mut doc = Document::new(10, 10);
     let content = Cell { ch: 'Z', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) };
     doc.set_cell(0, 1, 1, content);
-    let glyph_only_mask = PlaneMask { glyph: true, fg: false, bg: false };
+    let glyph_only_mask = PlaneMask { glyph: true, bg: false };
     let tctx = ctx(glyph_only_mask, '#', Rgba::WHITE, Rgba::TRANSPARENT);
 
     let mut sel = SelectionTool::new();

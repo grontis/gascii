@@ -52,7 +52,7 @@ fn multi_stroke_undo_redo_round_trip_restores_document_byte_identical() {
     let mut history = History::new();
 
     let all_mask = ctx(PlaneMask::ALL, '#', Rgba(1, 2, 3, 255), Rgba(4, 5, 6, 255));
-    let glyph_fg_only_mask = PlaneMask { glyph: true, fg: true, bg: false };
+    let glyph_fg_only_mask = PlaneMask { glyph: true, bg: false };
     let glyph_fg_only = ctx(glyph_fg_only_mask, '@', Rgba(200, 0, 0, 255), Rgba(9, 9, 9, 255));
     let eraser_all = ctx(PlaneMask::ALL, ' ', Rgba::WHITE, Rgba::TRANSPARENT);
 
@@ -143,7 +143,7 @@ fn bg_off_mask_preserves_existing_background_in_both_overlay_and_committed_docum
     let existing_bg = Rgba(11, 22, 33, 255);
     doc.set_cell(0, 4, 4, Cell { ch: 'x', fg: Rgba(9, 9, 9, 255), bg: existing_bg });
 
-    let mask = PlaneMask { glyph: true, fg: true, bg: false };
+    let mask = PlaneMask { glyph: true, bg: false };
     let tctx = ctx(mask, 'Q', Rgba(1, 2, 3, 255), Rgba(200, 200, 200, 255));
     let mut pencil = Pencil::new();
 
@@ -211,7 +211,7 @@ fn bg_only_erase_after_full_paint_leaves_expected_composite_and_undoes_cleanly()
     let painted = doc.clone();
     assert_eq!(doc.cell(0, 3, 3), Some(&Cell { ch: 'Q', fg: Rgba(10, 20, 30, 255), bg: Rgba(40, 50, 60, 255) }));
 
-    let bg_only = PlaneMask { glyph: false, fg: false, bg: true };
+    let bg_only = PlaneMask { glyph: false, bg: true };
     let erase_ctx = ctx(bg_only, ' ', Rgba::WHITE, Rgba::TRANSPARENT);
     let mut eraser = Eraser::new();
     stroke(&mut eraser, &mut history, &mut doc, &erase_ctx, &[(3, 3)]);
@@ -254,13 +254,13 @@ fn full_plane_erase_over_partially_erased_cell_reaches_true_blank() {
     let mut doc = Document::new(10, 10);
     doc.set_cell(0, 2, 2, Cell { ch: 'x', fg: Rgba(1, 2, 3, 255), bg: Rgba(4, 5, 6, 255) });
 
-    let glyph_only = PlaneMask { glyph: true, fg: false, bg: false };
+    let glyph_only = PlaneMask { glyph: true, bg: false };
     let mut history = History::new();
     let mut eraser1 = Eraser::new();
     stroke(&mut eraser1, &mut history, &mut doc, &ctx(glyph_only, ' ', Rgba::WHITE, Rgba::TRANSPARENT), &[(2, 2)]);
     let after_glyph_erase = doc.cell(0, 2, 2).unwrap();
     assert_eq!(after_glyph_erase.ch, ' ');
-    assert_eq!(after_glyph_erase.fg, Rgba(1, 2, 3, 255), "glyph-only erase must not touch fg");
+    assert_eq!(after_glyph_erase.fg, Cell::BLANK.fg, "glyph plane clears the text color along with the glyph");
     assert_eq!(after_glyph_erase.bg, Rgba(4, 5, 6, 255), "glyph-only erase must not touch bg");
     assert!(!after_glyph_erase.is_blank(), "a colored bg survives a glyph-only erase, so the cell is not yet Blank");
 

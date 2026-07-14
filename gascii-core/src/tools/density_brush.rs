@@ -298,7 +298,7 @@ mod tests {
         let existing = Cell { ch: 'x', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) };
         doc.set_cell(0, 1, 1, existing);
         let mut tctx = ctx(DensityMode::Fixed(Fixed(1.0)), " .:-=+*#%@");
-        tctx.mask = PlaneMask { glyph: false, fg: false, bg: false };
+        tctx.mask = PlaneMask { glyph: false, bg: false };
         let mut brush = DensityBrush::new();
         brush.update(ToolEvent::Press { x: 1, y: 1 }, &tctx, &doc);
         let resp = brush.update(ToolEvent::Release, &tctx, &doc);

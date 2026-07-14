@@ -403,7 +403,7 @@ mod tests {
     fn pending_reflects_masked_result_mid_burst() {
         let mut doc = Document::new(20, 20);
         doc.set_cell(0, 4, 4, Cell { ch: 'x', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) });
-        let mask = PlaneMask { glyph: true, fg: false, bg: false };
+        let mask = PlaneMask { glyph: true, bg: false };
         let mut tool = TextTool::new();
         let tctx = ctx(mask);
         tool.update(ToolEvent::Press { x: 4, y: 4 }, &tctx, &doc);
@@ -411,7 +411,7 @@ mod tests {
         let pending = tool.pending();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].cell.ch, 'Q');
-        assert_eq!(pending[0].cell.fg, Rgba(9, 9, 9, 255), "fg masked off: keeps existing");
+        assert_eq!(pending[0].cell.fg, Rgba(1, 2, 3, 255), "text color follows the glyph plane");
         assert_eq!(pending[0].cell.bg, Rgba(8, 8, 8, 255), "bg masked off: keeps existing");
     }
 

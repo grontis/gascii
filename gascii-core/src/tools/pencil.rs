@@ -118,12 +118,12 @@ mod tests {
     }
 
     #[test]
-    fn glyph_only_mask_keeps_existing_fg_and_bg() {
+    fn glyph_only_mask_writes_glyph_and_text_color_but_keeps_bg() {
         let mut doc = Document::new(20, 20);
         let existing = Cell { ch: 'x', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) };
         doc.set_cell(0, 1, 1, existing);
 
-        let mask = PlaneMask { glyph: true, fg: false, bg: false };
+        let mask = PlaneMask { glyph: true, bg: false };
         let mut pencil = Pencil::new();
         let ctx = ctx(mask);
         pencil.update(ToolEvent::Press { x: 1, y: 1 }, &ctx, &doc);
@@ -134,35 +134,14 @@ mod tests {
         };
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0].after.ch, '#');
-        assert_eq!(cells[0].after.fg, existing.fg);
-        assert_eq!(cells[0].after.bg, existing.bg);
-    }
-
-    #[test]
-    fn fg_only_mask_keeps_existing_glyph_and_bg() {
-        let mut doc = Document::new(20, 20);
-        let existing = Cell { ch: 'x', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) };
-        doc.set_cell(0, 1, 1, existing);
-
-        let mask = PlaneMask { glyph: false, fg: true, bg: false };
-        let mut pencil = Pencil::new();
-        let ctx = ctx(mask);
-        pencil.update(ToolEvent::Press { x: 1, y: 1 }, &ctx, &doc);
-        let resp = pencil.update(ToolEvent::Release, &ctx, &doc);
-
-        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
-            panic!("expected a committed edit");
-        };
-        assert_eq!(cells.len(), 1);
-        assert_eq!(cells[0].after.ch, existing.ch);
-        assert_eq!(cells[0].after.fg, ctx.fg);
-        assert_eq!(cells[0].after.bg, existing.bg);
+        assert_eq!(cells[0].after.fg, ctx.fg, "text color follows the glyph plane");
+        assert_eq!(cells[0].after.bg, existing.bg, "bg masked off");
     }
 
     #[test]
     fn pending_reflects_masked_result_mid_stroke() {
         let doc = Document::new(20, 20);
-        let mask = PlaneMask { glyph: true, fg: false, bg: false };
+        let mask = PlaneMask { glyph: true, bg: false };
         let mut pencil = Pencil::new();
         let ctx = ctx(mask);
         pencil.update(ToolEvent::Press { x: 4, y: 4 }, &ctx, &doc);
@@ -172,7 +151,7 @@ mod tests {
         assert_eq!(pending[0].x, 4);
         assert_eq!(pending[0].y, 4);
         assert_eq!(pending[0].cell.ch, '#');
-        assert_eq!(pending[0].cell.fg, Rgba::WHITE); // unmasked fg keeps the blank default
+        assert_eq!(pending[0].cell.fg, ctx.fg); // text color follows the glyph plane
     }
 
     #[test]
