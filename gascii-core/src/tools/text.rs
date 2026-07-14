@@ -103,7 +103,7 @@ impl Tool for TextTool {
             }
             ToolEvent::Char(ch) => {
                 let Some((cx, cy)) = self.cursor else { return ToolResponse::Idle };
-                if crate::palette::allowed_in(ch, &doc.settings).is_err() {
+                if crate::palette::validate_width(ch).is_err() {
                     return ToolResponse::Active; // rejected: cursor does not advance
                 }
                 if cx >= doc.width {
@@ -169,7 +169,7 @@ impl Tool for TextTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DocSettings, Rgba};
+    use crate::model::Rgba;
 
     fn ctx(mask: PlaneMask) -> ToolCtx {
         ToolCtx {
@@ -303,19 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn non_ascii_char_rejected_under_strict_ascii() {
-        let mut doc = Document::new(20, 20);
-        doc.settings = DocSettings { strict_ascii: true };
-        let mut tool = TextTool::new();
-        let tctx = ctx(PlaneMask::ALL);
-        tool.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &doc);
-        let resp = tool.update(ToolEvent::Char('│'), &tctx, &doc);
-        assert!(matches!(resp, ToolResponse::Active));
-        assert!(tool.pending().is_empty(), "rejected char must not touch the burst");
-    }
-
-    #[test]
-    fn non_ascii_char_accepted_when_not_strict() {
+    fn single_width_non_ascii_char_accepted() {
         let doc = Document::new(20, 20);
         let mut tool = TextTool::new();
         let tctx = ctx(PlaneMask::ALL);
@@ -326,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_and_combining_chars_rejected_regardless_of_strict_ascii() {
+    fn wide_and_combining_chars_rejected() {
         let doc = Document::new(20, 20);
         let mut tool = TextTool::new();
         let tctx = ctx(PlaneMask::ALL);

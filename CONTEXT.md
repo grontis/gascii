@@ -7,7 +7,7 @@ A native ASCII/ANSI art editor: a character-grid canvas drawn on with continuous
 ### Canvas & cells
 
 **Document**:
-One saved GASCII artwork: fixed canvas dimensions, an ordered stack of Layers, and document settings (e.g. strict-ASCII toggle).
+One saved GASCII artwork: fixed canvas dimensions and an ordered stack of Layers.
 _Avoid_: File, project
 
 **Layer**:
@@ -40,14 +40,11 @@ _Avoid_: Drag, gesture, path
 A mode that translates pointer/keyboard input into Strokes (pencil, eraser, fill, rectangle, line, text, selection).
 
 **Auto-join**:
-Junction resolution for the rectangle/line tools: where strokes cross box-drawing characters, the union of arm directions picks the right glyph (`├ ┬ ┼`; `+` in strict-ASCII mode).
+Junction resolution for the rectangle/line tools: where strokes cross box-drawing characters, the union of arm directions picks the right glyph (`├ ┬ ┼`).
 
 **Floating stamp**:
 Cells lifted by a selection move or produced by paste, hovering above the canvas until dropped and committed as one Stroke.
 _Avoid_: Selection buffer, ghost
-
-**Strict-ASCII mode**:
-A per-Document setting restricting the offered characters to printable ASCII; non-ASCII Pages grey out and tools fall back to ASCII equivalents. An artistic constraint, not a limitation.
 
 ### Palette & density
 

@@ -22,8 +22,8 @@ pub use io::export_text::export_text;
 pub use io::gascii_json::{load_str, save_string, LoadError, CURRENT_VERSION};
 pub use io::composite;
 pub use join::{arms_of, char_of, join as join_arms, ArmSet};
-pub use model::{Cell, DocExtent, DocSettings, Document, Layer, Rgba};
-pub use palette::{allowed_in, builtin_pages, page_available, validate_width, EntryReject, Page, WidthReject};
+pub use model::{Cell, DocExtent, Document, Layer, Rgba};
+pub use palette::{builtin_pages, validate_width, Page, WidthReject};
 pub use tools::{
     eyedrop, footprint, line_cells, mask_apply, BrushShape, CellRect, DensityBrush, Direction,
     Eraser, FloodFill, Line, Pencil, PendingCell, PlaneMask, Rectangle, SelectionTool,

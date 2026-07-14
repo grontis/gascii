@@ -5,7 +5,7 @@
 //! neither of those reaches: persistence interacting with the tool pipeline and undo history.
 
 use gascii_core::{
-    export_text, load_str, save_string, BrushShape, Cell, DensityMode, Document, DocSettings, Edit, Eraser,
+    export_text, load_str, save_string, BrushShape, Cell, DensityMode, Document, Edit, Eraser,
     Fixed, History, Pencil, PlaneMask, Rgba, TextTool, Tool, ToolCtx, ToolEvent, ToolResponse,
 };
 
@@ -96,14 +96,8 @@ fn full_lifecycle_round_trip_through_mixed_tool_pipeline_preserves_document_and_
 }
 
 #[test]
-fn round_trip_with_strict_ascii_enabled_and_preexisting_box_drawing_glyphs_preserves_both() {
+fn round_trip_preserves_box_drawing_glyphs() {
     let mut doc = Document::new(6, 4);
-    doc.settings = DocSettings { strict_ascii: true };
-
-    // Pencil never calls the strict-ASCII entry check — only character entry (typing, paste)
-    // does — so a box-drawing glyph painted via Pencil while strict_ascii is already on must
-    // still land in the document and survive the round trip unstripped (strict mode is
-    // non-retroactive).
     let mut history = History::new();
     let box_ctx = ctx(PlaneMask::ALL, '│', Rgba::WHITE, Rgba::TRANSPARENT);
     let mut pencil = Pencil::new();
@@ -111,17 +105,7 @@ fn round_trip_with_strict_ascii_enabled_and_preexisting_box_drawing_glyphs_prese
     assert_eq!(doc.cell(0, 2, 2).unwrap().ch, '│');
 
     let loaded = load_str(&save_string(&doc)).unwrap();
-    assert_eq!(loaded.settings, DocSettings { strict_ascii: true }, "strict_ascii setting must round-trip");
-    assert_eq!(loaded.cell(0, 2, 2).unwrap().ch, '│', "pre-existing non-ASCII content must not be stripped by a strict-ASCII round trip");
-
-    // The loaded document's own settings now gate new TextTool entry: a fresh text burst against
-    // the loaded doc must reject non-ASCII exactly as it would have pre-save.
-    let mut text = TextTool::new();
-    let text_ctx = ctx(PlaneMask::ALL, ' ', Rgba::WHITE, Rgba::TRANSPARENT);
-    text.update(ToolEvent::Press { x: 0, y: 0 }, &text_ctx, &loaded);
-    let resp = text.update(ToolEvent::Char('│'), &text_ctx, &loaded);
-    assert!(matches!(resp, ToolResponse::Active));
-    assert!(text.pending().is_empty(), "loaded strict_ascii=true must still reject new non-ASCII text entry");
+    assert_eq!(loaded.cell(0, 2, 2).unwrap().ch, '│', "non-ASCII content must survive a round trip unstripped");
 }
 
 #[test]

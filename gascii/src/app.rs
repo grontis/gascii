@@ -3,8 +3,8 @@ use std::time::Instant;
 
 use eframe::egui;
 use gascii_core::{
-    builtin_pages, builtin_ramps, export_text, load_str, page_available, resize_document,
-    save_string, BrushShape, Buildup, CellPatch, DensityBrush, DensityMode, Document, EntryReject,
+    builtin_pages, builtin_ramps, export_text, load_str, resize_document,
+    save_string, BrushShape, Buildup, CellPatch, DensityBrush, DensityMode, Document,
     Eraser, Fixed, FloodFill, History, Line, Page, Pencil, PlaneMask, Ramp, Rectangle, ResizeError,
     Rgba, SelectionTool, TextTool, Tool, ToolEvent, ToolResponse, WidthReject, MAX_TOOL_SIZE,
 };
@@ -330,12 +330,11 @@ impl GasciiApp {
 
     /// Surfaces a rejected typed character in the status bar. The rejection itself already
     /// happens inside the tool's entry validation — this is only the visible-warning half.
-    pub(crate) fn warn_rejected_char(&mut self, ch: char, reject: EntryReject) {
+    pub(crate) fn warn_rejected_char(&mut self, ch: char, reject: WidthReject) {
         let why = match reject {
-            EntryReject::Width(WidthReject::Control) => "control character",
-            EntryReject::Width(WidthReject::ZeroWidth) => "zero-width character",
-            EntryReject::Width(WidthReject::DoubleWidth) => "wider than one cell",
-            EntryReject::NonAscii => "non-ASCII in a strict-ASCII document",
+            WidthReject::Control => "control character",
+            WidthReject::ZeroWidth => "zero-width character",
+            WidthReject::DoubleWidth => "wider than one cell",
         };
         self.last_error = Some(format!("typed {ch:?} rejected: {why}"));
     }
@@ -426,7 +425,7 @@ impl GasciiApp {
             self.internal_clipboard.clone().expect("is_own_clipboard_text implies Some")
         } else {
             let (patch, dropped) =
-                CellPatch::from_external_text(text, self.active_fg, self.active_bg, &self.doc.settings);
+                CellPatch::from_external_text(text, self.active_fg, self.active_bg);
             if dropped > 0 {
                 self.last_error = Some(format!("paste: {dropped} character(s) rejected"));
             }
@@ -586,20 +585,10 @@ impl GasciiApp {
 
     fn palette_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Palette");
-        if ui.checkbox(&mut self.doc.settings.strict_ascii, "Strict ASCII").changed()
-            && !page_available(&self.pages[self.active_page], &self.doc.settings)
-        {
-            if let Some(ascii_index) = self.pages.iter().position(|p| p.ascii) {
-                self.active_page = ascii_index;
-            }
-        }
         ui.horizontal_wrapped(|ui| {
             for i in 0..self.pages.len() {
                 let name = self.pages[i].name;
-                let available = page_available(&self.pages[i], &self.doc.settings);
-                ui.add_enabled_ui(available, |ui| {
-                    ui.selectable_value(&mut self.active_page, i, name);
-                });
+                ui.selectable_value(&mut self.active_page, i, name);
             }
         });
         ui.separator();

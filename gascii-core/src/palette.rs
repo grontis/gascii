@@ -2,13 +2,10 @@
 
 use unicode_width::UnicodeWidthChar;
 
-use crate::model::DocSettings;
-
 #[derive(Clone, Debug)]
 pub struct Page {
     pub name: &'static str,
     pub glyphs: Vec<char>,
-    pub ascii: bool,
 }
 
 /// Why a character was rejected from entering a Document.
@@ -31,29 +28,6 @@ pub fn validate_width(ch: char) -> Result<(), WidthReject> {
     }
 }
 
-/// Why a character was rejected from entering a Document under the combined choke point.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum EntryReject {
-    Width(WidthReject),
-    NonAscii,
-}
-
-/// The single choke point every character-entry path calls: width validation first, then the
-/// document's strict-ASCII setting. Text entry (and, later, paste/import) call this and nothing
-/// else.
-pub fn allowed_in(ch: char, settings: &DocSettings) -> Result<(), EntryReject> {
-    validate_width(ch).map_err(EntryReject::Width)?;
-    if settings.strict_ascii && (ch as u32) > 0x007F {
-        return Err(EntryReject::NonAscii);
-    }
-    Ok(())
-}
-
-/// Whether `page` should be selectable given the document's strict-ASCII setting.
-pub fn page_available(page: &Page, settings: &DocSettings) -> bool {
-    !settings.strict_ascii || page.ascii
-}
-
 /// Built-in Pages, all single-width and covered by the bundled canvas font (backstopped by the
 /// glyph-coverage tests).
 pub fn builtin_pages() -> Vec<Page> {
@@ -65,9 +39,9 @@ pub fn builtin_pages() -> Vec<Page> {
     let blocks_shades: Vec<char> = "░▒▓█▀▄▌▐".chars().collect();
 
     vec![
-        Page { name: "ASCII", glyphs: ascii, ascii: true },
-        Page { name: "Box Drawing", glyphs: box_drawing, ascii: false },
-        Page { name: "Blocks & Shades", glyphs: blocks_shades, ascii: false },
+        Page { name: "ASCII", glyphs: ascii },
+        Page { name: "Box Drawing", glyphs: box_drawing },
+        Page { name: "Blocks & Shades", glyphs: blocks_shades },
     ]
 }
 
@@ -117,18 +91,6 @@ mod tests {
     }
 
     #[test]
-    fn page_ascii_flag_is_consistent_with_glyph_codepoints() {
-        for page in builtin_pages() {
-            let all_ascii = page.glyphs.iter().all(|&ch| (ch as u32) <= 0x007F);
-            assert_eq!(
-                page.ascii, all_ascii,
-                "page {:?} ascii flag does not match its glyph codepoints",
-                page.name
-            );
-        }
-    }
-
-    #[test]
     fn ascii_page_has_95_glyphs() {
         let pages = builtin_pages();
         let ascii_page = pages.iter().find(|p| p.name == "ASCII").unwrap();
@@ -155,53 +117,4 @@ mod tests {
         }
     }
 
-    fn settings(strict_ascii: bool) -> DocSettings {
-        DocSettings { strict_ascii }
-    }
-
-    #[test]
-    fn allowed_in_accepts_ascii_glyph_regardless_of_strict_mode() {
-        assert_eq!(allowed_in('A', &settings(false)), Ok(()));
-        assert_eq!(allowed_in('A', &settings(true)), Ok(()));
-    }
-
-    #[test]
-    fn allowed_in_accepts_non_ascii_glyph_when_not_strict() {
-        assert_eq!(allowed_in('│', &settings(false)), Ok(()));
-    }
-
-    #[test]
-    fn allowed_in_rejects_non_ascii_glyph_when_strict() {
-        assert_eq!(allowed_in('│', &settings(true)), Err(EntryReject::NonAscii));
-    }
-
-    #[test]
-    fn allowed_in_rejects_width_invalid_glyph_regardless_of_strict_mode() {
-        assert_eq!(
-            allowed_in('😀', &settings(false)),
-            Err(EntryReject::Width(WidthReject::DoubleWidth))
-        );
-        assert_eq!(
-            allowed_in('😀', &settings(true)),
-            Err(EntryReject::Width(WidthReject::DoubleWidth))
-        );
-    }
-
-    #[test]
-    fn page_available_ascii_page_always_available() {
-        let pages = builtin_pages();
-        let ascii_page = pages.iter().find(|p| p.name == "ASCII").unwrap();
-        assert!(page_available(ascii_page, &settings(false)));
-        assert!(page_available(ascii_page, &settings(true)));
-    }
-
-    #[test]
-    fn page_available_non_ascii_pages_only_when_not_strict() {
-        let pages = builtin_pages();
-        for name in ["Box Drawing", "Blocks & Shades"] {
-            let page = pages.iter().find(|p| p.name == name).unwrap();
-            assert!(page_available(page, &settings(false)));
-            assert!(!page_available(page, &settings(true)));
-        }
-    }
 }

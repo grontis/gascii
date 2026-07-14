@@ -4,7 +4,7 @@
 //! by covering the structural tools through the same real Tool/History pipeline.
 
 use gascii_core::{
-    load_str, save_string, BrushShape, Cell, CellPatch, CellRect, DensityMode, Document, DocSettings, Fixed,
+    load_str, save_string, BrushShape, Cell, CellPatch, CellRect, DensityMode, Document, Fixed,
     FloodFill, History, Line, PlaneMask, Rectangle, Rgba, SelectionTool, Tool, ToolCtx, ToolEvent,
     ToolResponse,
 };
@@ -281,7 +281,7 @@ fn round_tripping_a_copy_through_the_external_text_path_preserves_glyphs_but_res
     let text = original.to_text();
     let active_fg = Rgba(9, 9, 9, 255);
     let active_bg = Rgba::TRANSPARENT;
-    let (roundtripped, dropped) = CellPatch::from_external_text(&text, active_fg, active_bg, &DocSettings { strict_ascii: false });
+    let (roundtripped, dropped) = CellPatch::from_external_text(&text, active_fg, active_bg);
     assert_eq!(dropped, 0);
 
     assert_eq!(roundtripped.cells[0].ch, 'x');
@@ -289,21 +289,6 @@ fn round_tripping_a_copy_through_the_external_text_path_preserves_glyphs_but_res
     assert_eq!(roundtripped.cells[0].fg, active_fg, "external paste must use the currently active fg, not the copied cell's original color");
     assert_ne!(roundtripped.cells[0].fg, original.cells[0].fg, "the external path must not smuggle the original color through plain text");
     assert_eq!(roundtripped.cells[0].bg, active_bg);
-}
-
-#[test]
-fn strict_ascii_paste_of_mixed_ascii_and_box_drawing_text_drops_only_the_non_ascii_characters() {
-    let settings = DocSettings { strict_ascii: true };
-    let (patch, dropped) =
-        CellPatch::from_external_text("ab│cd\n┌┐", Rgba::WHITE, Rgba::TRANSPARENT, &settings);
-    // Row 0 ("ab│cd") is 5 chars wide, setting the patch width; row 1 ("┌┐") is padded to 5.
-    assert_eq!(patch.width, 5);
-    assert_eq!(patch.height, 2);
-    assert_eq!(dropped, 3, "the vertical bar and both corner glyphs must be rejected under strict ASCII");
-    let row0: Vec<char> = patch.cells[0..5].iter().map(|c| c.ch).collect();
-    assert_eq!(row0, vec!['a', 'b', ' ', 'c', 'd'], "only the rejected middle character is blanked; the surrounding ascii chars land");
-    let row1: Vec<char> = patch.cells[5..10].iter().map(|c| c.ch).collect();
-    assert_eq!(row1, vec![' ', ' ', ' ', ' ', ' '], "both rejected corner glyphs are blanked, plus the row's own padding");
 }
 
 #[test]
@@ -364,31 +349,6 @@ fn a_rectangle_corner_landing_on_an_existing_rectangle_corner_unions_into_a_four
     assert_eq!(doc.cell(0, 6, 6).unwrap().ch, '┼', "two rectangle corners landing on the same cell must union into a full cross junction");
 }
 
-#[test]
-fn strict_ascii_stroke_crossing_pre_existing_unicode_box_art_resolves_to_ascii_only_never_unicode() {
-    // The document already contains Unicode box art from before strict-ASCII was turned on
-    // (`draw_integration.rs`'s round-trip test already proves existing content isn't retroactively
-    // stripped). This checks that a *new* stroke crossing that pre-existing Unicode art, drawn
-    // while strict is on, still resolves the crossing to the ASCII fallback table exclusively.
-    let mut doc = Document::new(10, 10);
-    doc.settings = DocSettings { strict_ascii: true };
-    for y in 0..10u16 {
-        doc.set_cell(0, 5, y, Cell { ch: '│', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
-    }
-    let mut history = History::new();
-    let tctx = ctx(PlaneMask::ALL, '#', Rgba::WHITE, Rgba::TRANSPARENT);
-    let mut line = Line::new();
-    stroke(&mut line, &mut history, &mut doc, &tctx, &[(0, 3), (9, 3)]);
-
-    assert_eq!(doc.cell(0, 5, 3).unwrap().ch, '+', "strict-ascii must resolve the crossing to the ascii fallback, never a unicode box glyph");
-    // Every cell the new stroke actually touched (the whole y=3 row) must be ascii — the
-    // pre-existing Unicode column at other rows is deliberately left alone (untouched content is
-    // never retroactively stripped) and is not part of this assertion.
-    for x in 0..10u16 {
-        assert!(doc.cell(0, x, 3).unwrap().ch.is_ascii(), "cell ({x},3), touched by the strict-ascii stroke, must be ascii");
-    }
-    assert_eq!(doc.cell(0, 5, 4).unwrap().ch, '│', "pre-existing unicode content outside the new stroke's row must remain untouched");
-}
 
 // --- 5. Trigger-table cross-check: one action = one undo entry, no-op = no entry ---
 

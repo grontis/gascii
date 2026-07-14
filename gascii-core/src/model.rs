@@ -87,11 +87,6 @@ impl Layer {
     }
 }
 
-#[derive(Clone, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct DocSettings {
-    pub strict_ascii: bool,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct DocExtent {
     pub width: u16,
@@ -103,7 +98,6 @@ pub struct Document {
     pub width: u16,
     pub height: u16,
     pub layers: Vec<Layer>,
-    pub settings: DocSettings,
 }
 impl Document {
     pub const DEFAULT_WIDTH: u16 = 80;
@@ -126,7 +120,6 @@ impl Document {
             width,
             height,
             layers: vec![Layer::blank(width, height)],
-            settings: DocSettings::default(),
         }
     }
     /// Default new document: 80×25.

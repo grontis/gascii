@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Cell, DocSettings, Document, Layer, Rgba};
+use crate::model::{Cell, Document, Layer, Rgba};
 use crate::palette::{validate_width, WidthReject};
 
 pub const CURRENT_VERSION: u32 = 1;
@@ -15,7 +15,6 @@ struct FileEnvelope {
     version: u32,
     width: u16,
     height: u16,
-    settings: DocSettings,
     layers: Vec<FileLayer>,
 }
 
@@ -98,7 +97,6 @@ pub fn save_string(doc: &Document) -> String {
         version: CURRENT_VERSION,
         width: doc.width,
         height: doc.height,
-        settings: doc.settings.clone(),
         layers,
     };
     serde_json::to_string(&envelope).expect("Document -> FileEnvelope is always serializable")
@@ -139,7 +137,6 @@ pub fn load_str(s: &str) -> Result<Document, LoadError> {
     }
 
     let mut doc = Document::new(envelope.width, envelope.height);
-    doc.settings = envelope.settings;
     doc.layers.clear();
     for file_layer in &envelope.layers {
         let idx = doc.layers.len();
@@ -214,8 +211,7 @@ fn expand_runs(runs: &[(u16, Rgba)], width: u16, layer: usize, row: usize) -> Re
 /// (`TextTool`, pencil's page-constrained glyphs) already goes through — so a well-formed-shaped
 /// but adversarial file can't inject a double-width/zero-width/control character that the app's
 /// own renderer assumes never happens (one glyph per fixed-size cell). Width is a structural
-/// invariant, not a policy toggle, so it's enforced here regardless of the document's
-/// strict-ASCII setting (which only gates non-ASCII, not width).
+/// invariant, enforced on every loaded glyph.
 fn decode_layer_into(doc: &mut Document, layer: usize, file_layer: &FileLayer) -> Result<(), LoadError> {
     let (width, height) = (doc.width, doc.height);
     if file_layer.glyphs.len() != height as usize
@@ -255,7 +251,6 @@ fn decode_layer_into(doc: &mut Document, layer: usize, file_layer: &FileLayer) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::DocSettings;
 
     fn cell(ch: char, fg: Rgba, bg: Rgba) -> Cell {
         Cell { ch, fg, bg }
@@ -321,13 +316,6 @@ mod tests {
         assert_eq!(back.layers.len(), 2);
     }
 
-    #[test]
-    fn round_trips_non_default_strict_ascii_setting() {
-        let mut doc = Document::new(3, 3);
-        doc.settings = DocSettings { strict_ascii: true };
-        let back = load_str(&save_string(&doc)).unwrap();
-        assert_eq!(back.settings, DocSettings { strict_ascii: true });
-    }
 
     #[test]
     fn version_too_new_is_rejected() {
@@ -482,8 +470,8 @@ mod tests {
         }
     }
 
-    /// Same as above but for a control character, the other structural (non-strict-ASCII-gated)
-    /// rejection `validate_width` enforces.
+    /// Same as above but for a control character, the other structural rejection `validate_width`
+    /// enforces.
     #[test]
     fn control_char_glyph_in_loaded_file_is_rejected_as_invalid_glyph() {
         let doc = Document::new(3, 1);

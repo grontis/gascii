@@ -1,7 +1,6 @@
 //! Box-drawing junction resolution: a stroke crossing existing box-drawing characters is resolved
 //! by unioning which cardinal "arms" each glyph extends into, then mapping the union back to a
-//! single glyph (or, in strict-ASCII documents, an ASCII `+ - |` fallback with the same union
-//! logic). Pure and dependency-free — no `Document` types involved.
+//! single glyph. Pure and dependency-free — no `Document` types involved.
 
 /// Bitset of the four cardinal directions a box-drawing glyph extends a line into.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -20,10 +19,6 @@ impl ArmSet {
 
     pub fn is_empty(self) -> bool {
         self.0 == 0
-    }
-
-    fn arm_count(self) -> u32 {
-        self.0.count_ones()
     }
 }
 
@@ -46,25 +41,11 @@ pub fn arms_of(ch: char) -> Option<ArmSet> {
     })
 }
 
-/// Glyph for an arm set: the single-line box-drawing glyph, or (when `strict_ascii`) the ASCII
-/// fallback — any junction of two or more arms other than a straight run becomes `+`, a pure
-/// horizontal run (`E|W`) becomes `-`, a pure vertical run (`N|S`) becomes `|`. `None` for the
-/// empty set or a lone arm: neither table has a glyph for a dangling single direction.
-pub fn char_of(arms: ArmSet, strict_ascii: bool) -> Option<char> {
+/// Glyph for an arm set: the single-line box-drawing glyph for the union. `None` for the empty set
+/// or a lone arm: the table has no glyph for a dangling single direction.
+pub fn char_of(arms: ArmSet) -> Option<char> {
     let horizontal = ArmSet::E.union(ArmSet::W);
     let vertical = ArmSet::N.union(ArmSet::S);
-    if strict_ascii {
-        if arms.is_empty() || arms.arm_count() < 2 {
-            return None;
-        }
-        return Some(if arms == horizontal {
-            '-'
-        } else if arms == vertical {
-            '|'
-        } else {
-            '+'
-        });
-    }
     Some(match arms {
         a if a == horizontal => '─',
         a if a == vertical => '│',
@@ -86,9 +67,9 @@ pub fn char_of(arms: ArmSet, strict_ascii: bool) -> Option<char> {
 /// the union to a glyph. Falls back to `default_ch` when the union has no glyph (the empty or
 /// 1-arm sets, which the rectangle/line tools never actually propose since they only ever union in
 /// 2+-arm sets, but this keeps the function total for any caller).
-pub fn join(existing: char, incoming: ArmSet, strict_ascii: bool, default_ch: char) -> char {
+pub fn join(existing: char, incoming: ArmSet, default_ch: char) -> char {
     let base = arms_of(existing).unwrap_or(ArmSet::EMPTY);
-    char_of(base.union(incoming), strict_ascii).unwrap_or(default_ch)
+    char_of(base.union(incoming)).unwrap_or(default_ch)
 }
 
 #[cfg(test)]
@@ -113,7 +94,7 @@ mod tests {
     fn every_box_glyph_round_trips_through_arms_of_and_char_of() {
         for &(ch, arms) in &BOX_GLYPHS {
             assert_eq!(arms_of(ch), Some(arms), "arms_of({ch:?}) mismatch");
-            assert_eq!(char_of(arms, false), Some(ch), "char_of({arms:?}) mismatch");
+            assert_eq!(char_of(arms), Some(ch), "char_of({arms:?}) mismatch");
         }
     }
 
@@ -122,21 +103,7 @@ mod tests {
         for bits in 0u8..16 {
             let arms = ArmSet(bits);
             let expected = BOX_GLYPHS.iter().find(|&&(_, a)| a == arms).map(|&(ch, _)| ch);
-            assert_eq!(char_of(arms, false), expected, "mismatch for bits={bits:04b}");
-        }
-    }
-
-    #[test]
-    fn exhaustive_16_arm_combinations_map_to_the_expected_ascii_fallback() {
-        for bits in 0u8..16 {
-            let arms = ArmSet(bits);
-            let expected = match bits {
-                0b1100 => Some('-'), // E|W
-                0b0011 => Some('|'), // N|S
-                0 | 0b0001 | 0b0010 | 0b0100 | 0b1000 => None, // empty or lone arm
-                _ => Some('+'),
-            };
-            assert_eq!(char_of(arms, true), expected, "ascii mismatch for bits={bits:04b}");
+            assert_eq!(char_of(arms), expected, "mismatch for bits={bits:04b}");
         }
     }
 
@@ -149,65 +116,52 @@ mod tests {
 
     #[test]
     fn char_of_returns_none_for_empty_and_lone_arm_sets() {
-        assert_eq!(char_of(ArmSet::EMPTY, false), None);
+        assert_eq!(char_of(ArmSet::EMPTY), None);
         for arm in [ArmSet::N, ArmSet::S, ArmSet::E, ArmSet::W] {
-            assert_eq!(char_of(arm, false), None, "{arm:?} must have no box glyph");
-            assert_eq!(char_of(arm, true), None, "{arm:?} must have no ascii glyph");
+            assert_eq!(char_of(arm), None, "{arm:?} must have no box glyph");
         }
     }
 
     #[test]
     fn union_of_horizontal_and_vertical_crosses_to_a_full_junction() {
         let union = ArmSet::E.union(ArmSet::W).union(ArmSet::N).union(ArmSet::S);
-        assert_eq!(char_of(union, false), Some('┼'));
-        assert_eq!(char_of(union, true), Some('+'));
+        assert_eq!(char_of(union), Some('┼'));
     }
 
     #[test]
     fn join_a_horizontal_run_crossing_an_existing_vertical_run_makes_a_cross() {
         // existing '│' (N|S), incoming E|W (a horizontal rectangle border crossing it)
-        let ch = join('│', ArmSet::E.union(ArmSet::W), false, '#');
+        let ch = join('│', ArmSet::E.union(ArmSet::W), '#');
         assert_eq!(ch, '┼');
     }
 
     #[test]
     fn join_completing_a_tee_into_a_cross() {
         // existing '┤' (N|S|W), incoming E completes all four arms.
-        let ch = join('┤', ArmSet::E, false, '#');
+        let ch = join('┤', ArmSet::E, '#');
         assert_eq!(ch, '┼');
     }
 
     #[test]
     fn join_over_a_non_box_glyph_overwrites_it_using_only_the_incoming_arms() {
-        let ch = join('x', ArmSet::E.union(ArmSet::W), false, '#');
+        let ch = join('x', ArmSet::E.union(ArmSet::W), '#');
         assert_eq!(ch, '─', "a non-box existing glyph contributes no arms of its own");
     }
 
     #[test]
     fn join_corner_unions_produce_the_expected_glyphs() {
-        assert_eq!(join(' ', ArmSet::S.union(ArmSet::E), false, '#'), '┌');
-        assert_eq!(join(' ', ArmSet::S.union(ArmSet::W), false, '#'), '┐');
-        assert_eq!(join(' ', ArmSet::N.union(ArmSet::E), false, '#'), '└');
-        assert_eq!(join(' ', ArmSet::N.union(ArmSet::W), false, '#'), '┘');
+        assert_eq!(join(' ', ArmSet::S.union(ArmSet::E), '#'), '┌');
+        assert_eq!(join(' ', ArmSet::S.union(ArmSet::W), '#'), '┐');
+        assert_eq!(join(' ', ArmSet::N.union(ArmSet::E), '#'), '└');
+        assert_eq!(join(' ', ArmSet::N.union(ArmSet::W), '#'), '┘');
     }
 
     #[test]
     fn join_falls_back_to_default_ch_when_the_union_has_no_glyph() {
         // A lone incoming arm over a non-box existing glyph unions to a 1-arm set, which has no
-        // glyph in either table — join must fall back rather than panic or silently drop the cell.
-        let ch = join(' ', ArmSet::N, false, '#');
+        // glyph in the table — join must fall back rather than panic or silently drop the cell.
+        let ch = join(' ', ArmSet::N, '#');
         assert_eq!(ch, '#');
-        let ch = join(' ', ArmSet::N, true, '#');
-        assert_eq!(ch, '#');
-    }
-
-    #[test]
-    fn strict_ascii_fallback_table_matches_the_spec_examples() {
-        // existing '│' (N|S, a real box glyph arms_of recognizes) crossed by an incoming
-        // horizontal run unions to all four arms, which the ascii table maps to '+'.
-        assert_eq!(join('│', ArmSet::E.union(ArmSet::W), true, '#'), '+');
-        assert_eq!(join(' ', ArmSet::E.union(ArmSet::W), true, '#'), '-');
-        assert_eq!(join(' ', ArmSet::N.union(ArmSet::S), true, '#'), '|');
     }
 
     /// ASCII fallback characters (`+ - |`) are not themselves recognized as existing box arms —

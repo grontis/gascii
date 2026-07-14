@@ -2,8 +2,8 @@
 //! float, flatten to plain text for the system clipboard, and reconstruct a patch from pasted
 //! external text. Never touches the OS clipboard itself — that's the app crate's job.
 
-use crate::model::{Cell, DocSettings, Document, Rgba};
-use crate::palette::allowed_in;
+use crate::model::{Cell, Document, Rgba};
+use crate::palette::validate_width;
 use crate::tools::CellRect;
 
 /// A rectangular block of cells at no fixed document position, row-major, `width*height` long.
@@ -44,9 +44,9 @@ impl CellPatch {
     }
 
     /// Builds a patch from pasted plain text: rows split on `\n`, each character routed through
-    /// `allowed_in` (a rejected character is dropped, counted, and leaves that cell Blank), short
-    /// rows padded with Blank out to the widest row. Returns the patch plus the number of rejected
-    /// characters, so the caller can surface a warning.
+    /// `validate_width` (a rejected character is dropped, counted, and leaves that cell Blank),
+    /// short rows padded with Blank out to the widest row. Returns the patch plus the number of
+    /// rejected characters, so the caller can surface a warning.
     ///
     /// Pasted text is untrusted external input, exactly like a loaded `.gascii` file: its line
     /// count and per-line character count arrive as unbounded `usize` values with no relation to
@@ -56,7 +56,7 @@ impl CellPatch {
     /// Anything clamped away is folded into the same `dropped` count already used for
     /// rejected characters, so the caller's existing "N character(s) rejected" warning covers it
     /// too, rather than discarding it silently.
-    pub fn from_external_text(text: &str, fg: Rgba, bg: Rgba, settings: &DocSettings) -> (CellPatch, usize) {
+    pub fn from_external_text(text: &str, fg: Rgba, bg: Rgba) -> (CellPatch, usize) {
         let all_lines: Vec<&str> = text.split('\n').collect();
         let max_height = Document::MAX_HEIGHT as usize;
         let max_width = Document::MAX_WIDTH as usize;
@@ -84,7 +84,7 @@ impl CellPatch {
                     dropped += 1; // this row is wider than the clamped width: excess chars dropped
                     continue;
                 }
-                if allowed_in(ch, settings).is_err() {
+                if validate_width(ch).is_err() {
                     dropped += 1;
                     continue;
                 }
@@ -98,11 +98,6 @@ impl CellPatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::DocSettings;
-
-    fn settings(strict_ascii: bool) -> DocSettings {
-        DocSettings { strict_ascii }
-    }
 
     fn cell(ch: char, fg: Rgba, bg: Rgba) -> Cell {
         Cell { ch, fg, bg }
@@ -159,7 +154,7 @@ mod tests {
 
     #[test]
     fn from_external_text_splits_lines_and_pads_short_rows_with_blank() {
-        let (patch, dropped) = CellPatch::from_external_text("ab\nc", Rgba::WHITE, Rgba::TRANSPARENT, &settings(false));
+        let (patch, dropped) = CellPatch::from_external_text("ab\nc", Rgba::WHITE, Rgba::TRANSPARENT);
         assert_eq!(dropped, 0);
         assert_eq!(patch.width, 2);
         assert_eq!(patch.height, 2);
@@ -173,29 +168,22 @@ mod tests {
     fn from_external_text_uses_the_given_fg_and_bg_for_accepted_chars() {
         let fg = Rgba(1, 2, 3, 255);
         let bg = Rgba(4, 5, 6, 255);
-        let (patch, _) = CellPatch::from_external_text("x", fg, bg, &settings(false));
+        let (patch, _) = CellPatch::from_external_text("x", fg, bg);
         assert_eq!(patch.cells[0], Cell { ch: 'x', fg, bg });
     }
 
     #[test]
     fn from_external_text_drops_wide_and_combining_characters_and_counts_them() {
         let (patch, dropped) =
-            CellPatch::from_external_text("a😀b\u{0301}c", Rgba::WHITE, Rgba::TRANSPARENT, &settings(false));
+            CellPatch::from_external_text("a😀b\u{0301}c", Rgba::WHITE, Rgba::TRANSPARENT);
         assert_eq!(dropped, 2, "the emoji and the combining mark must both be rejected");
         let chars: Vec<char> = patch.cells.iter().map(|c| c.ch).collect();
         assert_eq!(chars, vec!['a', ' ', 'b', ' ', 'c'], "rejected chars leave their cell Blank");
     }
 
     #[test]
-    fn from_external_text_rejects_non_ascii_under_strict_ascii() {
-        let (patch, dropped) = CellPatch::from_external_text("│", Rgba::WHITE, Rgba::TRANSPARENT, &settings(true));
-        assert_eq!(dropped, 1);
-        assert_eq!(patch.cells[0], Cell::BLANK);
-    }
-
-    #[test]
-    fn from_external_text_accepts_non_ascii_when_not_strict() {
-        let (patch, dropped) = CellPatch::from_external_text("│", Rgba::WHITE, Rgba::TRANSPARENT, &settings(false));
+    fn from_external_text_accepts_single_width_non_ascii() {
+        let (patch, dropped) = CellPatch::from_external_text("│", Rgba::WHITE, Rgba::TRANSPARENT);
         assert_eq!(dropped, 0);
         assert_eq!(patch.cells[0].ch, '│');
     }
@@ -206,7 +194,7 @@ mod tests {
         // `as u16` cast to a small remainder while `chars().count()` in the write loop still runs
         // over the real, untruncated length.
         let long_line = "a".repeat(70_000);
-        let (patch, dropped) = CellPatch::from_external_text(&long_line, Rgba::WHITE, Rgba::TRANSPARENT, &settings(false));
+        let (patch, dropped) = CellPatch::from_external_text(&long_line, Rgba::WHITE, Rgba::TRANSPARENT);
         assert_eq!(patch.width, Document::MAX_WIDTH, "width must clamp to the document's max, not wrap");
         assert_eq!(patch.height, 1);
         assert_eq!(patch.cells.len(), Document::MAX_WIDTH as usize, "buffer must be sized to the clamped width");
@@ -219,7 +207,7 @@ mod tests {
         // Document::MAX_HEIGHT lines must clamp before allocating, not panic or under-allocate.
         let many_lines = "a\n".repeat(2000);
         let text = many_lines.trim_end_matches('\n');
-        let (patch, dropped) = CellPatch::from_external_text(text, Rgba::WHITE, Rgba::TRANSPARENT, &settings(false));
+        let (patch, dropped) = CellPatch::from_external_text(text, Rgba::WHITE, Rgba::TRANSPARENT);
         assert_eq!(patch.height, Document::MAX_HEIGHT, "height must clamp to the document's max, not wrap");
         assert_eq!(patch.width, 1);
         assert_eq!(dropped, 2000 - Document::MAX_HEIGHT as usize, "every dropped line's char(s) are counted");
@@ -231,7 +219,7 @@ mod tests {
         // MAX_WIDTH * MAX_HEIGHT cells, regardless of how large the pasted text claims to be.
         let bomb: String =
             std::iter::repeat_with(|| "a".repeat(5000)).take(3000).collect::<Vec<_>>().join("\n");
-        let (patch, _dropped) = CellPatch::from_external_text(&bomb, Rgba::WHITE, Rgba::TRANSPARENT, &settings(false));
+        let (patch, _dropped) = CellPatch::from_external_text(&bomb, Rgba::WHITE, Rgba::TRANSPARENT);
         assert_eq!(patch.width, Document::MAX_WIDTH);
         assert_eq!(patch.height, Document::MAX_HEIGHT);
         assert_eq!(patch.cells.len(), Document::MAX_WIDTH as usize * Document::MAX_HEIGHT as usize);
@@ -239,7 +227,7 @@ mod tests {
 
     #[test]
     fn from_external_text_of_an_empty_string_yields_a_zero_width_single_line_patch() {
-        let (patch, dropped) = CellPatch::from_external_text("", Rgba::WHITE, Rgba::TRANSPARENT, &settings(false));
+        let (patch, dropped) = CellPatch::from_external_text("", Rgba::WHITE, Rgba::TRANSPARENT);
         assert_eq!(dropped, 0);
         assert_eq!(patch.width, 0);
         assert_eq!(patch.height, 1);

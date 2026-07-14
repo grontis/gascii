@@ -35,7 +35,6 @@ impl Line {
             return;
         }
 
-        let strict = doc.settings.strict_ascii;
         let horizontal = anchor.1 == cur.1;
         let vertical = anchor.0 == cur.0;
         for &(x, y) in buf.iter() {
@@ -44,9 +43,9 @@ impl Line {
             }
             let before = doc.cell(ctx.layer, x, y).copied().unwrap_or(Cell::BLANK);
             let ch = if horizontal {
-                join(before.ch, ArmSet::E.union(ArmSet::W), strict, ctx.glyph)
+                join(before.ch, ArmSet::E.union(ArmSet::W), ctx.glyph)
             } else if vertical {
-                join(before.ch, ArmSet::N.union(ArmSet::S), strict, ctx.glyph)
+                join(before.ch, ArmSet::N.union(ArmSet::S), ctx.glyph)
             } else {
                 ctx.glyph // diagonal: no single-line box glyph, stamp directly
             };
@@ -111,7 +110,7 @@ impl Tool for Line {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DocSettings, Rgba};
+    use crate::model::Rgba;
     use crate::tools::PlaneMask;
 
     fn ctx(mask: PlaneMask, glyph: char) -> ToolCtx {
@@ -203,27 +202,6 @@ mod tests {
         };
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0].after.ch, '─');
-    }
-
-    #[test]
-    fn strict_ascii_horizontal_and_vertical_lines_use_dash_and_pipe() {
-        let mut doc = Document::new(10, 10);
-        doc.settings = DocSettings { strict_ascii: true };
-        let tctx = ctx(PlaneMask::ALL, '#');
-
-        let mut h = drag(&doc, &tctx, (0, 0), (3, 0));
-        let resp = h.update(ToolEvent::Release, &tctx, &doc);
-        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
-            panic!("expected a committed edit");
-        };
-        assert!(cells.iter().all(|c| c.after.ch == '-'));
-
-        let mut v = drag(&doc, &tctx, (0, 1), (0, 4));
-        let resp = v.update(ToolEvent::Release, &tctx, &doc);
-        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
-            panic!("expected a committed edit");
-        };
-        assert!(cells.iter().all(|c| c.after.ch == '|'));
     }
 
     #[test]

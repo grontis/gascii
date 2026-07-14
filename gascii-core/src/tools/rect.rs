@@ -16,12 +16,12 @@ impl Rectangle {
         Self::default()
     }
 
-    fn stamp(pending: &mut Vec<PendingCell>, doc: &Document, ctx: &ToolCtx, x: u16, y: u16, arms: ArmSet, strict: bool) {
+    fn stamp(pending: &mut Vec<PendingCell>, doc: &Document, ctx: &ToolCtx, x: u16, y: u16, arms: ArmSet) {
         if !doc.in_bounds(x, y) {
             return;
         }
         let before = doc.cell(ctx.layer, x, y).copied().unwrap_or(Cell::BLANK);
-        let ch = join(before.ch, arms, strict, ctx.glyph);
+        let ch = join(before.ch, arms, ctx.glyph);
         let proposed = Cell { ch, fg: ctx.fg, bg: ctx.bg };
         pending.push(PendingCell { x, y, cell: mask_apply(before, proposed, ctx.mask) });
     }
@@ -30,28 +30,27 @@ impl Rectangle {
         let Some(anchor) = self.anchor else { return };
         self.pending.clear();
         let rect = CellRect::from_corners(anchor, cur);
-        let strict = doc.settings.strict_ascii;
         let horizontal = ArmSet::E.union(ArmSet::W);
         let vertical = ArmSet::N.union(ArmSet::S);
 
         if rect.y0 == rect.y1 {
             // Degenerate to a horizontal line (also covers the 1x1 case).
             for x in rect.x0..=rect.x1 {
-                Self::stamp(&mut self.pending, doc, ctx, x, rect.y0, horizontal, strict);
+                Self::stamp(&mut self.pending, doc, ctx, x, rect.y0, horizontal);
             }
         } else if rect.x0 == rect.x1 {
             // Degenerate to a vertical line.
             for y in rect.y0..=rect.y1 {
-                Self::stamp(&mut self.pending, doc, ctx, rect.x0, y, vertical, strict);
+                Self::stamp(&mut self.pending, doc, ctx, rect.x0, y, vertical);
             }
         } else {
             for x in rect.x0..=rect.x1 {
-                Self::stamp(&mut self.pending, doc, ctx, x, rect.y0, corner_or_edge_arms(x, rect.y0, rect), strict);
-                Self::stamp(&mut self.pending, doc, ctx, x, rect.y1, corner_or_edge_arms(x, rect.y1, rect), strict);
+                Self::stamp(&mut self.pending, doc, ctx, x, rect.y0, corner_or_edge_arms(x, rect.y0, rect));
+                Self::stamp(&mut self.pending, doc, ctx, x, rect.y1, corner_or_edge_arms(x, rect.y1, rect));
             }
             for y in (rect.y0 + 1)..rect.y1 {
-                Self::stamp(&mut self.pending, doc, ctx, rect.x0, y, vertical, strict);
-                Self::stamp(&mut self.pending, doc, ctx, rect.x1, y, vertical, strict);
+                Self::stamp(&mut self.pending, doc, ctx, rect.x0, y, vertical);
+                Self::stamp(&mut self.pending, doc, ctx, rect.x1, y, vertical);
             }
         }
     }
@@ -109,7 +108,7 @@ impl Tool for Rectangle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{DocSettings, Rgba};
+    use crate::model::Rgba;
     use crate::tools::PlaneMask;
 
     fn ctx(mask: PlaneMask, glyph: char) -> ToolCtx {
@@ -216,22 +215,6 @@ mod tests {
         };
         assert_eq!(cells.len(), 5);
         assert!(cells.iter().all(|c| c.after.ch == '─'));
-    }
-
-    #[test]
-    fn strict_ascii_document_draws_plus_minus_pipe() {
-        let mut doc = Document::new(10, 10);
-        doc.settings = DocSettings { strict_ascii: true };
-        let tctx = ctx(PlaneMask::ALL, '#');
-        let mut rect = drag(&doc, &tctx, (2, 2), (5, 5));
-        let resp = rect.update(ToolEvent::Release, &tctx, &doc);
-        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
-            panic!("expected a committed edit");
-        };
-        let chars = chars_at(&cells);
-        assert_eq!(chars[&(2, 2)], '+');
-        assert_eq!(chars[&(3, 2)], '-');
-        assert_eq!(chars[&(2, 3)], '|');
     }
 
     #[test]

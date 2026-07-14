@@ -6,7 +6,7 @@
 
 use gascii_core::{
     builtin_ramps, load_str, resize_document, save_string, BrushShape, Buildup, Cell, CellPatch, DensityBrush,
-    DensityMode, Document, DocSettings, Edit, Fixed, History, Pencil, PlaneMask, ResizeError, Rgba,
+    DensityMode, Document, Edit, Fixed, History, Pencil, PlaneMask, ResizeError, Rgba,
     SelectionTool, TextTool, Tool, ToolCtx, ToolEvent, ToolResponse,
 };
 
@@ -107,9 +107,8 @@ fn resize_after_flushing_a_floating_selection_drop_operates_on_the_post_drop_doc
 // --- 2. Resize x persistence ---
 
 #[test]
-fn resize_then_save_then_load_round_trip_preserves_the_new_extent_content_and_settings() {
+fn resize_then_save_then_load_round_trip_preserves_the_new_extent_and_content() {
     let mut doc = Document::new(5, 5);
-    doc.settings = DocSettings { strict_ascii: true };
     let mut history = History::new();
     let tctx = fixed_ctx(PlaneMask::ALL, '#', Rgba(1, 2, 3, 255), Rgba(4, 5, 6, 255));
     let mut pencil = Pencil::new();
@@ -124,7 +123,6 @@ fn resize_then_save_then_load_round_trip_preserves_the_new_extent_content_and_se
     let loaded = load_str(&save_string(&doc)).expect("a resized document must save and reload");
     assert_eq!(loaded.width, 3);
     assert_eq!(loaded.height, 8);
-    assert_eq!(loaded.settings, DocSettings { strict_ascii: true }, "settings must survive a resize + round trip");
     assert_eq!(loaded.cell(0, 0, 0).unwrap().ch, '#');
     assert_eq!(loaded.cell(0, 1, 0).unwrap().ch, '#');
     assert_eq!(loaded, doc, "the loaded document must be byte-for-byte identical to the resized one");

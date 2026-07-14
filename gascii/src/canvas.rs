@@ -429,7 +429,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
                     for ch in s.chars() {
                         // The tool's own entry validation drops a rejected character either way;
                         // this pre-check exists solely to make the drop visible instead of silent.
-                        if let Err(reject) = gascii_core::allowed_in(ch, &app.doc.settings) {
+                        if let Err(reject) = gascii_core::validate_width(ch) {
                             app.warn_rejected_char(ch, reject);
                             continue;
                         }

@@ -130,7 +130,7 @@ pub fn export_png(doc: &Document, cell_px: u32) -> Result<Vec<u8>, PngExportAppE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gascii_core::{Cell, DocSettings};
+    use gascii_core::Cell;
 
     /// A fully-covered glyph pixel (the interior of a solid block character, `src_a == 255`)
     /// composited over a fully transparent cell background must reproduce the cell's own fg color
@@ -206,7 +206,6 @@ mod tests {
     #[test]
     fn opaque_background_fills_the_entire_cell() {
         let mut doc = doc_with(1, 1);
-        doc.settings = DocSettings::default();
         doc.set_cell(0, 0, 0, Cell { ch: ' ', fg: Rgba::WHITE, bg: Rgba(10, 20, 30, 255) });
         let bytes = export_png(&doc, 8).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
