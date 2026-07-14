@@ -206,7 +206,7 @@ mod tests {
         let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
             panic!("expected a committed edit");
         };
-        assert_eq!(cells.len(), 9, "size-3 square press covers the 3x3 box");
+        assert_eq!(cells.len(), 18, "size-3 square press covers the aspect-corrected 6x3 box");
     }
 
     #[test]
@@ -221,7 +221,7 @@ mod tests {
         let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
             panic!("expected a committed edit");
         };
-        assert_eq!(cells.len(), 4, "corner press keeps only the in-bounds quadrant");
+        assert_eq!(cells.len(), 8, "corner press keeps only the in-bounds quadrant");
     }
 
     #[test]

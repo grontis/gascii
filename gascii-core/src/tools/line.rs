@@ -217,14 +217,14 @@ mod tests {
         let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
             panic!("expected a committed edit");
         };
-        // Footprints widen the 7-column run to columns 1..=9 and rows 2..=4: 9×3 cells, every
-        // one '#', no box-joins.
-        assert_eq!(cells.len(), 27);
+        // Aspect-corrected footprints (6 wide, 3 tall) widen the 7-column run to columns 0..=11,
+        // clipped to the doc's 0..=9, and rows 2..=4: 10×3 cells, every one '#', no box-joins.
+        assert_eq!(cells.len(), 30);
         assert!(cells.iter().all(|c| c.after.ch == '#'), "size>1 must stamp the glyph, never join");
         let mut coords: Vec<(u16, u16)> = cells.iter().map(|c| (c.x, c.y)).collect();
         coords.sort();
         coords.dedup();
-        assert_eq!(coords.len(), 27, "overlapping footprints must be deduped");
+        assert_eq!(coords.len(), 30, "overlapping footprints must be deduped");
     }
 
     #[test]

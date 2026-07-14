@@ -761,7 +761,7 @@ impl GasciiApp {
                     ui,
                     &mut self.tool_stamps[slot],
                     "salt_active",
-                    "Stamp width in cells for the active tool ([ and ] to adjust)",
+                    "Stamp size in rows for the active tool; shapes are widened to look square/round ([ and ] to adjust)",
                 );
                 ui.separator();
             }
@@ -783,7 +783,7 @@ impl GasciiApp {
                     ui,
                     &mut self.rc_stamps[rc_idx],
                     "salt_rc",
-                    "Stamp width in cells for the right-click tool",
+                    "Stamp size in rows for the right-click tool; shapes are widened to look square/round",
                 );
             }
         });

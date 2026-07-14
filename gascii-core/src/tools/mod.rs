@@ -70,24 +70,34 @@ pub enum BrushShape {
 /// Upper bound for `ToolCtx::size`.
 pub const MAX_TOOL_SIZE: u16 = 16;
 
-/// Cells covered by one `size`-wide stamp centered on `center`, written into the caller-provided
-/// `out` (cleared first). A size-N stamp spans an N×N box around the center (an even N biases
-/// right/down, since a cell grid has no true center cell for it); `Circle` keeps only cells within
-/// a disc of diameter N, shrunk a touch so the disc sheds its bounding box's corners (a size-3
-/// circle is a plus, not the full 3×3). Cells that would fall off the u16 grid are dropped here;
-/// document-bounds clipping stays the caller's job.
+/// A terminal cell renders roughly twice as tall as it is wide, so a footprint that spans an equal
+/// number of rows and columns reads as a tall rectangle, not a square. `WIDTH_RATIO` is how many
+/// columns match one row on screen: shape footprints span `size` rows and `size * WIDTH_RATIO`
+/// columns so a Square looks square and a Circle looks round.
+pub const WIDTH_RATIO: i32 = 2;
+
+/// Cells covered by one `size`-tall stamp centered on `center`, written into the caller-provided
+/// `out` (cleared first). `size` sets the vertical extent in rows; the horizontal extent is
+/// `WIDTH_RATIO`× wider so the footprint reads as intended against the cell aspect ratio. A stamp
+/// spans a `(size * WIDTH_RATIO)`×`size` box around the center (an even extent biases right/down,
+/// since a cell grid has no true center cell for it); `Circle` keeps only cells within the inscribed
+/// ellipse, shrunk a touch so it sheds its bounding box's corners. Size 1 is a single center cell
+/// for both shapes — a lone cell has no aspect, and this keeps the sized tools' finest stamp one
+/// cell. Cells that would fall off the u16 grid are dropped here; document-bounds clipping stays the
+/// caller's job.
 pub fn footprint(center: (u16, u16), size: u16, shape: BrushShape, out: &mut Vec<(u16, u16)>) {
     out.clear();
     let size = size.clamp(1, MAX_TOOL_SIZE) as i32;
-    let lo = -((size - 1) / 2);
-    let hi = size / 2;
-    let c = (lo + hi) as f32 / 2.0;
-    let r = size as f32 / 2.0 - 0.1;
-    for dy in lo..=hi {
-        for dx in lo..=hi {
-            if shape == BrushShape::Circle {
-                let (fx, fy) = (dx as f32 - c, dy as f32 - c);
-                if fx * fx + fy * fy > r * r {
+    let wsize = if size == 1 { 1 } else { size * WIDTH_RATIO };
+    let (vlo, vhi) = (-((size - 1) / 2), size / 2);
+    let (hlo, hhi) = (-((wsize - 1) / 2), wsize / 2);
+    let (cy, cx) = ((vlo + vhi) as f32 / 2.0, (hlo + hhi) as f32 / 2.0);
+    let (ry, rx) = (size as f32 / 2.0 - 0.1, wsize as f32 / 2.0 - 0.1);
+    for dy in vlo..=vhi {
+        for dx in hlo..=hhi {
+            if shape == BrushShape::Circle && rx > 0.0 && ry > 0.0 {
+                let (fx, fy) = ((dx as f32 - cx) / rx, (dy as f32 - cy) / ry);
+                if fx * fx + fy * fy > 1.0 {
                     continue;
                 }
             }
@@ -638,47 +648,67 @@ mod tests {
     }
 
     #[test]
-    fn footprint_size_3_square_is_the_full_3x3_box() {
+    fn footprint_square_is_twice_as_wide_as_tall() {
+        // Size 3 -> 3 rows, 3*WIDTH_RATIO=6 cols, so a Square reads square against the cell aspect.
         let mut out = Vec::new();
         footprint((5, 5), 3, BrushShape::Square, &mut out);
-        assert_eq!(out.len(), 9);
-        for x in 4..=6u16 {
+        assert_eq!(out.len(), 18);
+        for x in 3..=8u16 {
             for y in 4..=6u16 {
-                assert!(out.contains(&(x, y)));
+                assert!(out.contains(&(x, y)), "expected ({x},{y}) in the 6x3 box");
             }
         }
     }
 
     #[test]
-    fn footprint_size_3_circle_is_a_plus_not_the_full_box() {
+    fn footprint_circle_is_an_aspect_corrected_ellipse() {
+        // Size 3 circle: a 6-wide, 3-tall ellipse that sheds its bounding-box corners.
         let mut out = Vec::new();
         footprint((5, 5), 3, BrushShape::Circle, &mut out);
         let cells = set_of(&out);
-        assert_eq!(cells, set_of(&[(5, 5), (4, 5), (6, 5), (5, 4), (5, 6)]));
+        assert_eq!(
+            cells,
+            set_of(&[
+                (4, 4), (5, 4), (6, 4), (7, 4),
+                (3, 5), (4, 5), (5, 5), (6, 5), (7, 5), (8, 5),
+                (4, 6), (5, 6), (6, 6), (7, 6),
+            ])
+        );
     }
 
     #[test]
     fn footprint_even_size_biases_right_and_down() {
+        // Size 2 -> 2 rows, 4 cols; the extra cell on each axis lands right/down of center.
         let mut out = Vec::new();
         footprint((5, 5), 2, BrushShape::Square, &mut out);
-        assert_eq!(set_of(&out), set_of(&[(5, 5), (6, 5), (5, 6), (6, 6)]));
+        assert_eq!(
+            set_of(&out),
+            set_of(&[(4, 5), (5, 5), (6, 5), (7, 5), (4, 6), (5, 6), (6, 6), (7, 6)])
+        );
     }
 
     #[test]
     fn footprint_clips_at_the_grid_origin() {
+        // Size 3 square at the origin: the 6x3 box's off-grid left/top cells are dropped.
         let mut out = Vec::new();
         footprint((0, 0), 3, BrushShape::Square, &mut out);
-        assert_eq!(set_of(&out), set_of(&[(0, 0), (1, 0), (0, 1), (1, 1)]));
+        assert_eq!(
+            set_of(&out),
+            set_of(&[(0, 0), (1, 0), (2, 0), (3, 0), (0, 1), (1, 1), (2, 1), (3, 1)])
+        );
     }
 
     #[test]
-    fn footprint_circle_size_5_sheds_bounding_box_corners() {
+    fn footprint_circle_sheds_bounding_box_corners() {
+        // Size 5 circle: a 10-wide, 5-tall ellipse. Corners are outside, edge midpoints inside.
         let mut out = Vec::new();
         footprint((10, 10), 5, BrushShape::Circle, &mut out);
         let cells = set_of(&out);
-        assert!(!cells.contains(&(8, 8)), "corner must be outside the disc");
-        assert!(cells.contains(&(8, 10)), "edge midpoints are inside");
-        assert!(cells.contains(&(9, 9)), "inner diagonal is inside");
+        assert!(!cells.contains(&(6, 8)), "top-left corner must be outside the ellipse");
+        assert!(!cells.contains(&(15, 8)), "top-right corner must be outside the ellipse");
+        assert!(cells.contains(&(10, 8)), "top edge midpoint is inside");
+        assert!(cells.contains(&(6, 10)), "left edge midpoint is inside");
+        assert!(cells.contains(&(15, 10)), "right edge midpoint is inside");
     }
 
     #[test]

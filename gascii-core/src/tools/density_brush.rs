@@ -264,10 +264,11 @@ mod tests {
         }
         let resp = brush.update(ToolEvent::Release, &tctx, &doc);
         apply(&mut doc, resp);
-        // Consecutive footprints overlap 6 of 9 cells; only newly entered cells advance, so one
-        // straight pass leaves the whole swept band at step 0 — never saturated.
+        // Consecutive aspect-corrected footprints (6 wide, 3 tall) overlap most of their cells;
+        // only newly entered cells advance, so one straight pass leaves the whole swept band
+        // (cols 0..=11, rows 1..=3) at step 0 — never saturated.
         for y in 1..=3u16 {
-            for x in 1..=9u16 {
+            for x in 0..=11u16 {
                 assert_eq!(ch_at(&doc, x, y), 'a', "cell ({x},{y}) must advance exactly once");
             }
         }
