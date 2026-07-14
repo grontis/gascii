@@ -66,11 +66,14 @@ fn apply_backward(doc: &mut Document, edit: &Edit) {
 }
 
 /// Single undo/redo history over a `Document`. App-level state (active tool, color, zoom, plane
-/// mask) is never represented here — only committed `Edit`s.
+/// mask) is never represented here — only committed `Edit`s. Every applied edit is tagged with a
+/// monotonically increasing id (`next_id`), used to identify *which* edit currently sits on top of
+/// the undo stack — see `top_edit_id`.
 #[derive(Default)]
 pub struct History {
-    undo_stack: Vec<Edit>,
-    redo_stack: Vec<Edit>,
+    undo_stack: Vec<(u64, Edit)>,
+    redo_stack: Vec<(u64, Edit)>,
+    next_id: u64,
 }
 
 impl History {
@@ -78,32 +81,35 @@ impl History {
         Self::default()
     }
 
-    /// Writes `edit`'s `after` cells into `doc`, pushes it onto the undo stack, and clears redo.
+    /// Writes `edit`'s `after` cells into `doc`, pushes it onto the undo stack under a fresh id,
+    /// and clears redo.
     pub fn apply(&mut self, doc: &mut Document, edit: Edit) {
         apply_forward(doc, &edit);
-        self.undo_stack.push(edit);
+        let id = self.next_id;
+        self.next_id += 1;
+        self.undo_stack.push((id, edit));
         self.redo_stack.clear();
     }
 
     /// Restores the most recently applied edit's `before` cells. Returns `false` (no-op) if the
     /// undo stack is empty.
     pub fn undo(&mut self, doc: &mut Document) -> bool {
-        let Some(edit) = self.undo_stack.pop() else {
+        let Some((id, edit)) = self.undo_stack.pop() else {
             return false;
         };
         apply_backward(doc, &edit);
-        self.redo_stack.push(edit);
+        self.redo_stack.push((id, edit));
         true
     }
 
     /// Re-applies the most recently undone edit's `after` cells. Returns `false` (no-op) if the
     /// redo stack is empty.
     pub fn redo(&mut self, doc: &mut Document) -> bool {
-        let Some(edit) = self.redo_stack.pop() else {
+        let Some((id, edit)) = self.redo_stack.pop() else {
             return false;
         };
         apply_forward(doc, &edit);
-        self.undo_stack.push(edit);
+        self.undo_stack.push((id, edit));
         true
     }
 
@@ -113,6 +119,16 @@ impl History {
 
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
+    }
+
+    /// The id of whatever edit currently sits on top of the undo stack, or `None` for an empty
+    /// stack (its own sentinel — never conflated with "id 0"). This is edit *identity*, not stack
+    /// depth or content: undoing back to a point the stack was at before and redoing back restores
+    /// the exact same id, while a *new* edit applied at the same depth (e.g. after an undo) always
+    /// gets a fresh id via `next_id`. That's what makes it sound as a "has anything changed since
+    /// X" marker — see `gascii/src/app.rs`'s `saved_marker`/`is_dirty`, the caller this exists for.
+    pub fn top_edit_id(&self) -> Option<u64> {
+        self.undo_stack.last().map(|(id, _)| *id)
     }
 }
 
@@ -366,6 +382,117 @@ mod tests {
         assert!(history.can_undo());
         assert!(history.undo(&mut doc));
         assert_eq!(doc.cell(0, 0, 0), Some(&Cell::BLANK));
+    }
+
+    #[test]
+    fn top_edit_id_is_none_for_a_fresh_history() {
+        let history = History::new();
+        assert_eq!(history.top_edit_id(), None);
+    }
+
+    #[test]
+    fn top_edit_id_changes_after_apply() {
+        let mut doc = Document::new(10, 10);
+        let mut history = History::new();
+        assert_eq!(history.top_edit_id(), None);
+        let edit = Edit::Cells(vec![CellEdit {
+            layer: 0,
+            x: 0,
+            y: 0,
+            before: Cell::BLANK,
+            after: cell('a'),
+        }]);
+        history.apply(&mut doc, edit);
+        assert!(history.top_edit_id().is_some());
+    }
+
+    #[test]
+    fn top_edit_id_returns_to_the_prior_value_after_undo() {
+        let mut doc = Document::new(10, 10);
+        let mut history = History::new();
+        let edit1 = Edit::Cells(vec![CellEdit {
+            layer: 0,
+            x: 0,
+            y: 0,
+            before: Cell::BLANK,
+            after: cell('a'),
+        }]);
+        history.apply(&mut doc, edit1);
+        let id_a = history.top_edit_id();
+
+        let edit2 = Edit::Cells(vec![CellEdit {
+            layer: 0,
+            x: 1,
+            y: 0,
+            before: Cell::BLANK,
+            after: cell('b'),
+        }]);
+        history.apply(&mut doc, edit2);
+        assert_ne!(history.top_edit_id(), id_a);
+
+        history.undo(&mut doc);
+        assert_eq!(history.top_edit_id(), id_a, "undo must restore the exact prior edit's id");
+    }
+
+    #[test]
+    fn top_edit_id_after_redo_matches_the_original_apply() {
+        let mut doc = Document::new(10, 10);
+        let mut history = History::new();
+        let edit = Edit::Cells(vec![CellEdit {
+            layer: 0,
+            x: 0,
+            y: 0,
+            before: Cell::BLANK,
+            after: cell('a'),
+        }]);
+        history.apply(&mut doc, edit);
+        let id_original = history.top_edit_id();
+
+        history.undo(&mut doc);
+        history.redo(&mut doc);
+        assert_eq!(history.top_edit_id(), id_original, "redo must restore the original apply's id, not a fresh one");
+    }
+
+    #[test]
+    fn new_apply_after_undo_gives_a_fresh_id_even_at_the_same_stack_depth() {
+        let mut doc = Document::new(10, 10);
+        let mut history = History::new();
+        let edit1 = Edit::Cells(vec![CellEdit {
+            layer: 0,
+            x: 0,
+            y: 0,
+            before: Cell::BLANK,
+            after: cell('a'),
+        }]);
+        history.apply(&mut doc, edit1);
+
+        let edit2 = Edit::Cells(vec![CellEdit {
+            layer: 0,
+            x: 1,
+            y: 0,
+            before: Cell::BLANK,
+            after: cell('b'),
+        }]);
+        history.apply(&mut doc, edit2);
+        let id_edit2 = history.top_edit_id();
+
+        history.undo(&mut doc);
+        let edit3 = Edit::Cells(vec![CellEdit {
+            layer: 0,
+            x: 2,
+            y: 0,
+            before: Cell::BLANK,
+            after: cell('c'),
+        }]);
+        history.apply(&mut doc, edit3);
+
+        // Same stack depth (one entry) as edit2 was at, but a genuinely different edit — the id
+        // must differ, proving stack depth alone is not a sound identifier.
+        assert_ne!(
+            history.top_edit_id(),
+            id_edit2,
+            "a new edit applied after undo must get a fresh id, even at the same stack depth"
+        );
     }
 
     #[test]

@@ -232,317 +232,325 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
 
     let (response, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
     let origin = response.rect.min;
-    let cell = app.viewport.cell_size(&ctx);
-
-    // Precedence 1: zoom. Allowed any time, including mid-stroke — pending cells are
-    // cell-addressed and stay valid; the cursor-anchored zoom keeps the pointer's cell fixed.
-    let (scroll_y, ctrl) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.ctrl));
-    if ctrl && scroll_y != 0.0 {
-        if let Some(cursor) = response.hover_pos() {
-            app.viewport
-                .zoom_at(cursor, scroll_y.signum() as i32, cell, origin);
-        }
-    }
-
-    // Precedence 2: pan. Middle-drag is always available (never conflicts with a primary
-    // stroke). Space+primary-drag pans only while the space-pan gesture owns the primary button
-    // (decided at press time below), so it never steals an in-progress stroke.
-    if response.dragged_by(egui::PointerButton::Middle) {
-        app.viewport.pan += response.drag_delta();
-    }
-    let space = ui.input(|i| i.key_down(egui::Key::Space));
-
-    let cell = app.viewport.cell_size(&ctx);
+    let mut cell = app.viewport.cell_size(&ctx);
     let doc_extent = app.doc.extent();
-    app.hovered_cell = response
-        .hover_pos()
-        .and_then(|p| app.viewport.screen_to_cell(p, cell, origin, doc_extent));
 
-    // Precedence 3: stroke vs space-pan, resolved from raw pointer edges (not
-    // clicked()/dragged()) so a single click that doesn't move still yields a one-cell stroke.
-    // Gesture ownership is decided once at press time and holds until release, so a mid-gesture
-    // Space toggle can't steal an in-progress stroke and a mid-gesture tool switch can't corrupt
-    // an in-progress pan.
-    //
-    // Known gap: release is detected from pointer state, so an OS-level focus loss mid-drag with
-    // no synthetic mouse-up (e.g. alt-tab while dragging) can leave
-    // `stroke_active`/`space_pan_active` stuck until the next primary press.
-    let (primary_pressed, primary_down, primary_released, secondary_pressed, secondary_down, secondary_released) =
-        ui.input(|i| {
-            (
-                i.pointer.primary_pressed(),
-                i.pointer.primary_down(),
-                i.pointer.primary_released(),
-                i.pointer.secondary_pressed(),
-                i.pointer.secondary_down(),
-                i.pointer.secondary_released(),
-            )
-        });
-    let gesture_ends = primary_released || !primary_down;
+    // The close-confirm dialog is the only modal surface in this app, but this function polls raw
+    // pointer/keyboard state (`ui.input(|i| i.pointer...)`) rather than using egui's occlusion
+    // system, so `egui::Modal`'s backdrop does not itself block canvas interaction. Every
+    // pointer/keyboard-consuming branch below (through focus-loss detection) is therefore gated
+    // explicitly on the dialog flag. Rendering below this block stays unconditional — the canvas
+    // keeps showing its last frame, frozen, underneath the dialog.
+    if !app.close_dialog_open {
+        // Precedence 1: zoom. Allowed any time, including mid-stroke — pending cells are
+        // cell-addressed and stay valid; the cursor-anchored zoom keeps the pointer's cell fixed.
+        let (scroll_y, ctrl) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.ctrl));
+        if ctrl && scroll_y != 0.0 {
+            if let Some(cursor) = response.hover_pos() {
+                app.viewport
+                    .zoom_at(cursor, scroll_y.signum() as i32, cell, origin);
+            }
+        }
 
-    // Tracks whether this frame's Press branch just started a stroke, so the Drag branch below
-    // (which re-checks `app.stroke_active`, now true) doesn't also send a same-frame, same-cell
-    // Drag for the press that just happened — one pointer event in, one Tool event out per frame.
-    let mut stroke_just_started = false;
+        // Precedence 2: pan. Middle-drag is always available (never conflicts with a primary
+        // stroke). Space+primary-drag pans only while the space-pan gesture owns the primary
+        // button (decided at press time below), so it never steals an in-progress stroke.
+        if response.dragged_by(egui::PointerButton::Middle) {
+            app.viewport.pan += response.drag_delta();
+        }
+        let space = ui.input(|i| i.key_down(egui::Key::Space));
 
-    if !app.stroke_in_progress() && !app.space_pan_active && primary_pressed {
-        if space {
-            app.space_pan_active = true;
-        } else if app.tool_kind == ToolKind::Eyedropper {
-            // One-shot pick, not a multi-frame gesture: no ownership to track.
-            if response.contains_pointer() {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    if let Some((x, y)) = app.viewport.screen_to_cell(pos, cell, origin, doc_extent) {
-                        if let Some(picked) = app.doc.cell(0, x, y).copied() {
-                            let (fg, bg) = gascii_core::eyedrop(&picked);
-                            app.active_fg = fg;
-                            app.active_bg = bg;
+        cell = app.viewport.cell_size(&ctx);
+        app.hovered_cell = response
+            .hover_pos()
+            .and_then(|p| app.viewport.screen_to_cell(p, cell, origin, doc_extent));
+
+        // Precedence 3: stroke vs space-pan, resolved from raw pointer edges (not
+        // clicked()/dragged()) so a single click that doesn't move still yields a one-cell stroke.
+        // Gesture ownership is decided once at press time and holds until release, so a mid-gesture
+        // Space toggle can't steal an in-progress stroke and a mid-gesture tool switch can't corrupt
+        // an in-progress pan.
+        //
+        // Known gap: release is detected from pointer state, so an OS-level focus loss mid-drag with
+        // no synthetic mouse-up (e.g. alt-tab while dragging) can leave
+        // `stroke_active`/`space_pan_active` stuck until the next primary press.
+        let (primary_pressed, primary_down, primary_released, secondary_pressed, secondary_down, secondary_released) =
+            ui.input(|i| {
+                (
+                    i.pointer.primary_pressed(),
+                    i.pointer.primary_down(),
+                    i.pointer.primary_released(),
+                    i.pointer.secondary_pressed(),
+                    i.pointer.secondary_down(),
+                    i.pointer.secondary_released(),
+                )
+            });
+        let gesture_ends = primary_released || !primary_down;
+
+        // Tracks whether this frame's Press branch just started a stroke, so the Drag branch below
+        // (which re-checks `app.stroke_active`, now true) doesn't also send a same-frame, same-cell
+        // Drag for the press that just happened — one pointer event in, one Tool event out per frame.
+        let mut stroke_just_started = false;
+
+        if !app.stroke_in_progress() && !app.space_pan_active && primary_pressed {
+            if space {
+                app.space_pan_active = true;
+            } else if app.tool_kind == ToolKind::Eyedropper {
+                // One-shot pick, not a multi-frame gesture: no ownership to track.
+                if response.contains_pointer() {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        if let Some((x, y)) = app.viewport.screen_to_cell(pos, cell, origin, doc_extent) {
+                            if let Some(picked) = app.doc.cell(0, x, y).copied() {
+                                let (fg, bg) = gascii_core::eyedrop(&picked);
+                                app.active_fg = fg;
+                                app.active_bg = bg;
+                            }
                         }
                     }
                 }
-            }
-        } else if app.tool_kind == ToolKind::Text {
-            // No pointer-drag/release lifecycle for text entry: a single Press call is the whole
-            // pointer-side interaction, so stroke_active is never set here.
-            if response.contains_pointer() {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    if let Some((x, y)) = app.viewport.screen_to_cell(pos, cell, origin, doc_extent) {
-                        let tctx = tool_ctx(app);
-                        let resp = app.tool.update(ToolEvent::Press { x, y }, &tctx, &app.doc);
-                        if let ToolResponse::Commit(Some(edit)) = resp {
-                            app.history.apply(&mut app.doc, edit);
+            } else if app.tool_kind == ToolKind::Text {
+                // No pointer-drag/release lifecycle for text entry: a single Press call is the whole
+                // pointer-side interaction, so stroke_active is never set here.
+                if response.contains_pointer() {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        if let Some((x, y)) = app.viewport.screen_to_cell(pos, cell, origin, doc_extent) {
+                            let tctx = tool_ctx(app);
+                            let resp = app.tool.update(ToolEvent::Press { x, y }, &tctx, &app.doc);
+                            if let ToolResponse::Commit(Some(edit)) = resp {
+                                app.history.apply(&mut app.doc, edit);
+                            }
+                            app.text_editing = true;
                         }
-                        app.text_editing = true;
                     }
                 }
-            }
-        } else if app.tool_kind == ToolKind::Selection {
-            // Unlike the generic branch below, a Selection Press can itself return a committed
-            // edit (clicking away from a floating stamp drops it) — that response must be applied,
-            // not discarded, or a click-away drop would silently vanish.
-            if response.contains_pointer() {
+            } else if app.tool_kind == ToolKind::Selection {
+                // Unlike the generic branch below, a Selection Press can itself return a committed
+                // edit (clicking away from a floating stamp drops it) — that response must be applied,
+                // not discarded, or a click-away drop would silently vanish.
+                if response.contains_pointer() {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        if let Some((x, y)) = app.viewport.screen_to_cell(pos, cell, origin, doc_extent) {
+                            app.stroke_active = true;
+                            stroke_just_started = true;
+                            let tctx = tool_ctx(app);
+                            let resp = app.tool.update(ToolEvent::Press { x, y }, &tctx, &app.doc);
+                            if let ToolResponse::Commit(Some(edit)) = resp {
+                                app.history.apply(&mut app.doc, edit);
+                            }
+                        }
+                    }
+                }
+            } else if response.contains_pointer() {
                 if let Some(pos) = response.interact_pointer_pos() {
                     if let Some((x, y)) = app.viewport.screen_to_cell(pos, cell, origin, doc_extent) {
                         app.stroke_active = true;
                         stroke_just_started = true;
                         let tctx = tool_ctx(app);
-                        let resp = app.tool.update(ToolEvent::Press { x, y }, &tctx, &app.doc);
-                        if let ToolResponse::Commit(Some(edit)) = resp {
-                            app.history.apply(&mut app.doc, edit);
-                        }
+                        app.tool.update(ToolEvent::Press { x, y }, &tctx, &app.doc);
                     }
                 }
             }
-        } else if response.contains_pointer() {
+        }
+
+        if app.space_pan_active {
+            if primary_down {
+                app.viewport.pan += response.drag_delta();
+            }
+            if gesture_ends {
+                app.space_pan_active = false;
+            }
+        } else if app.stroke_active {
+            let tctx = tool_ctx(app);
+            let tail = drive_stroke_tail(
+                app.tool.as_mut(),
+                &mut app.doc,
+                &mut app.history,
+                &app.viewport,
+                &tctx,
+                &response,
+                cell,
+                origin,
+                doc_extent,
+                primary_down,
+                stroke_just_started,
+                gesture_ends,
+            );
+            if tail.ended {
+                app.stroke_active = false;
+            }
+        }
+
+        // Right-click stroke: press-time ownership for a transient instance of the configured
+        // right-click tool; the drag/release tail is the shared `drive_stroke_tail`. `app.tool` —
+        // including a pending text burst or floating selection — stays untouched underneath it, so a
+        // quick right-click erase never disturbs an in-progress session.
+        let mut rc_just_started = false;
+        if !app.stroke_in_progress() && !app.space_pan_active && secondary_pressed && !space && response.contains_pointer()
+        {
             if let Some(pos) = response.interact_pointer_pos() {
                 if let Some((x, y)) = app.viewport.screen_to_cell(pos, cell, origin, doc_extent) {
-                    app.stroke_active = true;
-                    stroke_just_started = true;
-                    let tctx = tool_ctx(app);
-                    app.tool.update(ToolEvent::Press { x, y }, &tctx, &app.doc);
+                    let mut rc = (app.right_click_entry().make)();
+                    let tctx = rc_tool_ctx(app);
+                    // Press on a stroke tool never returns an edit (that's the property that gates
+                    // STROKE_TOOLS membership), so the response can be dropped.
+                    rc.update(ToolEvent::Press { x, y }, &tctx, &app.doc);
+                    app.rc_tool = Some(rc);
+                    rc_just_started = true;
                 }
             }
         }
-    }
-
-    if app.space_pan_active {
-        if primary_down {
-            app.viewport.pan += response.drag_delta();
-        }
-        if gesture_ends {
-            app.space_pan_active = false;
-        }
-    } else if app.stroke_active {
-        let tctx = tool_ctx(app);
-        let tail = drive_stroke_tail(
-            app.tool.as_mut(),
-            &mut app.doc,
-            &mut app.history,
-            &app.viewport,
-            &tctx,
-            &response,
-            cell,
-            origin,
-            doc_extent,
-            primary_down,
-            stroke_just_started,
-            gesture_ends,
-        );
-        if tail.ended {
-            app.stroke_active = false;
-        }
-    }
-
-    // Right-click stroke: press-time ownership for a transient instance of the configured
-    // right-click tool; the drag/release tail is the shared `drive_stroke_tail`. `app.tool` —
-    // including a pending text burst or floating selection — stays untouched underneath it, so a
-    // quick right-click erase never disturbs an in-progress session.
-    let mut rc_just_started = false;
-    if !app.stroke_in_progress() && !app.space_pan_active && secondary_pressed && !space && response.contains_pointer()
-    {
-        if let Some(pos) = response.interact_pointer_pos() {
-            if let Some((x, y)) = app.viewport.screen_to_cell(pos, cell, origin, doc_extent) {
-                let mut rc = (app.right_click_entry().make)();
-                let tctx = rc_tool_ctx(app);
-                // Press on a stroke tool never returns an edit (that's the property that gates
-                // STROKE_TOOLS membership), so the response can be dropped.
-                rc.update(ToolEvent::Press { x, y }, &tctx, &app.doc);
+        if let Some(mut rc) = app.rc_tool.take() {
+            let tctx = rc_tool_ctx(app);
+            let tail = drive_stroke_tail(
+                rc.as_mut(),
+                &mut app.doc,
+                &mut app.history,
+                &app.viewport,
+                &tctx,
+                &response,
+                cell,
+                origin,
+                doc_extent,
+                secondary_down,
+                rc_just_started,
+                secondary_released || !secondary_down,
+            );
+            if tail.committed {
+                // The committed cells bypassed `app.tool`; a pending text burst's pinned `before`
+                // values may now be stale — re-pin them, same as after a mid-burst redo.
+                app.tool.resync(&app.doc, tctx.layer);
+            }
+            if !tail.ended {
                 app.rc_tool = Some(rc);
-                rc_just_started = true;
+            }
+            // Otherwise `app.rc_tool` stays `None`: the gesture is over, the transient tool dropped.
+        }
+
+        // Text-mode keyboard routing: translates raw input events to ToolEvents, fed to app.tool the
+        // same way pointer events already are (same Commit -> history.apply handling).
+        if app.tool_kind == ToolKind::Text && app.text_editing {
+            let events = ui.input(|i| i.events.clone());
+            for ev in events {
+                match ev {
+                    egui::Event::Text(s) => {
+                        for ch in s.chars() {
+                            // The tool's own entry validation drops a rejected character either way;
+                            // this pre-check exists solely to make the drop visible instead of silent.
+                            if let Err(reject) = gascii_core::validate_width(ch) {
+                                app.warn_rejected_char(ch, reject);
+                                continue;
+                            }
+                            let tctx = tool_ctx(app);
+                            let resp = app.tool.update(ToolEvent::Char(ch), &tctx, &app.doc);
+                            if let ToolResponse::Commit(Some(edit)) = resp {
+                                app.history.apply(&mut app.doc, edit);
+                            }
+                        }
+                    }
+                    egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => {
+                        let tctx = tool_ctx(app);
+                        app.tool.update(ToolEvent::Enter, &tctx, &app.doc);
+                    }
+                    egui::Event::Key { key: egui::Key::Backspace, pressed: true, .. } => {
+                        let tctx = tool_ctx(app);
+                        app.tool.update(ToolEvent::Backspace, &tctx, &app.doc);
+                    }
+                    egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
+                        // Escape exits text-edit mode; not just a flush, so it's not routed through
+                        // the generic dispatch above.
+                        app.flush_active_tool();
+                    }
+                    egui::Event::Key { key: egui::Key::ArrowUp, pressed: true, .. } => {
+                        let tctx = tool_ctx(app);
+                        app.tool.update(ToolEvent::Arrow(Direction::Up), &tctx, &app.doc);
+                    }
+                    egui::Event::Key { key: egui::Key::ArrowDown, pressed: true, .. } => {
+                        let tctx = tool_ctx(app);
+                        app.tool.update(ToolEvent::Arrow(Direction::Down), &tctx, &app.doc);
+                    }
+                    egui::Event::Key { key: egui::Key::ArrowLeft, pressed: true, .. } => {
+                        let tctx = tool_ctx(app);
+                        app.tool.update(ToolEvent::Arrow(Direction::Left), &tctx, &app.doc);
+                    }
+                    egui::Event::Key { key: egui::Key::ArrowRight, pressed: true, .. } => {
+                        let tctx = tool_ctx(app);
+                        app.tool.update(ToolEvent::Arrow(Direction::Right), &tctx, &app.doc);
+                    }
+                    _ => {}
+                }
             }
         }
-    }
-    if let Some(mut rc) = app.rc_tool.take() {
-        let tctx = rc_tool_ctx(app);
-        let tail = drive_stroke_tail(
-            rc.as_mut(),
-            &mut app.doc,
-            &mut app.history,
-            &app.viewport,
-            &tctx,
-            &response,
-            cell,
-            origin,
-            doc_extent,
-            secondary_down,
-            rc_just_started,
-            secondary_released || !secondary_down,
-        );
-        if tail.committed {
-            // The committed cells bypassed `app.tool`; a pending text burst's pinned `before`
-            // values may now be stale — re-pin them, same as after a mid-burst redo.
-            app.tool.resync(&app.doc, tctx.layer);
-        }
-        if !tail.ended {
-            app.rc_tool = Some(rc);
-        }
-        // Otherwise `app.rc_tool` stays `None`: the gesture is over, the transient tool dropped.
-    }
 
-    // Text-mode keyboard routing: translates raw input events to ToolEvents, fed to app.tool the
-    // same way pointer events already are (same Commit -> history.apply handling).
-    if app.tool_kind == ToolKind::Text && app.text_editing {
-        let events = ui.input(|i| i.events.clone());
-        for ev in events {
-            match ev {
-                egui::Event::Text(s) => {
-                    for ch in s.chars() {
-                        // The tool's own entry validation drops a rejected character either way;
-                        // this pre-check exists solely to make the drop visible instead of silent.
-                        if let Err(reject) = gascii_core::validate_width(ch) {
-                            app.warn_rejected_char(ch, reject);
-                            continue;
-                        }
+        // Selection keyboard routing: Delete clears the float/selection to Blank, Enter drops a
+        // floating stamp, Escape cancels the marquee/float outright without touching the document.
+        // Gated on no widget having focus, mirroring `handle_keys`'s `!focused` guard on the
+        // single-letter tool keys: `TextEdit`'s own key handling (e.g. the hex color popup) reads
+        // events via `filtered_events`, which clones rather than consumes, so an unguarded block here
+        // would also fire on every Delete/Enter/Escape typed into an unrelated focused text field.
+        let selection_keys_focused = ui.memory(|m| m.focused().is_some());
+        if app.tool_kind == ToolKind::Selection && !selection_keys_focused {
+            let events = ui.input(|i| i.events.clone());
+            for ev in events {
+                match ev {
+                    egui::Event::Key { key: egui::Key::Delete, pressed: true, .. } => {
                         let tctx = tool_ctx(app);
-                        let resp = app.tool.update(ToolEvent::Char(ch), &tctx, &app.doc);
+                        let resp = app.tool.update(ToolEvent::Delete, &tctx, &app.doc);
                         if let ToolResponse::Commit(Some(edit)) = resp {
                             app.history.apply(&mut app.doc, edit);
                         }
                     }
-                }
-                egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => {
-                    let tctx = tool_ctx(app);
-                    app.tool.update(ToolEvent::Enter, &tctx, &app.doc);
-                }
-                egui::Event::Key { key: egui::Key::Backspace, pressed: true, .. } => {
-                    let tctx = tool_ctx(app);
-                    app.tool.update(ToolEvent::Backspace, &tctx, &app.doc);
-                }
-                egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
-                    // Escape exits text-edit mode; not just a flush, so it's not routed through
-                    // the generic dispatch above.
-                    app.flush_active_tool();
-                }
-                egui::Event::Key { key: egui::Key::ArrowUp, pressed: true, .. } => {
-                    let tctx = tool_ctx(app);
-                    app.tool.update(ToolEvent::Arrow(Direction::Up), &tctx, &app.doc);
-                }
-                egui::Event::Key { key: egui::Key::ArrowDown, pressed: true, .. } => {
-                    let tctx = tool_ctx(app);
-                    app.tool.update(ToolEvent::Arrow(Direction::Down), &tctx, &app.doc);
-                }
-                egui::Event::Key { key: egui::Key::ArrowLeft, pressed: true, .. } => {
-                    let tctx = tool_ctx(app);
-                    app.tool.update(ToolEvent::Arrow(Direction::Left), &tctx, &app.doc);
-                }
-                egui::Event::Key { key: egui::Key::ArrowRight, pressed: true, .. } => {
-                    let tctx = tool_ctx(app);
-                    app.tool.update(ToolEvent::Arrow(Direction::Right), &tctx, &app.doc);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // Selection keyboard routing: Delete clears the float/selection to Blank, Enter drops a
-    // floating stamp, Escape cancels the marquee/float outright without touching the document.
-    // Gated on no widget having focus, mirroring `handle_keys`'s `!focused` guard on the
-    // single-letter tool keys: `TextEdit`'s own key handling (e.g. the hex color popup) reads
-    // events via `filtered_events`, which clones rather than consumes, so an unguarded block here
-    // would also fire on every Delete/Enter/Escape typed into an unrelated focused text field.
-    let selection_keys_focused = ui.memory(|m| m.focused().is_some());
-    if app.tool_kind == ToolKind::Selection && !selection_keys_focused {
-        let events = ui.input(|i| i.events.clone());
-        for ev in events {
-            match ev {
-                egui::Event::Key { key: egui::Key::Delete, pressed: true, .. } => {
-                    let tctx = tool_ctx(app);
-                    let resp = app.tool.update(ToolEvent::Delete, &tctx, &app.doc);
-                    if let ToolResponse::Commit(Some(edit)) = resp {
-                        app.history.apply(&mut app.doc, edit);
+                    egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => {
+                        app.flush_active_tool();
                     }
+                    egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
+                        let tctx = tool_ctx(app);
+                        app.tool.update(ToolEvent::Cancel, &tctx, &app.doc);
+                    }
+                    _ => {}
                 }
-                egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => {
-                    app.flush_active_tool();
-                }
-                egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
-                    let tctx = tool_ctx(app);
-                    app.tool.update(ToolEvent::Cancel, &tctx, &app.doc);
-                }
-                _ => {}
             }
         }
-    }
 
-    // Clipboard paste: lands as a floating Selection stamp regardless of the active tool. Read
-    // (not consumed) alongside the text/selection keyboard blocks above — Event::Paste is never
-    // matched by either of those, so there's no double-handling.
-    let paste_texts: Vec<String> = ui.input(|i| {
-        i.events
-            .iter()
-            .filter_map(|e| match e {
-                egui::Event::Paste(text) => Some(text.clone()),
-                _ => None,
-            })
-            .collect()
-    });
-    for text in paste_texts {
-        app.paste_text(&text);
-    }
+        // Clipboard paste: lands as a floating Selection stamp regardless of the active tool. Read
+        // (not consumed) alongside the text/selection keyboard blocks above — Event::Paste is never
+        // matched by either of those, so there's no double-handling.
+        let paste_texts: Vec<String> = ui.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Paste(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        for text in paste_texts {
+            app.paste_text(&text);
+        }
 
-    // Focus-loss detection: a burst mid-typing or a floating stamp must commit, not vanish, when
-    // the OS window loses focus (flush_active_tool is a no-op for every other tool). Additionally,
-    // an in-progress pointer gesture (stroke or space-pan) has no synthetic mouse-up on an OS-level
-    // focus loss (e.g. alt-tabbing mid-drag) — left alone, `stroke_active`/`space_pan_active` would
-    // stay stuck until the next primary press. Cancel the gesture outright so the tool and the app
-    // both return to a clean idle state; this guards different flags than flush_active_tool (burst/
-    // float vs. pointer-gesture ownership) so both run on the same focus-loss edge.
-    let focused = ui.input(|i| i.viewport().focused).unwrap_or(true);
-    if app.was_focused && !focused {
-        app.flush_active_tool();
-        if app.stroke_active || app.space_pan_active {
-            let tctx = tool_ctx(app);
-            app.tool.update(ToolEvent::Cancel, &tctx, &app.doc);
-            app.stroke_active = false;
-            app.space_pan_active = false;
+        // Focus-loss detection: a burst mid-typing or a floating stamp must commit, not vanish, when
+        // the OS window loses focus (flush_active_tool is a no-op for every other tool). Additionally,
+        // an in-progress pointer gesture (stroke or space-pan) has no synthetic mouse-up on an OS-level
+        // focus loss (e.g. alt-tabbing mid-drag) — left alone, `stroke_active`/`space_pan_active` would
+        // stay stuck until the next primary press. Cancel the gesture outright so the tool and the app
+        // both return to a clean idle state; this guards different flags than flush_active_tool (burst/
+        // float vs. pointer-gesture ownership) so both run on the same focus-loss edge.
+        let focused = ui.input(|i| i.viewport().focused).unwrap_or(true);
+        if app.was_focused && !focused {
+            app.flush_active_tool();
+            if app.stroke_active || app.space_pan_active {
+                let tctx = tool_ctx(app);
+                app.tool.update(ToolEvent::Cancel, &tctx, &app.doc);
+                app.stroke_active = false;
+                app.space_pan_active = false;
+            }
+            // A right-click stroke has the same no-synthetic-mouse-up gap on focus loss.
+            if let Some(mut rc) = app.rc_tool.take() {
+                let tctx = rc_tool_ctx(app);
+                rc.update(ToolEvent::Cancel, &tctx, &app.doc);
+            }
         }
-        // A right-click stroke has the same no-synthetic-mouse-up gap on focus loss.
-        if let Some(mut rc) = app.rc_tool.take() {
-            let tctx = rc_tool_ctx(app);
-            rc.update(ToolEvent::Cancel, &tctx, &app.doc);
-        }
+        app.was_focused = focused;
     }
-    app.was_focused = focused;
 
     let visible = app.viewport.visible_cell_rect(painter.clip_rect(), cell, origin, doc_extent);
 

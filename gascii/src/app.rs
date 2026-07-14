@@ -49,6 +49,14 @@ fn is_own_clipboard_text(text: &str, internal: Option<&CellPatch>) -> bool {
     internal.is_some_and(|p| p.to_text() == text)
 }
 
+/// Whether the document has changed since the last save/load: true whenever the undo stack's
+/// current top-edit id doesn't match the id recorded at that save/load. Pulled out as a pure
+/// function, mirroring `is_own_clipboard_text`, so the comparison is unit-testable without a live
+/// `GasciiApp`; `GasciiApp::is_dirty` is the thin method wrapping it.
+fn edit_marker_differs(current: Option<u64>, saved: Option<u64>) -> bool {
+    current != saved
+}
+
 /// Size drag-value + Square/Circle picker for one `StampSettings`. Appears twice in the tool row
 /// (active tool and right-click tool), hence the `id_salt` scope.
 fn stamp_controls(ui: &mut egui::Ui, stamp: &mut StampSettings, id_salt: &str, hover: &str) {
@@ -224,6 +232,17 @@ pub struct GasciiApp {
     png_cell_px: u32,
     current_path: Option<PathBuf>,
     last_error: Option<String>,
+    /// The undo-stack edit id (`History::top_edit_id`) at the moment of the last successful save
+    /// or load — `None` matches a fresh `History`'s own sentinel. `is_dirty` is a pure comparison
+    /// against `self.history.top_edit_id()`; nothing else needs to know about this field.
+    saved_marker: Option<u64>,
+    /// The close-confirm dialog (Save / Don't Save / Cancel) is showing. `pub(crate)` because
+    /// `canvas.rs`'s modality guard reads it directly (see `canvas::show`).
+    pub(crate) close_dialog_open: bool,
+    /// Single-use: lets the very next `close_requested` frame through unconditionally, then resets
+    /// itself. Set by `close_now` so "Save" and "Don't Save" can re-request a real close without
+    /// re-triggering the veto they just cleared.
+    force_close: bool,
     started: Instant,
     first_frame: bool,
 }
@@ -265,6 +284,9 @@ impl GasciiApp {
             png_cell_px: PNG_SCALE_PRESETS[1], // 16px/cell default
             current_path: None,
             last_error: None,
+            saved_marker: None,
+            close_dialog_open: false,
+            force_close: false,
             started,
             first_frame: true,
         }
@@ -337,6 +359,13 @@ impl GasciiApp {
             WidthReject::DoubleWidth => "wider than one cell",
         };
         self.last_error = Some(format!("typed {ch:?} rejected: {why}"));
+    }
+
+    /// Whether the document has unsaved changes: the undo stack's current top edit doesn't match
+    /// the one recorded at the last successful save or load. A brand-new document is clean by
+    /// construction — both sides start `None`.
+    pub(crate) fn is_dirty(&self) -> bool {
+        edit_marker_differs(self.history.top_edit_id(), self.saved_marker)
     }
 
     /// Finalizes whatever the active cross-frame tool (Text's burst, Selection's float) has
@@ -905,6 +934,9 @@ impl GasciiApp {
                     self.reset_cross_frame_tool();
                     self.doc = doc;
                     self.history = History::new();
+                    // Read from the fresh History rather than hardcoding None, so this stays
+                    // correct if History::new()'s starting state ever changes.
+                    self.saved_marker = self.history.top_edit_id();
                     self.current_path = Some(path);
                     self.last_error = None;
                 }
@@ -941,6 +973,7 @@ impl GasciiApp {
             Ok(()) => {
                 self.current_path = Some(path.to_path_buf());
                 self.last_error = None;
+                self.saved_marker = self.history.top_edit_id();
             }
             Err(e) => self.last_error = Some(format!("failed to save {}: {e}", path.display())),
         }
@@ -958,6 +991,68 @@ impl GasciiApp {
             self.last_error = Some(format!("failed to export {}: {e}", path.display()));
         } else {
             self.last_error = None;
+        }
+    }
+
+    /// Runs once per frame near the top of `ui()`. Vetoes the root viewport's close request with a
+    /// modal Save/Don't Save/Cancel dialog whenever the document is dirty; lets a clean close (or
+    /// the one close this dialog just re-requested via `close_now`) proceed untouched.
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) {
+            return;
+        }
+        if self.force_close {
+            self.force_close = false; // consumed — only this one attempt is exempt
+            return; // no CancelClose sent: this close proceeds for real
+        }
+        // Turn a pending Text burst / floating Selection into a real edit before judging dirtiness
+        // — never silently discard in-progress work.
+        self.flush_active_tool();
+        if self.is_dirty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_dialog_open = true;
+        }
+        // Else: clean — don't cancel, eframe closes the window at the end of this frame.
+    }
+
+    /// Re-requests a real close after the confirm dialog resolves (Save succeeded, or Don't Save).
+    /// `force_close` lets the very next `close_requested` frame through without re-triggering the
+    /// veto this dialog just cleared.
+    fn close_now(&mut self, ctx: &egui::Context) {
+        self.force_close = true;
+        self.close_dialog_open = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// The Save/Don't Save/Cancel modal shown while `close_dialog_open`. `canvas.rs` and
+    /// `handle_keys` are both gated off while this is open — see their own guards — since this
+    /// dialog is the only place a decision here (discarding unsaved work) is irreversible.
+    fn close_confirm_dialog(&mut self, ctx: &egui::Context) {
+        if !self.close_dialog_open {
+            return;
+        }
+        let resp = egui::Modal::new(egui::Id::new("close_confirm")).show(ctx, |ui| {
+            ui.label("This document has unsaved changes.");
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    self.save_file();
+                    // `save_file` leaves last_error/saved_marker untouched on cancel or failure —
+                    // is_dirty() staying true after the call *is* the "didn't actually save"
+                    // signal, no separate success/failure plumbing needed.
+                    if !self.is_dirty() {
+                        self.close_now(ctx);
+                    }
+                }
+                if ui.button("Don't Save").clicked() {
+                    self.close_now(ctx);
+                }
+                if ui.button("Cancel").clicked() {
+                    self.close_dialog_open = false;
+                }
+            });
+        });
+        if resp.should_close() {
+            self.close_dialog_open = false; // backdrop click / Escape == Cancel
         }
     }
 
@@ -1010,7 +1105,11 @@ impl eframe::App for GasciiApp {
             eprintln!("startup to first frame: {:?}", self.started.elapsed());
             self.first_frame = false;
         }
-        self.handle_keys(ui);
+        let ctx = ui.ctx().clone();
+        self.handle_close_request(&ctx);
+        if !self.close_dialog_open {
+            self.handle_keys(ui);
+        }
 
         egui::Panel::top("toolbar").show(ui, |ui| {
             self.menu_bar(ui);
@@ -1022,9 +1121,9 @@ impl eframe::App for GasciiApp {
             canvas::show(ui, self);
         });
 
-        let ctx = ui.ctx().clone();
         self.resize_dialog(&ctx);
         self.png_export_dialog(&ctx);
+        self.close_confirm_dialog(&ctx);
     }
 }
 
@@ -1131,5 +1230,25 @@ mod tests {
     fn paste_text_with_no_internal_clipboard_is_always_external() {
         assert!(!is_own_clipboard_text("anything", None));
         assert!(!is_own_clipboard_text("", None));
+    }
+
+    #[test]
+    fn edit_marker_differs_is_clean_when_both_markers_are_none() {
+        assert!(!edit_marker_differs(None, None));
+    }
+
+    #[test]
+    fn edit_marker_differs_is_clean_when_current_matches_saved() {
+        assert!(!edit_marker_differs(Some(3), Some(3)));
+    }
+
+    #[test]
+    fn edit_marker_differs_is_dirty_when_current_and_saved_diverge() {
+        assert!(edit_marker_differs(Some(3), Some(4)));
+    }
+
+    #[test]
+    fn edit_marker_differs_is_dirty_when_current_is_some_but_saved_is_none() {
+        assert!(edit_marker_differs(Some(0), None));
     }
 }
