@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=Fragment+Mono&display=swap" rel="stylesheet">
+<style>
+  body { margin:0; background:#D8D5CE; font-family:"Instrument Sans",sans-serif; }
+  a { color:#3E6FA8; } a:hover { color:#2C568A; }
+</style>
+</helmet>
+
+<section style="display:flex; flex-direction:column; gap:36px; padding:48px; align-items:flex-start;">
+
+  <div style="display:flex; gap:16px; align-items:baseline;">
+    <div style="font-family:'Fragment Mono',monospace; font-size:13px; letter-spacing:0.08em; color:#3B3934;">GASCII · UX WORKFLOWS</div>
+    <div style="font-family:'Fragment Mono',monospace; font-size:12px; color:#716C63;"><a href="GASCII Redesign.dc.html">mockups</a> · <a href="GASCII Design Spec.dc.html">design spec</a></div>
+  </div>
+
+  <!-- W1 tool switching -->
+  <div data-screen-label="W1 Tool switching" style="display:flex; flex-direction:column; gap:10px;">
+    <div style="display:flex; gap:8px; align-items:center;">
+      <span style="font-family:'Fragment Mono',monospace; font-size:11px; background:#1C1B19; color:#F6F5F2; padding:2px 7px;">W1</span>
+      <span style="font-family:'Fragment Mono',monospace; font-size:11px; letter-spacing:0.08em; color:#3B3934;">TOOL SWITCHING &amp; L/R BINDING</span>
+    </div>
+    <div style="display:flex; gap:0; align-items:stretch;">
+      <sc-for list="{{ w1 }}" as="s" hint-placeholder-count="4">
+        <div style="display:flex; align-items:stretch;">
+          <div style="width:230px; border:1px solid #1C1B19; background:#F6F5F2; display:flex; flex-direction:column;">
+            <div style="padding:7px 12px; border-bottom:1px solid #C9C5BD; display:flex; gap:8px; align-items:baseline;">
+              <span style="font-family:'Fragment Mono',monospace; font-size:10px; color:#716C63;">{{ s.n }}</span>
+              <span style="font-size:12px; font-weight:600; color:#1C1B19;">{{ s.title }}</span>
+            </div>
+            <div style="padding:10px 12px; font-size:12px; line-height:1.55; color:#3B3934; flex:1;">{{ s.body }}</div>
+            <div style="padding:7px 12px; border-top:1px solid #C9C5BD; font-family:'Fragment Mono',monospace; font-size:10px; color:#716C63;">{{ s.ui }}</div>
+          </div>
+          <sc-if value="{{ s.arrow }}" hint-placeholder-val="{{ true }}">
+            <div style="width:36px; display:flex; align-items:center; justify-content:center; font-size:16px; color:#3B3934;">→</div>
+          </sc-if>
+        </div>
+      </sc-for>
+    </div>
+    <div style="width:600px; font-size:12px; line-height:1.55; color:#3B3934; border-left:2px solid #A9A49B; padding-left:12px;">
+      Rules: exactly one tool is bound to L and one to R at all times. Keyboard shortcuts (P, E, I, T, F, R, L, S, B) always set the <b>L</b> binding. Right-clicking a toolbox tool sets the <b>R</b> binding. The options bar edits whichever binding is selected in its L/R segment; drawing with either button auto-selects that segment.
+    </div>
+  </div>
+
+  <!-- W2 selection -->
+  <div data-screen-label="W2 Selection move copy" style="display:flex; flex-direction:column; gap:10px;">
+    <div style="display:flex; gap:8px; align-items:center;">
+      <span style="font-family:'Fragment Mono',monospace; font-size:11px; background:#1C1B19; color:#F6F5F2; padding:2px 7px;">W2</span>
+      <span style="font-family:'Fragment Mono',monospace; font-size:11px; letter-spacing:0.08em; color:#3B3934;">SELECT → MOVE / COPY → COMMIT</span>
+    </div>
+    <div style="display:flex; gap:0; align-items:stretch;">
+      <sc-for list="{{ w2 }}" as="s" hint-placeholder-count="5">
+        <div style="display:flex; align-items:stretch;">
+          <div style="width:230px; border:1px solid #1C1B19; background:#F6F5F2; display:flex; flex-direction:column;">
+            <div style="padding:7px 12px; border-bottom:1px solid #C9C5BD; display:flex; gap:8px; align-items:baseline;">
+              <span style="font-family:'Fragment Mono',monospace; font-size:10px; color:#716C63;">{{ s.n }}</span>
+              <span style="font-size:12px; font-weight:600; color:#1C1B19;">{{ s.title }}</span>
+            </div>
+            <div style="padding:10px 12px; font-size:12px; line-height:1.55; color:#3B3934; flex:1;">{{ s.body }}</div>
+            <div style="padding:7px 12px; border-top:1px solid #C9C5BD; font-family:'Fragment Mono',monospace; font-size:10px; color:#716C63;">{{ s.ui }}</div>
+          </div>
+          <sc-if value="{{ s.arrow }}" hint-placeholder-val="{{ true }}">
+            <div style="width:36px; display:flex; align-items:center; justify-content:center; font-size:16px; color:#3B3934;">→</div>
+          </sc-if>
+        </div>
+      </sc-for>
+    </div>
+    <div style="width:600px; font-size:12px; line-height:1.55; color:#3B3934; border-left:2px solid #A9A49B; padding-left:12px;">
+      Rules: a floating selection is drawn as a dashed accent marquee with a size tag; it commits (stamps) on click-outside, Enter, or tool switch. Esc cancels the float and restores the source. Alt-drag copies instead of moves. Arrow keys nudge a floating selection by one cell.
+    </div>
+  </div>
+
+  <!-- W3 export -->
+  <div data-screen-label="W3 Export" style="display:flex; flex-direction:column; gap:10px;">
+    <div style="display:flex; gap:8px; align-items:center;">
+      <span style="font-family:'Fragment Mono',monospace; font-size:11px; background:#1C1B19; color:#F6F5F2; padding:2px 7px;">W3</span>
+      <span style="font-family:'Fragment Mono',monospace; font-size:11px; letter-spacing:0.08em; color:#3B3934;">EXPORT</span>
+    </div>
+    <div style="display:flex; gap:0; align-items:stretch;">
+      <sc-for list="{{ w3 }}" as="s" hint-placeholder-count="4">
+        <div style="display:flex; align-items:stretch;">
+          <div style="width:230px; border:1px solid #1C1B19; background:#F6F5F2; display:flex; flex-direction:column;">
+            <div style="padding:7px 12px; border-bottom:1px solid #C9C5BD; display:flex; gap:8px; align-items:baseline;">
+              <span style="font-family:'Fragment Mono',monospace; font-size:10px; color:#716C63;">{{ s.n }}</span>
+              <span style="font-size:12px; font-weight:600; color:#1C1B19;">{{ s.title }}</span>
+            </div>
+            <div style="padding:10px 12px; font-size:12px; line-height:1.55; color:#3B3934; flex:1;">{{ s.body }}</div>
+            <div style="padding:7px 12px; border-top:1px solid #C9C5BD; font-family:'Fragment Mono',monospace; font-size:10px; color:#716C63;">{{ s.ui }}</div>
+          </div>
+          <sc-if value="{{ s.arrow }}" hint-placeholder-val="{{ true }}">
+            <div style="width:36px; display:flex; align-items:center; justify-content:center; font-size:16px; color:#3B3934;">→</div>
+          </sc-if>
+        </div>
+      </sc-for>
+    </div>
+    <div style="width:600px; font-size:12px; line-height:1.55; color:#3B3934; border-left:2px solid #A9A49B; padding-left:12px;">
+      Rules: one Export dialog replaces the two "Export Text… / Export PNG…" menu items (a format segment inside). The dialog remembers last-used format and options per document. Copy All as Text stays in Edit as the zero-friction path.
+    </div>
+  </div>
+
+  <!-- W4 draw -->
+  <div data-screen-label="W4 Draw with glyph" style="display:flex; flex-direction:column; gap:10px;">
+    <div style="display:flex; gap:8px; align-items:center;">
+      <span style="font-family:'Fragment Mono',monospace; font-size:11px; background:#1C1B19; color:#F6F5F2; padding:2px 7px;">W4</span>
+      <span style="font-family:'Fragment Mono',monospace; font-size:11px; letter-spacing:0.08em; color:#3B3934;">DRAW WITH GLYPH / BRUSH</span>
+    </div>
+    <div style="display:flex; gap:0; align-items:stretch;">
+      <sc-for list="{{ w4 }}" as="s" hint-placeholder-count="4">
+        <div style="display:flex; align-items:stretch;">
+          <div style="width:230px; border:1px solid #1C1B19; background:#F6F5F2; display:flex; flex-direction:column;">
+            <div style="padding:7px 12px; border-bottom:1px solid #C9C5BD; display:flex; gap:8px; align-items:baseline;">
+              <span style="font-family:'Fragment Mono',monospace; font-size:10px; color:#716C63;">{{ s.n }}</span>
+              <span style="font-size:12px; font-weight:600; color:#1C1B19;">{{ s.title }}</span>
+            </div>
+            <div style="padding:10px 12px; font-size:12px; line-height:1.55; color:#3B3934; flex:1;">{{ s.body }}</div>
+            <div style="padding:7px 12px; border-top:1px solid #C9C5BD; font-family:'Fragment Mono',monospace; font-size:10px; color:#716C63;">{{ s.ui }}</div>
+          </div>
+          <sc-if value="{{ s.arrow }}" hint-placeholder-val="{{ true }}">
+            <div style="width:36px; display:flex; align-items:center; justify-content:center; font-size:16px; color:#3B3934;">→</div>
+          </sc-if>
+        </div>
+      </sc-for>
+    </div>
+    <div style="width:600px; font-size:12px; line-height:1.55; color:#3B3934; border-left:2px solid #A9A49B; padding-left:12px;">
+      Rules: the Write toggles (Glyph / Background) gate what a stroke writes per cell — glyph+FG color, BG color, or both. Every used glyph is pushed to the front of RECENT (dedup, max 6). Hovering the canvas always shows the cell cursor outline; the status bar tracks cell coordinates live.
+    </div>
+  </div>
+
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  renderVals() {
+    const step = (n, title, body, ui, arrow = true) => ({ n, title, body, ui, arrow });
+    return {
+      w1: [
+        step('01', 'Pick a tool', 'Click a toolbox cell or press its shortcut key. It becomes the L (left-click) tool and renders inverted with an L badge.', 'toolbox · key P/E/I/T/F/R/L/S/B'),
+        step('02', 'Bind right-click', 'Right-click any toolbox cell to bind it to the R (right mouse) slot. An outlined R badge marks it.', 'toolbox · right-click'),
+        step('03', 'Adjust options', 'Options bar shows the L tool\u2019s options. Click the R segment to view/edit the R tool\u2019s options instead.', 'options bar · L/R segment'),
+        step('04', 'Draw', 'Left button uses the L tool, right button uses the R tool. No mode switching mid-stroke.', 'canvas', false),
+      ],
+      w2: [
+        step('01', 'Activate Selection', 'Press S or click the Selection tool.', 'key S'),
+        step('02', 'Drag a marquee', 'Dashed accent rectangle with a live size tag (e.g. 13\u00d72). Status bar mirrors it.', 'canvas · drag'),
+        step('03', 'Move or copy', 'Drag inside the marquee to float and move it. Hold Alt while starting the drag to copy instead \u2014 source cells stay.', 'drag · Alt-drag'),
+        step('04', 'Nudge', 'Arrow keys move the floating selection one cell at a time.', 'arrow keys'),
+        step('05', 'Commit or cancel', 'Click outside / Enter / tool switch stamps the float. Esc cancels and restores.', 'Enter · Esc', false),
+      ],
+      w3: [
+        step('01', 'Open Export', 'File \u25b8 Export\u2026 (Ctrl+Shift+E). One dialog for all formats.', 'menu · Ctrl+Shift+E'),
+        step('02', 'Choose format', 'Segmented Text (.txt) / PNG. Options swap contextually below.', 'export dialog'),
+        step('03', 'Set options', 'PNG: scale 1\u00d7/2\u00d7/4\u00d7, transparent background. Text: trailing-space trim. Live preview + final pixel size shown.', 'export dialog'),
+        step('04', 'Export', 'Primary button opens the OS save dialog. Last-used settings are remembered.', 'OS file dialog', false),
+      ],
+      w4: [
+        step('01', 'Pick a glyph', 'Click a swatch in the palette (tabs: ASCII / Box / Blocks) or reuse one from RECENT.', 'palette'),
+        step('02', 'Pick colors', 'FG/BG overlapping wells; click either to open the color picker. X swaps them. Eyedropper (I) samples glyph+colors from any cell.', 'color wells · key X/I'),
+        step('03', 'Set write mode', 'WRITE toggles choose whether strokes write the glyph, the background color, or both.', 'write toggles'),
+        step('04', 'Draw', 'Pencil = 1 cell precision; Brush = sized square/circle stamp. Shift constrains lines to straight.', 'canvas · Shift', false),
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>

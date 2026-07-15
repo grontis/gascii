@@ -4,7 +4,7 @@ use std::time::Instant;
 use eframe::egui;
 use gascii_core::{
     builtin_pages, builtin_ramps, export_text, load_str, resize_document,
-    save_string, BrushShape, Buildup, CellPatch, DensityBrush, DensityMode, Document,
+    save_string, BrushShape, CellPatch, DensityBrush, DensityMode, Document,
     Eraser, Fixed, FloodFill, History, Line, Page, Pencil, PlaneMask, Ramp, Rectangle, ResizeError,
     Rgba, SelectionTool, TextTool, Tool, ToolEvent, ToolResponse, WidthReject, MAX_TOOL_SIZE,
 };
@@ -16,30 +16,6 @@ use crate::viewport::Viewport;
 
 /// PNG export cell-scale presets offered to the user, in pixels per cell.
 const PNG_SCALE_PRESETS: [u32; 5] = [8, 16, 24, 32, 48];
-
-/// ANSI 16-color presets offered as a picking aid alongside the truecolor picker.
-const ANSI16: [(&str, Rgba); 16] = [
-    ("Black", Rgba(0, 0, 0, 255)),
-    ("Red", Rgba(205, 49, 49, 255)),
-    ("Green", Rgba(13, 188, 121, 255)),
-    ("Yellow", Rgba(229, 229, 16, 255)),
-    ("Blue", Rgba(36, 114, 200, 255)),
-    ("Magenta", Rgba(188, 63, 188, 255)),
-    ("Cyan", Rgba(17, 168, 205, 255)),
-    ("White", Rgba(229, 229, 229, 255)),
-    ("Bright Black", Rgba(102, 102, 102, 255)),
-    ("Bright Red", Rgba(241, 76, 76, 255)),
-    ("Bright Green", Rgba(35, 209, 139, 255)),
-    ("Bright Yellow", Rgba(245, 245, 67, 255)),
-    ("Bright Blue", Rgba(59, 142, 234, 255)),
-    ("Bright Magenta", Rgba(214, 112, 214, 255)),
-    ("Bright Cyan", Rgba(41, 184, 219, 255)),
-    ("Bright White", Rgba(255, 255, 255, 255)),
-];
-
-fn color32(c: Rgba) -> egui::Color32 {
-    egui::Color32::from_rgba_unmultiplied(c.0, c.1, c.2, c.3)
-}
 
 /// Whether a pasted `Event::Paste` text is still the app's own copy: the OS clipboard is "ours"
 /// exactly when `internal`'s own flattening still matches what came back on paste. Pulled out of
@@ -57,48 +33,50 @@ fn edit_marker_differs(current: Option<u64>, saved: Option<u64>) -> bool {
     current != saved
 }
 
-/// Size drag-value + Square/Circle picker for one `StampSettings`. Appears twice in the tool row
-/// (active tool and right-click tool), hence the `id_salt` scope.
-fn stamp_controls(ui: &mut egui::Ui, stamp: &mut StampSettings, id_salt: &str, hover: &str) {
-    ui.push_id(id_salt, |ui| {
-        ui.label("Size");
-        ui.add(egui::DragValue::new(&mut stamp.size).range(1..=MAX_TOOL_SIZE))
-            .on_hover_text(hover);
-        ui.selectable_value(&mut stamp.shape, BrushShape::Square, "Square");
-        ui.selectable_value(&mut stamp.shape, BrushShape::Circle, "Circle");
-    });
+/// How many glyphs the RECENT row remembers, per spec §5.
+pub(crate) const RECENT_GLYPHS: usize = 6;
+
+/// Pushes `ch` to the front of a most-recent-first list, de-duplicated and capped.
+///
+/// Pure, so the ordering rule is testable without a `GasciiApp`: re-using a glyph already in the
+/// list must move it to the front rather than add a second copy, or the row fills with duplicates
+/// and stops being six *distinct* recent glyphs.
+fn push_recent(recent: &mut Vec<char>, ch: char) {
+    recent.retain(|&c| c != ch);
+    recent.insert(0, ch);
+    recent.truncate(RECENT_GLYPHS);
 }
 
-/// A clickable color swatch; clicking opens a popup with ANSI-16 presets plus a full truecolor
-/// picker. Colors are always stored truecolor — presets are a picking aid, not a constraint.
-fn color_swatch_button(ui: &mut egui::Ui, label: &str, color: &mut Rgba) {
-    ui.label(label);
-    let btn = ui.add(
-        egui::Button::new("")
-            .fill(color32(*color))
-            .min_size(egui::vec2(28.0, 20.0)),
-    );
-    egui::Popup::from_toggle_button_response(&btn).show(|ui| {
-        ui.label("ANSI 16");
-        ui.horizontal_wrapped(|ui| {
-            for (name, preset) in ANSI16.iter() {
-                let resp = ui.add(
-                    egui::Button::new("")
-                        .fill(color32(*preset))
-                        .min_size(egui::vec2(18.0, 16.0)),
-                );
-                if resp.on_hover_text(*name).clicked() {
-                    *color = *preset;
-                }
-            }
-        });
-        ui.separator();
-        ui.label("Custom");
-        let mut arr = [color.0, color.1, color.2, color.3];
-        if ui.color_edit_button_srgba_unmultiplied(&mut arr).changed() {
-            *color = Rgba(arr[0], arr[1], arr[2], arr[3]);
-        }
-    });
+/// The binding a pasted float lands in: whichever is already bound to Selection (L wins if both),
+/// else L — rebound, matching the pre-slot behavior.
+///
+/// Never R by default: a paste is a keyboard command, the keyboard's tool is L's, and silently
+/// rebinding the right button out from under the user is worse than rebinding the left. Pure, so the
+/// choice is testable without a `GasciiApp` (following `is_own_clipboard_text`'s precedent).
+fn paste_target(l: ToolKind, r: ToolKind) -> Binding {
+    if l == ToolKind::Selection {
+        Binding::L
+    } else if r == ToolKind::Selection {
+        Binding::R
+    } else {
+        Binding::L
+    }
+}
+
+/// The order the two bindings commit, given which one (if any) the pointer is currently driving.
+///
+/// Overlay order *is* commit order: an overlay is a promise about the document's final state, and
+/// the last committer wins any overlapped cell — so the last committer must paint on top. A slot
+/// mid-gesture commits at its imminent release, before any idle slot's session reaches its next
+/// structural trigger; so the gesturing slot goes first, and underneath.
+///
+/// Pure, mirroring `is_own_clipboard_text` and `edit_marker_differs`, so the rule is testable
+/// without a live `GasciiApp` — and so `flush_all` and the painter cannot disagree about it.
+fn order_for(gesture: Option<Binding>) -> [Binding; 2] {
+    match gesture {
+        Some(b) => [b, b.other()],
+        None => [Binding::L, Binding::R],
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -114,6 +92,55 @@ pub(crate) enum ToolKind {
     Line,
     Selection,
     Brush,
+}
+
+/// Which mouse button drives a tool. Named for what the UI says — the options bar's segment and
+/// the toolbox badges read "L" and "R" — rather than Left/Right.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Binding {
+    L = 0,
+    R = 1,
+}
+
+impl Binding {
+    pub(crate) const ALL: [Binding; 2] = [Binding::L, Binding::R];
+
+    pub(crate) fn other(self) -> Binding {
+        match self {
+            Binding::L => Binding::R,
+            Binding::R => Binding::L,
+        }
+    }
+
+    /// Index into `GasciiApp::slots`. Hot paths index the field directly rather than going through
+    /// a `&mut self` accessor, which would borrow all of `self` and collide with the `&self.doc`
+    /// every `Tool::update` also needs.
+    pub(crate) fn ix(self) -> usize {
+        self as usize
+    }
+}
+
+/// One mouse button's persistent tool: what it's bound to, the live instance (which may hold a
+/// session outliving any single gesture), and that binding's own per-kind footprint memory.
+/// Nothing here knows which button it belongs to — that is the whole symmetry.
+pub(crate) struct ToolSlot {
+    pub kind: ToolKind,
+    pub tool: Box<dyn Tool>,
+    /// Per-kind footprint memory, indexed by `sized_slot`. Private to this slot, so L's Eraser size
+    /// and R's Eraser size are independent by construction rather than by two parallel arrays.
+    pub stamps: [StampSettings; SIZED_TOOL_COUNT],
+}
+
+impl ToolSlot {
+    fn new(kind: ToolKind) -> Self {
+        ToolSlot { kind, tool: make_tool(kind), stamps: [StampSettings::default(); SIZED_TOOL_COUNT] }
+    }
+
+    /// This slot's footprint for whatever it is currently bound to (the identity default for
+    /// unsized kinds, which ignore it).
+    pub fn stamp(&self) -> StampSettings {
+        sized_slot(self.kind).map(|i| self.stamps[i]).unwrap_or_default()
+    }
 }
 
 /// Footprint settings one sized tool remembers: its stamp width and shape. Every sized tool —
@@ -157,27 +184,111 @@ pub(crate) fn tool_shows_hover(kind: ToolKind) -> bool {
     !matches!(kind, ToolKind::Selection)
 }
 
-/// One entry of `STROKE_TOOLS`: kind, display name, and constructor in a single row, so the
-/// three can never drift apart.
-pub(crate) struct StrokeTool {
+/// Placeholder `Tool` for `ToolKind::Eyedropper`, the one kind that isn't one: it yields app color
+/// state rather than an `Edit`, and `ToolResponse` has no variant to carry a picked color. It
+/// exists so a binding's tool is never `Option` — every generic path (pending, resync, caret,
+/// selection overlay, flush) reads it uniformly and gets the trait's own "nothing here" answers.
+/// The actual sampling stays in `canvas.rs`'s press branch.
+struct InertTool;
+
+impl Tool for InertTool {
+    fn update(&mut self, _ev: ToolEvent, _ctx: &gascii_core::ToolCtx, _doc: &Document) -> ToolResponse {
+        ToolResponse::Idle
+    }
+
+    fn pending(&self) -> &[gascii_core::PendingCell] {
+        &[]
+    }
+}
+
+/// One tool: kind, display name, shortcut, hint, and constructor in a single row.
+pub(crate) struct ToolDef {
     pub kind: ToolKind,
     pub name: &'static str,
+    pub key: egui::Key,
+    pub tip: &'static str,
     pub make: fn() -> Box<dyn Tool>,
 }
 
-/// The plain pointer-stroke tools — the single source of truth for their names and constructors,
-/// used by `set_tool` and by the right-click selector (index 0, Eraser, is the right-click
-/// default). All qualify for right-click driving because their `Press` never returns an edit, so
-/// the generic press/drag/release lifecycle fits every one of them. Text/Selection/Eyedropper
-/// need bespoke routing and stay primary-button-only.
-pub(crate) const STROKE_TOOLS: [StrokeTool; 6] = [
-    StrokeTool { kind: ToolKind::Eraser, name: "Eraser", make: || Box::new(Eraser::new()) },
-    StrokeTool { kind: ToolKind::Pencil, name: "Pencil", make: || Box::new(Pencil::new()) },
-    StrokeTool { kind: ToolKind::Fill, name: "Fill", make: || Box::new(FloodFill::new()) },
-    StrokeTool { kind: ToolKind::Line, name: "Line", make: || Box::new(Line::new()) },
-    StrokeTool { kind: ToolKind::Rectangle, name: "Rectangle", make: || Box::new(Rectangle::new()) },
-    StrokeTool { kind: ToolKind::Brush, name: "Brush", make: || Box::new(DensityBrush::new()) },
+/// The nine tools, and the single source of truth for their names, shortcuts, hints, and
+/// constructors. The toolbox, the shortcut handler, the options bar, and both bindings all read
+/// this one table, so a tool cannot be added to the UI and forgotten in the constructor.
+pub(crate) const TOOLS: [ToolDef; 9] = [
+    ToolDef {
+        kind: ToolKind::Pencil,
+        name: "Pencil",
+        key: egui::Key::P,
+        tip: "Draw the active glyph",
+        make: || Box::new(Pencil::new()),
+    },
+    ToolDef {
+        kind: ToolKind::Eraser,
+        name: "Eraser",
+        key: egui::Key::E,
+        tip: "Erase cells to blank",
+        make: || Box::new(Eraser::new()),
+    },
+    ToolDef {
+        kind: ToolKind::Eyedropper,
+        name: "Eyedropper",
+        key: egui::Key::I,
+        tip: "Click a cell to pick up its text and background colors",
+        make: || Box::new(InertTool),
+    },
+    ToolDef {
+        kind: ToolKind::Text,
+        name: "Text",
+        key: egui::Key::T,
+        tip: "Click to place a cursor, then type",
+        make: || Box::new(TextTool::new()),
+    },
+    ToolDef {
+        kind: ToolKind::Fill,
+        name: "Fill",
+        key: egui::Key::F,
+        tip: "Flood-fill a connected region",
+        make: || Box::new(FloodFill::new()),
+    },
+    ToolDef {
+        kind: ToolKind::Rectangle,
+        name: "Rectangle",
+        key: egui::Key::R,
+        tip: "Drag a box outline; joins box-drawing art",
+        make: || Box::new(Rectangle::new()),
+    },
+    ToolDef {
+        kind: ToolKind::Line,
+        name: "Line",
+        key: egui::Key::L,
+        tip: "Drag a straight line; joins box-drawing art",
+        make: || Box::new(Line::new()),
+    },
+    ToolDef {
+        kind: ToolKind::Selection,
+        name: "Selection",
+        key: egui::Key::S,
+        tip: "Drag a region to move, copy, or delete",
+        make: || Box::new(SelectionTool::new()),
+    },
+    ToolDef {
+        kind: ToolKind::Brush,
+        name: "Brush",
+        key: egui::Key::B,
+        tip: "Paint density ramps",
+        make: || Box::new(DensityBrush::new()),
+    },
 ];
+
+pub(crate) fn tool_def(kind: ToolKind) -> &'static ToolDef {
+    TOOLS.iter().find(|d| d.kind == kind).expect("TOOLS covers every ToolKind")
+}
+
+/// Builds a fresh instance for `kind`. Total over `ToolKind` — `tools_table_lists_every_kind_
+/// exactly_once` pins that the lookup cannot miss.
+pub(crate) fn make_tool(kind: ToolKind) -> Box<dyn Tool> {
+    (tool_def(kind).make)()
+}
+
 
 pub struct GasciiApp {
     pub(crate) doc: Document,
@@ -190,35 +301,39 @@ pub struct GasciiApp {
     pub(crate) active_fg: Rgba,
     pub(crate) active_bg: Rgba,
     pub(crate) mask: PlaneMask,
-    pub(crate) tool_kind: ToolKind,
-    pub(crate) tool: Box<dyn Tool>,
-    /// Per-tool footprint settings for the sized primary tools, indexed by `sized_slot` — each
-    /// tool remembers its own size/shape across switches.
-    pub(crate) tool_stamps: [StampSettings; SIZED_TOOL_COUNT],
-    /// Per-option footprint settings for the right-click tool, indexed like `right_click_tool`.
-    /// Fully independent of `tool_stamps`: sizing the right-click Eraser never resizes the
-    /// primary Eraser, and vice versa.
-    pub(crate) rc_stamps: [StampSettings; STROKE_TOOLS.len()],
-    /// Index into `STROKE_TOOLS`: what a secondary-button stroke draws with. An index (not a
-    /// `ToolKind`) so a non-stroke kind is unrepresentable here by construction.
-    pub(crate) right_click_tool: usize,
+    /// The two bindings, indexed by `Binding::ix`. Exactly one tool is bound to each at all times.
+    pub(crate) slots: [ToolSlot; 2],
+    /// Which binding the options bar edits. A gesture on either button selects that button's
+    /// segment.
+    pub(crate) options_focus: Binding,
     /// The transient tool instance a secondary-button stroke drives, `Some` only while that
-    /// stroke is in flight. `self.tool` (and any pending text burst or floating selection) stays
+    /// stroke is in flight. `self.slots[0].tool` (and any pending text burst or floating selection) stays
     /// untouched underneath it.
-    pub(crate) rc_tool: Option<Box<dyn Tool>>,
-    pub(crate) stroke_active: bool,
+    /// Which slot's tool the pointer is currently driving, if any. Gesture ownership is one
+    /// question, so it is one field — which is what let the press/drag/release paths collapse to a
+    /// single parameterized call site. At most one gesture is live across both buttons.
+    pub(crate) gesture: Option<Binding>,
     pub(crate) space_pan_active: bool,
-    /// True once `TextTool` has an active click-placed cursor — gates every single-letter
-    /// tool-select key so typing while composing text doesn't switch tools.
-    pub(crate) text_editing: bool,
+    /// Which slot's tool receives keystrokes. There is one keyboard and both slots can be bound to
+    /// keyboard-driven tools, so ownership is explicit state rather than something derived: it is
+    /// acquired by a canvas press on a Text/Selection slot (or by paste), and released when that
+    /// slot's session ends or its binding changes.
+    ///
+    /// Deliberately not derived from tool state. Escape ends a text session while `TextTool` keeps
+    /// its cursor placed, so "has a caret" and "is accepting keys" genuinely differ. It also gates
+    /// every single-letter tool-select key, so typing never switches tools.
+    pub(crate) keyboard_owner: Option<Binding>,
     /// Previous frame's window-focus state, for edge-detecting focus loss.
     pub(crate) was_focused: bool,
     /// The last region copied via Ctrl+C, kept alongside the plain text written to the OS
     /// clipboard. A paste whose `Event::Paste` text still matches this patch's own flattening
     /// pastes the colored version; otherwise it's treated as external plain text.
     pub(crate) internal_clipboard: Option<CellPatch>,
-    pages: Vec<Page>,
-    active_page: usize,
+    pub(crate) pages: Vec<Page>,
+    pub(crate) active_page: usize,
+    /// The last [`RECENT_GLYPHS`] glyphs used, most recent first. Fed by picking a swatch and by
+    /// actually drawing with one, per workflow W4.
+    pub(crate) recent_glyphs: Vec<char>,
     /// Built-in Ramps, populated at startup — the density brush's glyph sources.
     pub(crate) ramps: Vec<Ramp>,
     /// Index into `ramps`: the brush's currently active ramp.
@@ -231,7 +346,7 @@ pub struct GasciiApp {
     png_dialog_open: bool,
     png_cell_px: u32,
     current_path: Option<PathBuf>,
-    last_error: Option<String>,
+    pub(crate) last_error: Option<String>,
     /// The undo-stack edit id (`History::top_edit_id`) at the moment of the last successful save
     /// or load — `None` matches a fresh `History`'s own sentinel. `is_dirty` is a pure comparison
     /// against `self.history.top_edit_id()`; nothing else needs to know about this field.
@@ -243,37 +358,52 @@ pub struct GasciiApp {
     /// itself. Set by `close_now` so "Save" and "Don't Save" can re-request a real close without
     /// re-triggering the veto they just cleared.
     force_close: bool,
+    /// The title last pushed to the OS, so it is only sent when it changes.
+    shown_title: String,
     started: Instant,
     first_frame: bool,
 }
 
 impl GasciiApp {
     pub fn new(cc: &eframe::CreationContext<'_>, started: Instant) -> Self {
-        fonts::install_canvas_font(&cc.egui_ctx);
+        fonts::install_fonts(&cc.egui_ctx);
+        crate::ui::theme::install(&cc.egui_ctx);
+        Self::with_state(started)
+    }
+
+    /// A `GasciiApp` with no egui context attached. The context is needed only to register fonts and
+    /// themes; every field below is plain data. Splitting it out lets tests drive the real
+    /// flush/commit/resync machinery — the parts that are about coordination between the two
+    /// bindings and so cannot be reached by the pure-function tests.
+    #[cfg(test)]
+    pub(crate) fn headless() -> Self {
+        Self::with_state(Instant::now())
+    }
+
+    fn with_state(started: Instant) -> Self {
         Self {
             doc: Document::default_document(),
             viewport: Viewport::default(),
             hovered_cell: None,
             renderer: Box::new(NaiveRenderer),
-            pending_fit: false,
+            // Fit on the first frame: a document pinned to the top-left corner of the desk is not
+            // "the star", and the viewport's default pan of zero puts it there.
+            pending_fit: true,
             history: History::new(),
             active_glyph: '#',
             active_fg: Rgba::WHITE,
             active_bg: Rgba::TRANSPARENT,
             mask: PlaneMask::default(),
-            tool_kind: ToolKind::Pencil,
-            tool: Box::new(Pencil::new()),
-            tool_stamps: [StampSettings::default(); SIZED_TOOL_COUNT],
-            rc_stamps: [StampSettings::default(); STROKE_TOOLS.len()],
-            right_click_tool: 0, // STROKE_TOOLS[0]: Eraser
-            rc_tool: None,
-            stroke_active: false,
+            slots: [ToolSlot::new(ToolKind::Pencil), ToolSlot::new(ToolKind::Eraser)],
+            options_focus: Binding::L,
+            gesture: None,
             space_pan_active: false,
-            text_editing: false,
+            keyboard_owner: None,
             was_focused: true,
             internal_clipboard: None,
             pages: builtin_pages(),
             active_page: 0,
+            recent_glyphs: Vec::new(),
             ramps: builtin_ramps(),
             active_ramp: 0,
             density_mode: DensityMode::Fixed(Fixed(1.0)),
@@ -287,6 +417,7 @@ impl GasciiApp {
             saved_marker: None,
             close_dialog_open: false,
             force_close: false,
+            shown_title: String::new(),
             started,
             first_frame: true,
         }
@@ -295,59 +426,60 @@ impl GasciiApp {
     /// Whether any pointer gesture — primary stroke or right-click stroke — currently owns the
     /// canvas.
     pub(crate) fn stroke_in_progress(&self) -> bool {
-        self.stroke_active || self.rc_tool.is_some()
+        self.gesture.is_some()
     }
 
-    /// The `STROKE_TOOLS` entry the right-click gesture draws with. The min-clamp is pure
-    /// robustness — only the selector combo writes the index, always in range.
-    pub(crate) fn right_click_entry(&self) -> &'static StrokeTool {
-        &STROKE_TOOLS[self.rc_index()]
+    pub(crate) fn slot(&self, b: Binding) -> &ToolSlot {
+        &self.slots[b.ix()]
     }
 
-    fn rc_index(&self) -> usize {
-        self.right_click_tool.min(STROKE_TOOLS.len() - 1)
+    /// Prefer indexing `slots` directly in paths that also touch `self.doc` — this borrows all of
+    /// `self` and will collide there.
+    #[allow(dead_code)]
+    pub(crate) fn slot_mut(&mut self, b: Binding) -> &mut ToolSlot {
+        &mut self.slots[b.ix()]
     }
 
-    /// The active tool's own footprint settings (the identity default for unsized tools).
-    pub(crate) fn active_stamp(&self) -> StampSettings {
-        sized_slot(self.tool_kind).map(|i| self.tool_stamps[i]).unwrap_or_default()
-    }
-
-    /// The right-click tool's own footprint settings — independent of the primary tools'.
-    pub(crate) fn rc_stamp(&self) -> StampSettings {
-        self.rc_stamps[self.rc_index()]
-    }
-
-    /// Rebuilds `self.tool` for the new kind. A no-op while a stroke is active: the pointer is
-    /// captured by the in-progress gesture, so tool switching is suppressed mid-stroke.
-    fn set_tool(&mut self, kind: ToolKind) {
+    /// Binds `kind` to `b`, replacing that slot's instance. A no-op while a gesture is active: the
+    /// pointer is captured by it, so rebinding is suppressed mid-stroke.
+    ///
+    /// Flushes the slot first, unconditionally — `flush_slot` is self-gating, and the instance is
+    /// about to be replaced regardless of whether the kind actually changed. Without this,
+    /// re-selecting Text/Selection while already active would silently discard the pending,
+    /// uncommitted burst or float.
+    fn set_tool(&mut self, b: Binding, kind: ToolKind) {
         if self.stroke_in_progress() {
             return;
         }
-        // Flush whenever we're leaving a cross-frame tool's (Text or Selection) session behind —
-        // including re-selecting the same tool while already active, which unconditionally
-        // replaces `self.tool` with a brand-new instance below. Without this, re-clicking the
-        // toolbar's "Text"/"Selection" button mid-session would silently discard the pending,
-        // uncommitted burst or float. A no-op flush if nothing is pending.
-        if matches!(self.tool_kind, ToolKind::Text | ToolKind::Selection) {
-            self.flush_active_tool();
+        self.flush_slot(b);
+        self.slots[b.ix()].kind = kind;
+        self.slots[b.ix()].tool = make_tool(kind);
+        // Only this slot's claim on the keyboard is released — rebinding L must not silently mute a
+        // live session on R.
+        self.release_keyboard(b);
+    }
+
+    /// Releases `b`'s claim on the keyboard, if it holds one. A no-op for the other slot's claim.
+    fn release_keyboard(&mut self, b: Binding) {
+        if self.keyboard_owner == Some(b) {
+            self.keyboard_owner = None;
         }
-        self.tool_kind = kind;
-        match kind {
-            // No Tool object needed: canvas.rs branches around `self.tool` entirely in
-            // Eyedropper mode (it produces no Edit).
-            ToolKind::Eyedropper => {}
-            ToolKind::Text => self.tool = Box::new(TextTool::new()),
-            ToolKind::Selection => self.tool = Box::new(SelectionTool::new()),
-            // Every remaining kind is a stroke tool; `stroke_tools_cover_every_stroke_kind`
-            // pins that the lookup can't miss.
-            _ => {
-                if let Some(entry) = STROKE_TOOLS.iter().find(|e| e.kind == kind) {
-                    self.tool = (entry.make)();
-                }
-            }
-        }
-        self.text_editing = false;
+    }
+
+    /// Binds `kind` to `b`. The chrome's entry point to `set_tool`.
+    pub(crate) fn bind(&mut self, b: Binding, kind: ToolKind) {
+        self.set_tool(b, kind);
+    }
+
+    /// Selects `ch` for drawing and records it in RECENT.
+    pub(crate) fn pick_glyph(&mut self, ch: char) {
+        self.active_glyph = ch;
+        push_recent(&mut self.recent_glyphs, ch);
+    }
+
+    /// Swaps FG and BG (the `X` shortcut and the `⇄` control).
+    pub(crate) fn swap_colors(&mut self) {
+        std::mem::swap(&mut self.active_fg, &mut self.active_bg);
     }
 
     /// Surfaces a rejected typed character in the status bar. The rejection itself already
@@ -368,19 +500,68 @@ impl GasciiApp {
         edit_marker_differs(self.history.top_edit_id(), self.saved_marker)
     }
 
-    /// Finalizes whatever the active cross-frame tool (Text's burst, Selection's float) has
-    /// pending into one undo entry. A no-op for every other tool kind — called on tool switch,
-    /// Escape, Undo/Redo, save/export/copy, and OS focus loss, so a typing session or a floating
-    /// stamp is never silently discarded.
-    pub(crate) fn flush_active_tool(&mut self) {
-        if !matches!(self.tool_kind, ToolKind::Text | ToolKind::Selection) {
+    /// Applies `edit` and re-pins every other slot's pending session against the mutated document.
+    /// The single choke point for every document mutation the app performs.
+    ///
+    /// `Tool::resync`'s contract is "the document changed underneath you by a path other than your
+    /// own `update`". With two persistent slots, *any* mutation is underneath at least one of them,
+    /// so this obligation exists at every `History::apply` site, not just the one. Routing them all
+    /// through here is what keeps that from being six chances to forget.
+    ///
+    /// `origin` is the slot whose own `update` produced this edit — it has nothing to re-pin.
+    /// `None` for app-level mutations (redo, resize).
+    pub(crate) fn apply_edit(&mut self, edit: gascii_core::Edit, origin: Option<Binding>) {
+        self.history.apply(&mut self.doc, edit);
+        self.resync_slots(origin);
+    }
+
+    pub(crate) fn resync_slots(&mut self, except: Option<Binding>) {
+        for b in Binding::ALL {
+            if Some(b) != except {
+                self.slots[b.ix()].tool.resync(&self.doc, 0);
+            }
+        }
+    }
+
+    /// Finalizes slot `b`'s pending cross-frame session (Text's burst, Selection's float) into one
+    /// undo entry. A no-op for every other kind.
+    ///
+    /// The kind gate isn't correctness — every stroke tool's catch-all swallows `Commit`
+    /// harmlessly — it avoids building a `ToolCtx`, which clones the active ramp's `Vec<char>`.
+    pub(crate) fn flush_slot(&mut self, b: Binding) {
+        if !matches!(self.slots[b.ix()].kind, ToolKind::Text | ToolKind::Selection) {
             return;
         }
-        let tctx = crate::canvas::tool_ctx(self);
-        if let ToolResponse::Commit(Some(edit)) = self.tool.update(ToolEvent::Commit, &tctx, &self.doc) {
-            self.history.apply(&mut self.doc, edit);
+        let tctx = crate::canvas::tool_ctx(self, b);
+        if let ToolResponse::Commit(Some(edit)) =
+            self.slots[b.ix()].tool.update(ToolEvent::Commit, &tctx, &self.doc)
+        {
+            self.apply_edit(edit, Some(b));
         }
-        self.text_editing = false;
+        self.release_keyboard(b);
+    }
+
+    /// Flushes both slots, in commit order.
+    ///
+    /// The order matters and the reason is subtle: the first slot's flush mutates the document,
+    /// which leaves the second slot's session holding `before` values pinned against the *pre-flush*
+    /// document. Committing those would write stale cells back over the first slot's. `flush_slot`
+    /// routes through `apply_edit`, which resyncs the other slot — so the second flush sees the
+    /// first's committed cells. Every trigger that reads or replaces `self.doc` calls this.
+    pub(crate) fn flush_all(&mut self) {
+        for b in self.commit_order() {
+            self.flush_slot(b);
+        }
+    }
+
+    /// The order the slots commit — and therefore the order their overlays paint (bottom first).
+    pub(crate) fn commit_order(&self) -> [Binding; 2] {
+        order_for(self.gesture_owner())
+    }
+
+    /// Which slot the pointer is currently driving, if any.
+    pub(crate) fn gesture_owner(&self) -> Option<Binding> {
+        self.gesture
     }
 
     /// Commits any pending text burst or floating selection, then undoes the most recent edit.
@@ -388,7 +569,7 @@ impl GasciiApp {
     /// that was just committed" (the same edit the flush just committed), matching ordinary
     /// editor conventions.
     fn request_undo(&mut self) {
-        self.flush_active_tool();
+        self.flush_all();
         self.history.undo(&mut self.doc);
     }
 
@@ -404,29 +585,43 @@ impl GasciiApp {
     ///
     /// A redo applied here mutates `self.doc` directly, bypassing the pending tool entirely — for
     /// `TextTool`, if the redone edit touches a cell the burst has already pinned a `before` value
-    /// for, that pinned value goes stale relative to `doc`'s new actual state; `self.tool.resync`
+    /// for, that pinned value goes stale relative to `doc`'s new actual state; `self.slots[0].tool.resync`
     /// re-pins it. `SelectionTool` inherits the trait's default no-op `resync` — its drop reads
     /// `before` from the document at drop time, not lift time, so there is nothing to re-pin.
     fn request_redo(&mut self) {
         if self.history.can_redo() {
             self.history.redo(&mut self.doc);
-            let layer = crate::canvas::tool_ctx(self).layer;
-            self.tool.resync(&self.doc, layer);
+            // A redo mutates `self.doc` behind BOTH slots' backs, so both re-pin — there is no
+            // originating slot to exempt.
+            self.resync_slots(None);
         } else {
-            self.flush_active_tool();
+            self.flush_all();
         }
     }
 
+    /// The slot holding the live Selection session — the app's answer to "the selection". At most
+    /// one exists (a press starts a session and takes the keyboard, and starting one finishes the
+    /// other slot's), so the singular language in `copy_selection` and the Edit menu stays honest.
+    pub(crate) fn selection_slot(&self) -> Option<Binding> {
+        self.keyboard_owner.filter(|&b| self.slot(b).kind == ToolKind::Selection)
+    }
+
+    /// The first binding holding `kind`, if either does. For controls over app-global state that a
+    /// tool uses (the Brush's ramp and intensity), which stay live while either button holds it.
+    pub(crate) fn bound_to(&self, kind: ToolKind) -> Option<Binding> {
+        Binding::ALL.into_iter().find(|&b| self.slot(b).kind == kind)
+    }
+
     /// Copies the active selection's cells to both the OS clipboard (plain text) and the app's
-    /// colored internal clipboard. A no-op unless Selection is the active tool with a region
-    /// defined — the "Copy as Text" toolbar button remains the way to copy the whole document.
+    /// colored internal clipboard. A no-op unless a Selection binding has a region defined —
+    /// "Copy All as Text" remains the way to copy the whole document.
     pub(crate) fn copy_selection(&mut self, ctx: &egui::Context) {
-        if self.tool_kind != ToolKind::Selection {
+        let Some(b) = self.selection_slot() else {
             return;
-        }
+        };
         // A dropped float's cells must be in `self.doc` before capturing the region.
-        self.flush_active_tool();
-        let Some(rect) = self.tool.selection_overlay().and_then(|v| v.marquee) else {
+        self.flush_all();
+        let Some(rect) = self.slots[b.ix()].tool.selection_overlay().and_then(|v| v.marquee) else {
             return;
         };
         let patch = CellPatch::from_region(&self.doc, rect, 0);
@@ -449,7 +644,7 @@ impl GasciiApp {
             self.last_error = Some("paste ignored: a drag is in progress".to_string());
             return;
         }
-        self.flush_active_tool(); // drop any current float before reading self.doc / switching tools
+        self.flush_all(); // drop any current float before reading self.doc / switching tools
         let patch = if is_own_clipboard_text(text, self.internal_clipboard.as_ref()) {
             self.internal_clipboard.clone().expect("is_own_clipboard_text implies Some")
         } else {
@@ -464,10 +659,14 @@ impl GasciiApp {
             return; // empty clipboard / everything rejected: no float, warning already surfaced
         }
         let anchor = self.hovered_cell.unwrap_or((0, 0));
-        if self.tool_kind != ToolKind::Selection {
-            self.set_tool(ToolKind::Selection);
+        let b = paste_target(self.slot(Binding::L).kind, self.slot(Binding::R).kind);
+        if self.slot(b).kind != ToolKind::Selection {
+            self.set_tool(b, ToolKind::Selection);
         }
-        self.tool.accept_stamp(patch, anchor, &self.doc);
+        // A pasted float is a session, and only one exists at a time.
+        self.flush_slot(b.other());
+        self.keyboard_owner = Some(b);
+        self.slots[b.ix()].tool.accept_stamp(patch, anchor, &self.doc);
     }
 
     /// Discards (not commits) whatever cross-frame session the active tool has pending, replacing
@@ -475,16 +674,17 @@ impl GasciiApp {
     /// a pending burst's or float's `before` values are pinned against the doc that's about to be
     /// discarded, so committing into the *new* doc would graft stale edits onto unrelated content.
     fn reset_cross_frame_tool(&mut self) {
-        match self.tool_kind {
-            ToolKind::Text => self.tool = Box::new(TextTool::new()),
-            ToolKind::Selection => self.tool = Box::new(SelectionTool::new()),
-            _ => {}
+        // Both slots: either may hold a session pinned against the document being discarded.
+        for b in Binding::ALL {
+            if matches!(self.slots[b.ix()].kind, ToolKind::Text | ToolKind::Selection) {
+                self.slots[b.ix()].tool = make_tool(self.slots[b.ix()].kind);
+            }
         }
-        // A right-click stroke's pending cells are pinned against the doc being discarded too —
-        // drop the transient tool outright so a release after the swap can't graft the old
-        // document's stroke onto the new one.
-        self.rc_tool = None;
-        self.text_editing = false;
+        // An in-flight gesture's pending cells are pinned against the discarded doc too — drop the
+        // ownership outright so a release after the swap can't graft the old document's stroke onto
+        // the new one.
+        self.gesture = None;
+        self.keyboard_owner = None;
     }
 
     /// Tool-select (`P`/`E`/`I`/`T`/`F`/`R`/`L`/`S`), undo/redo, and Ctrl+C copy keys. Undo/redo/
@@ -493,7 +693,7 @@ impl GasciiApp {
     /// focus *and* not being mid-text-edit so typing into that hex field, or into the canvas in
     /// text mode, doesn't get swallowed as a tool switch.
     fn handle_keys(&mut self, ui: &mut egui::Ui) {
-        let focused = ui.memory(|m| m.focused().is_some()) || self.text_editing;
+        let focused = ui.memory(|m| m.focused().is_some()) || self.keyboard_owner.is_some();
         let (redo_shift, undo, redo_y, save, pencil, eraser, eyedropper, text, fill, rect, line, select, brush, copy) =
             ui.input_mut(|i| {
                 // Cmd/Ctrl+Shift+Z must be consumed before the plain Cmd/Ctrl+Z pattern, since
@@ -530,42 +730,45 @@ impl GasciiApp {
             self.save_file();
         }
         if pencil {
-            self.set_tool(ToolKind::Pencil);
+            self.set_tool(Binding::L, ToolKind::Pencil);
         }
         if eraser {
-            self.set_tool(ToolKind::Eraser);
+            self.set_tool(Binding::L, ToolKind::Eraser);
         }
         if eyedropper {
-            self.set_tool(ToolKind::Eyedropper);
+            self.set_tool(Binding::L, ToolKind::Eyedropper);
         }
         if text {
-            self.set_tool(ToolKind::Text);
+            self.set_tool(Binding::L, ToolKind::Text);
         }
         if fill {
-            self.set_tool(ToolKind::Fill);
+            self.set_tool(Binding::L, ToolKind::Fill);
         }
         if rect {
-            self.set_tool(ToolKind::Rectangle);
+            self.set_tool(Binding::L, ToolKind::Rectangle);
         }
         if line {
-            self.set_tool(ToolKind::Line);
+            self.set_tool(Binding::L, ToolKind::Line);
         }
         if select {
-            self.set_tool(ToolKind::Selection);
+            self.set_tool(Binding::L, ToolKind::Selection);
         }
         if brush {
-            self.set_tool(ToolKind::Brush);
+            self.set_tool(Binding::L, ToolKind::Brush);
         }
         if copy {
             self.copy_selection(ui.ctx());
         }
-        if self.tool_kind == ToolKind::Brush && !focused {
+        // Ramp/intensity are app-global shared state, so the digit keys apply whenever EITHER
+        // binding is holding the Brush.
+        if self.bound_to(ToolKind::Brush).is_some() && !focused {
             self.handle_brush_intensity_keys(ui);
         }
-        // `[`/`]` adjust the ACTIVE tool's own stamp. The right-click tool's stamp is
-        // deliberately not key-bound — it has its own control in the tool row, and one
-        // unambiguous key target beats a mode-dependent one.
-        if let Some(slot) = sized_slot(self.tool_kind) {
+        // `[`/`]` adjust the stamp of whichever binding the options bar is showing. That segment is
+        // what makes the target unambiguous — and a gesture on either button selects it, so the keys
+        // follow the button you last drew with.
+        let focus = self.options_focus;
+        if let Some(slot) = sized_slot(self.slot(focus).kind) {
             if !focused {
                 let (shrink, grow) = ui.input_mut(|i| {
                     (
@@ -573,7 +776,7 @@ impl GasciiApp {
                         i.consume_key(egui::Modifiers::NONE, egui::Key::CloseBracket),
                     )
                 });
-                let stamp = &mut self.tool_stamps[slot];
+                let stamp = &mut self.slots[focus.ix()].stamps[slot];
                 if shrink {
                     stamp.size = stamp.size.saturating_sub(1).max(1);
                 }
@@ -612,78 +815,6 @@ impl GasciiApp {
         }
     }
 
-    fn palette_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Palette");
-        ui.horizontal_wrapped(|ui| {
-            for i in 0..self.pages.len() {
-                let name = self.pages[i].name;
-                ui.selectable_value(&mut self.active_page, i, name);
-            }
-        });
-        ui.separator();
-
-        let font_id = fonts::canvas_font_id(18.0);
-        egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                let glyph_count = self.pages[self.active_page].glyphs.len();
-                for gi in 0..glyph_count {
-                    let ch = self.pages[self.active_page].glyphs[gi];
-                    let selected = self.active_glyph == ch;
-                    let text = egui::RichText::new(ch.to_string()).font(font_id.clone());
-                    if ui.selectable_label(selected, text).clicked() {
-                        self.active_glyph = ch;
-                    }
-                }
-            });
-        });
-        ui.separator();
-
-        color_swatch_button(ui, "Text Color", &mut self.active_fg);
-        color_swatch_button(ui, "Background", &mut self.active_bg);
-        ui.separator();
-
-        ui.label("Write:");
-        ui.checkbox(&mut self.mask.glyph, "Glyph");
-        ui.checkbox(&mut self.mask.bg, "Background");
-
-        if self.tool_kind == ToolKind::Brush {
-            ui.separator();
-            self.brush_panel(ui);
-        }
-    }
-
-    /// Ramp picker, Fixed/Buildup mode selector, and intensity slider — visible only while the
-    /// density brush is the active tool.
-    fn brush_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Brush");
-        egui::ComboBox::from_label("Ramp")
-            .selected_text(self.ramps[self.active_ramp].name)
-            .show_ui(ui, |ui| {
-                for i in 0..self.ramps.len() {
-                    ui.selectable_value(&mut self.active_ramp, i, self.ramps[i].name);
-                }
-            });
-
-        let mut is_buildup = matches!(self.density_mode, DensityMode::Buildup(_));
-        ui.horizontal(|ui| {
-            if ui.selectable_label(!is_buildup, "Fixed").clicked() {
-                is_buildup = false;
-            }
-            if ui.selectable_label(is_buildup, "Buildup").clicked() {
-                is_buildup = true;
-            }
-        });
-        if is_buildup {
-            self.density_mode = DensityMode::Buildup(Buildup);
-        } else {
-            let mut level = match self.density_mode {
-                DensityMode::Fixed(Fixed(level)) => level,
-                DensityMode::Buildup(_) => 1.0,
-            };
-            ui.add(egui::Slider::new(&mut level, 0.0..=1.0).text("Intensity"));
-            self.density_mode = DensityMode::Fixed(Fixed(level));
-        }
-    }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
@@ -707,7 +838,7 @@ impl GasciiApp {
                     // dialog is non-modal, so more edits can happen while it's open;
                     // `export_png_file` (fired by the dialog's own "Export…" button) re-flushes
                     // immediately before reading `self.doc`, which is the flush that matters.
-                    self.flush_active_tool();
+                    self.flush_all();
                     self.png_dialog_open = true;
                 }
             });
@@ -724,18 +855,21 @@ impl GasciiApp {
                     self.request_redo();
                 }
                 ui.separator();
-                let can_copy = self.tool_kind == ToolKind::Selection
-                    && self.tool.selection_overlay().and_then(|v| v.marquee).is_some();
+                let can_copy = self
+                    .selection_slot()
+                    .and_then(|b| self.slot(b).tool.selection_overlay())
+                    .and_then(|v| v.marquee)
+                    .is_some();
                 let copy = egui::Button::new("Copy Selection").shortcut_text("Ctrl+C");
                 if ui.add_enabled(can_copy, copy).clicked() {
                     self.copy_selection(ui.ctx());
                 }
                 if ui.button("Copy All as Text").clicked() {
                     // Flush first: a pending text burst or floating selection lives only in
-                    // `self.tool`'s overlay until committed into `self.doc` — copying without
+                    // `self.slots[0].tool`'s overlay until committed into `self.doc` — copying without
                     // flushing would silently drop just-typed or just-moved content from the
                     // whole-document clipboard contents.
-                    self.flush_active_tool();
+                    self.flush_all();
                     ui.ctx().copy_text(export_text(&self.doc));
                 }
                 ui.separator();
@@ -743,7 +877,7 @@ impl GasciiApp {
                     // Reads self.doc for the current extent, which a pending burst/float doesn't
                     // change (extent is fixed regardless), but flushing keeps the dialog's initial
                     // W/H consistent with whatever's about to be committed anyway.
-                    self.flush_active_tool();
+                    self.flush_all();
                     self.resize_w = self.doc.width;
                     self.resize_h = self.doc.height;
                     self.resize_dialog_open = true;
@@ -754,67 +888,6 @@ impl GasciiApp {
                     self.pending_fit = true;
                 }
             });
-        });
-    }
-
-    fn tool_row(&mut self, ui: &mut egui::Ui) {
-        const TOOLS: [(ToolKind, &str, &str); 9] = [
-            (ToolKind::Pencil, "Pencil (P)", "Draw the active glyph"),
-            (ToolKind::Eraser, "Eraser (E)", "Erase cells to blank"),
-            (
-                ToolKind::Eyedropper,
-                "Eyedropper (I)",
-                "Click a cell to pick up its text and background colors",
-            ),
-            (ToolKind::Text, "Text (T)", "Click to place a cursor, then type"),
-            (ToolKind::Fill, "Fill (F)", "Flood-fill a connected region"),
-            (ToolKind::Rectangle, "Rectangle (R)", "Drag a box outline; joins box-drawing art"),
-            (ToolKind::Line, "Line (L)", "Drag a straight line; joins box-drawing art"),
-            (ToolKind::Selection, "Selection (S)", "Drag a region to move, copy, or delete"),
-            (ToolKind::Brush, "Brush (B)", "Paint density ramps"),
-        ];
-        ui.horizontal(|ui| {
-            ui.label("Left Click Tool:");
-            for (kind, label, tip) in TOOLS {
-                if ui.selectable_label(self.tool_kind == kind, label).on_hover_text(tip).clicked() {
-                    self.set_tool(kind);
-                }
-            }
-            ui.separator();
-
-            // The active tool's own footprint controls. Each sized tool remembers its own
-            // size/shape, so these always show and edit exactly the stamp the next primary
-            // stroke will use.
-            if let Some(slot) = sized_slot(self.tool_kind) {
-                stamp_controls(
-                    ui,
-                    &mut self.tool_stamps[slot],
-                    "salt_active",
-                    "Stamp size in rows for the active tool; shapes are widened to look square/round ([ and ] to adjust)",
-                );
-                ui.separator();
-            }
-
-            ui.label("Right Click Tool:");
-            let rc_idx = self.right_click_tool.min(STROKE_TOOLS.len() - 1);
-            egui::ComboBox::from_id_salt("right_click_tool")
-                .selected_text(STROKE_TOOLS[rc_idx].name)
-                .show_ui(ui, |ui| {
-                    for (i, entry) in STROKE_TOOLS.iter().enumerate() {
-                        ui.selectable_value(&mut self.right_click_tool, i, entry.name);
-                    }
-                });
-            // The right-click tool's own footprint controls, independent of the primary tools' —
-            // visible whenever the right-click tool is sized, so a right-click stroke never
-            // draws with an invisible footprint.
-            if tool_is_sized(STROKE_TOOLS[rc_idx].kind) {
-                stamp_controls(
-                    ui,
-                    &mut self.rc_stamps[rc_idx],
-                    "salt_rc",
-                    "Stamp size in rows for the right-click tool; shapes are widened to look square/round",
-                );
-            }
         });
     }
 
@@ -840,10 +913,10 @@ impl GasciiApp {
                     // Resize reads/replaces self.doc directly — flush any pending burst/float
                     // into the pre-resize document first, same trigger-table discipline as
                     // Save/Export/Copy.
-                    self.flush_active_tool();
+                    self.flush_all();
                     match resize_document(&self.doc, self.resize_w, self.resize_h) {
                         Ok(Some(edit)) => {
-                            self.history.apply(&mut self.doc, edit);
+                            self.apply_edit(edit, None);
                             self.last_error = None;
                             self.resize_dialog_open = false;
                         }
@@ -902,7 +975,7 @@ impl GasciiApp {
     /// interactive while it's open and a Text/Selection edit can still be in flight at the moment
     /// "Export…" is actually clicked, not just when the dialog was opened.
     fn export_png_file(&mut self) {
-        self.flush_active_tool();
+        self.flush_all();
         let Some(path) = rfd::FileDialog::new().add_filter("PNG", &["png"]).save_file() else {
             return;
         };
@@ -951,7 +1024,7 @@ impl GasciiApp {
         // burst's just-typed characters or a floating selection's move until a commit trigger
         // fires. Also covers the `save_file_as` delegation below (a no-op double-flush if already
         // flushed).
-        self.flush_active_tool();
+        self.flush_all();
         match self.current_path.clone() {
             Some(path) => self.write_gascii(&path),
             None => self.save_file_as(),
@@ -961,7 +1034,7 @@ impl GasciiApp {
     fn save_file_as(&mut self) {
         // Flush first — see `save_file`'s comment. Also reachable directly via the "Save As"
         // toolbar button, not only through `save_file`'s delegation.
-        self.flush_active_tool();
+        self.flush_all();
         let Some(path) = rfd::FileDialog::new().add_filter("GASCII", &["gascii"]).save_file() else {
             return;
         };
@@ -983,7 +1056,7 @@ impl GasciiApp {
     /// for the native `.gascii` file.
     fn export_text_file(&mut self) {
         // Flush first — see `save_file`'s comment; export reads `self.doc` the same way save does.
-        self.flush_active_tool();
+        self.flush_all();
         let Some(path) = rfd::FileDialog::new().add_filter("Text", &["txt"]).save_file() else {
             return;
         };
@@ -1007,7 +1080,7 @@ impl GasciiApp {
         }
         // Turn a pending Text burst / floating Selection into a real edit before judging dirtiness
         // — never silently discard in-progress work.
-        self.flush_active_tool();
+        self.flush_all();
         if self.is_dirty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_dialog_open = true;
@@ -1056,26 +1129,17 @@ impl GasciiApp {
         }
     }
 
-    fn status_bar(&self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let coord = self
-                .hovered_cell
-                .map(|(x, y)| format!("{x},{y}"))
-                .unwrap_or_else(|| "-".to_owned());
-            ui.label(format!("cell: {coord}"));
-            ui.separator();
-            ui.label(format!("zoom: {:.0}%", self.viewport.scale() * 100.0));
-            ui.separator();
-            ui.label(format!("doc: {}x{}", self.doc.width, self.doc.height));
-            if let Some(path) = &self.current_path {
-                ui.separator();
-                ui.label(format!("file: {}", path.display()));
-            }
-            if let Some(err) = &self.last_error {
-                ui.separator();
-                ui.colored_label(egui::Color32::from_rgb(220, 80, 80), err);
-            }
-        });
+    /// The window title: `GASCII — <file>`, with a bullet while there are unsaved changes. This is
+    /// where `current_path` lives now — the spec's status bar has no file slot.
+    pub(crate) fn window_title(&self) -> String {
+        let name = self
+            .current_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "untitled.gascii".to_owned());
+        let dirty = if self.is_dirty() { " •" } else { "" };
+        format!("GASCII — {name}{dirty}")
     }
 }
 
@@ -1111,19 +1175,66 @@ impl eframe::App for GasciiApp {
             self.handle_keys(ui);
         }
 
-        egui::Panel::top("toolbar").show(ui, |ui| {
-            self.menu_bar(ui);
-            self.tool_row(ui);
-        });
-        egui::Panel::left("palette").show(ui, |ui| self.palette_panel(ui));
-        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
-        egui::CentralPanel::default().show(ui, |ui| {
-            canvas::show(ui, self);
-        });
+        // Only push the title when it actually changes: `SetWindowText` on every frame is a
+        // needless syscall, and on Windows it can flicker the taskbar entry.
+        let title = self.window_title();
+        if title != self.shown_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.shown_title = title;
+        }
+
+        let t = crate::ui::theme::current(&ctx);
+        // The window edge's resize grips, before the panels: the grip is a 5px ring around the whole
+        // window and must win over any widget sitting under it.
+        crate::ui::titlebar::handle_resize(&ctx);
+
+        // Panel stack per spec §4.
+        egui::Panel::top("titlebar")
+            .frame(
+                egui::Frame::new()
+                    .fill(t.bg_panel)
+                    .inner_margin(egui::Margin::symmetric(0, 0))
+                    .stroke(egui::Stroke::NONE),
+            )
+            .exact_size(crate::ui::titlebar::HEIGHT)
+            .show(ui, |ui| crate::ui::titlebar::show(ui, self));
+        egui::Panel::top("menubar")
+            .frame(egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::symmetric(8, 0)))
+            .exact_size(26.0)
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| self.menu_bar(ui));
+            });
+        egui::Panel::top("options")
+            .frame(egui::Frame::new().fill(t.bg_chrome).inner_margin(egui::Margin::symmetric(12, 0)))
+            .exact_size(crate::ui::options_bar::HEIGHT)
+            .show(ui, |ui| crate::ui::options_bar::show(ui, self));
+        // The status bar is claimed BEFORE the sidebar, so it spans the full window width as the
+        // mockup has it. Panels take their slice in declaration order: sidebar-first would give the
+        // left panel the whole remaining height and leave the status bar starting at x=208.
+        egui::Panel::bottom("status")
+            .frame(egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::symmetric(12, 0)))
+            .exact_size(crate::ui::status_bar::HEIGHT)
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| crate::ui::status_bar::show(ui, self));
+            });
+        egui::Panel::left("sidebar")
+            .frame(egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::same(12)))
+            .exact_size(crate::ui::sidebar::WIDTH)
+            .resizable(false)
+            .show(ui, |ui| crate::ui::sidebar::show(ui, self));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(t.bg_desk))
+            .show(ui, |ui| {
+                canvas::show(ui, self);
+            });
 
         self.resize_dialog(&ctx);
         self.png_export_dialog(&ctx);
         self.close_confirm_dialog(&ctx);
+
+        // Last, on the foreground layer: with the OS frame gone, nothing else draws the window's
+        // own outline.
+        crate::ui::titlebar::paint_window_edge(&ctx);
     }
 }
 
@@ -1186,31 +1297,200 @@ mod tests {
         }
     }
 
-    /// Pins `set_tool`'s `_` arm: every ToolKind that isn't special-cased (Text/Selection/
-    /// Eyedropper) must have a STROKE_TOOLS entry, or selecting it would silently keep the old
-    /// tool. Also pins the right-click default at index 0.
+    const ALL_KINDS: [ToolKind; 9] = [
+        ToolKind::Pencil,
+        ToolKind::Eraser,
+        ToolKind::Eyedropper,
+        ToolKind::Text,
+        ToolKind::Fill,
+        ToolKind::Rectangle,
+        ToolKind::Line,
+        ToolKind::Selection,
+        ToolKind::Brush,
+    ];
+
+    /// `TOOLS` is the single source of truth for names, shortcuts, hints and constructors. If a
+    /// kind were missing, `make_tool`'s `expect` would fire; if one were listed twice, the toolbox
+    /// would show a duplicate cell and the two entries could drift apart.
     #[test]
-    fn stroke_tools_cover_every_stroke_kind() {
-        let all = [
-            ToolKind::Pencil,
-            ToolKind::Eraser,
-            ToolKind::Eyedropper,
-            ToolKind::Text,
-            ToolKind::Fill,
-            ToolKind::Rectangle,
-            ToolKind::Line,
-            ToolKind::Selection,
-            ToolKind::Brush,
-        ];
-        for kind in all {
-            let special = matches!(kind, ToolKind::Text | ToolKind::Selection | ToolKind::Eyedropper);
-            assert_eq!(
-                STROKE_TOOLS.iter().any(|e| e.kind == kind),
-                !special,
-                "{kind:?} must appear in STROKE_TOOLS exactly when it isn't special-cased"
-            );
+    fn tools_table_lists_every_kind_exactly_once() {
+        assert_eq!(TOOLS.len(), ALL_KINDS.len());
+        for kind in ALL_KINDS {
+            let count = TOOLS.iter().filter(|d| d.kind == kind).count();
+            assert_eq!(count, 1, "{kind:?} appears {count} times in TOOLS");
         }
-        assert_eq!(STROKE_TOOLS[0].kind, ToolKind::Eraser, "right-click default");
+    }
+
+    /// Every kind must be constructible, including Eyedropper — which is not really a tool and is
+    /// backed by `InertTool`. A kind that panicked or returned a stale instance here would take
+    /// down a binding the moment it was selected.
+    #[test]
+    fn every_kind_builds_a_tool_with_an_empty_pending_overlay() {
+        for kind in ALL_KINDS {
+            let tool = make_tool(kind);
+            assert!(tool.pending().is_empty(), "{kind:?} starts with a non-empty overlay");
+        }
+    }
+
+    /// Shortcuts must be unique, or one tool would be unreachable from the keyboard: `handle_keys`
+    /// consumes the first match and the loser would silently never fire.
+    #[test]
+    fn tool_shortcuts_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for def in TOOLS.iter() {
+            assert!(seen.insert(def.key), "{:?} reuses shortcut {:?}", def.kind, def.key);
+        }
+    }
+
+    /// Both bindings start bound, and to different tools — the spec's "exactly one tool is bound to
+    /// L and one to R at all times" has no unbound state. Pins the migration of the old
+    /// `right_click_tool: 0 // Eraser` default.
+    #[test]
+    fn default_bindings_are_pencil_on_l_and_eraser_on_r() {
+        let slots = [ToolSlot::new(ToolKind::Pencil), ToolSlot::new(ToolKind::Eraser)];
+        assert_eq!(slots[Binding::L.ix()].kind, ToolKind::Pencil);
+        assert_eq!(slots[Binding::R.ix()].kind, ToolKind::Eraser);
+    }
+
+    /// The spec's named behavior: each binding keeps its own footprint memory, so sizing the
+    /// right button's Eraser must not resize the left button's. Structural here — the two slots own
+    /// separate arrays — but this pins it against a refactor that reintroduces a shared one.
+    #[test]
+    fn stamps_are_per_slot_so_sizing_rs_eraser_never_resizes_ls() {
+        let mut slots = [ToolSlot::new(ToolKind::Eraser), ToolSlot::new(ToolKind::Eraser)];
+        let eraser = sized_slot(ToolKind::Eraser).expect("Eraser is sized");
+        slots[Binding::R.ix()].stamps[eraser].size = 9;
+        assert_eq!(slots[Binding::R.ix()].stamp().size, 9);
+        assert_eq!(slots[Binding::L.ix()].stamp().size, 1, "L's Eraser was resized by R's");
+    }
+
+    /// A slot's stamp follows whatever it is bound to, and unsized kinds fall back to the identity
+    /// default rather than borrowing another tool's size.
+    #[test]
+    fn a_slots_stamp_tracks_its_own_kind() {
+        let mut slot = ToolSlot::new(ToolKind::Pencil);
+        slot.stamps[sized_slot(ToolKind::Pencil).unwrap()].size = 5;
+        slot.stamps[sized_slot(ToolKind::Brush).unwrap()].size = 12;
+        assert_eq!(slot.stamp().size, 5);
+        slot.kind = ToolKind::Brush;
+        assert_eq!(slot.stamp().size, 12);
+        slot.kind = ToolKind::Fill; // unsized
+        assert_eq!(slot.stamp().size, StampSettings::default().size);
+    }
+
+    /// Overlay order is commit order: a slot mid-gesture commits at its imminent release, so it
+    /// paints underneath the other slot's session, which commits later. Pure over the gesture
+    /// owner, so `flush_all` and the painter provably agree.
+    #[test]
+    fn commit_order_puts_the_gesture_slot_first() {
+        assert_eq!(order_for(None), [Binding::L, Binding::R]);
+        assert_eq!(order_for(Some(Binding::L)), [Binding::L, Binding::R]);
+        assert_eq!(order_for(Some(Binding::R)), [Binding::R, Binding::L]);
+    }
+
+    /// A paste lands on a binding already holding Selection rather than rebinding one, and falls
+    /// back to L (never R) when neither does — silently rebinding the right button out from under
+    /// the user is worse than rebinding the left.
+    #[test]
+    fn paste_target_prefers_an_existing_selection_binding_over_rebinding() {
+        use ToolKind::{Pencil, Selection};
+        assert_eq!(paste_target(Selection, Pencil), Binding::L);
+        assert_eq!(paste_target(Pencil, Selection), Binding::R, "should not clobber L's binding");
+        assert_eq!(paste_target(Selection, Selection), Binding::L, "L wins when both qualify");
+        assert_eq!(paste_target(Pencil, Pencil), Binding::L, "falls back to L, never R");
+    }
+
+    /// The reachable half of the two-slot resync obligation, and the reason `apply_edit` exists.
+    ///
+    /// A stroke on one binding commits straight into the document, underneath a *session* held by
+    /// the other. That leaves the session's pinned `before` values describing a document state that
+    /// no longer exists. Undo restores `before`, so a missed resync shows up as undo resurrecting
+    /// pre-stroke content and silently destroying what the other binding drew.
+    ///
+    /// Here: R's Pencil draws '#' under L's live text burst, then the burst commits and is undone.
+    /// Undo must restore R's '#', not the blank that was there when the burst started.
+    /// Impossible to hit before this refactor, because only one slot could ever hold a session.
+    #[test]
+    fn a_strokes_commit_repins_the_other_bindings_live_session() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        app.slots[Binding::R.ix()] = ToolSlot::new(ToolKind::Pencil);
+        app.keyboard_owner = Some(Binding::L);
+
+        // L: place a caret at (0,0) and type — the burst pins `before` = Blank at (0,0).
+        let l = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &l, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('A'), &l, &app.doc);
+
+        // R: a pencil stroke commits '#' into (0,0), beneath the burst.
+        app.active_glyph = '#';
+        let r = crate::canvas::tool_ctx(&app, Binding::R);
+        app.slots[Binding::R.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &r, &app.doc);
+        if let ToolResponse::Commit(Some(edit)) =
+            app.slots[Binding::R.ix()].tool.update(ToolEvent::Release, &r, &app.doc)
+        {
+            app.apply_edit(edit, Some(Binding::R));
+        }
+        assert_eq!(app.doc.cell(0, 0, 0).unwrap().ch, '#', "the pencil stroke landed");
+
+        // L's burst commits its 'A' over the top, then undo rolls it back.
+        app.flush_slot(Binding::L);
+        assert_eq!(app.doc.cell(0, 0, 0).unwrap().ch, 'A', "the burst committed");
+        app.history.undo(&mut app.doc);
+
+        assert_eq!(
+            app.doc.cell(0, 0, 0).unwrap().ch,
+            '#',
+            "undo restored a stale pre-stroke `before`, destroying what the other binding drew"
+        );
+    }
+
+    /// At most one cross-frame session exists across both bindings, so `flush_all`'s second flush
+    /// has nothing to commit. Pins the invariant that makes two Selection bindings coherent (never
+    /// two floats) and keeps `selection_slot` — hence "the selection" — singular.
+    #[test]
+    fn a_slot_holding_a_session_is_the_only_one() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Selection);
+        app.slots[Binding::R.ix()] = ToolSlot::new(ToolKind::Selection);
+
+        // A press on L starts a marquee and claims the keyboard.
+        crate::canvas::begin_gesture(&mut app, Binding::L, 1, 1);
+        assert_eq!(app.keyboard_owner, Some(Binding::L));
+        assert_eq!(app.selection_slot(), Some(Binding::L));
+
+        // A press on R takes over: ownership moves, and it is still the only session.
+        crate::canvas::begin_gesture(&mut app, Binding::R, 4, 4);
+        assert_eq!(app.keyboard_owner, Some(Binding::R));
+        assert_eq!(app.selection_slot(), Some(Binding::R), "two selections would be ambiguous");
+    }
+
+    /// Rebinding a slot releases only its own claim on the keyboard. Clearing the claim globally
+    /// would mute a live session on the other binding, which nothing would then re-acquire.
+    #[test]
+    fn rebinding_releases_only_its_own_keyboard_claim() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::R.ix()] = ToolSlot::new(ToolKind::Text);
+        app.keyboard_owner = Some(Binding::R);
+
+        app.set_tool(Binding::L, ToolKind::Fill);
+        assert_eq!(app.keyboard_owner, Some(Binding::R), "rebinding L muted R's session");
+
+        app.set_tool(Binding::R, ToolKind::Fill);
+        assert_eq!(app.keyboard_owner, None, "rebinding R should release its own claim");
+    }
+
+    /// Every kind is bindable to either button — the point of the refactor. Text, Selection and
+    /// Eyedropper were previously left-only.
+    #[test]
+    fn every_kind_can_bind_to_either_button() {
+        for kind in ALL_KINDS {
+            for b in Binding::ALL {
+                let mut app = GasciiApp::headless();
+                app.set_tool(b, kind);
+                assert_eq!(app.slot(b).kind, kind, "{kind:?} would not bind to {b:?}");
+            }
+        }
     }
 
     #[test]

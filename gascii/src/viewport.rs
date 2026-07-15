@@ -183,8 +183,24 @@ impl Viewport {
         self.pan = p - desired;
     }
 
-    /// Pick the largest zoom step whose full doc extent fits `available`, then center via `pan`.
-    pub fn fit_to_window(&mut self, available: Vec2, doc_extent: DocExtent, ctx: &egui::Context) {
+    /// Pick the largest zoom step whose full doc extent fits `available` inset by `margin` on every
+    /// side, then center via `pan`.
+    ///
+    /// `margin` is applied to the fit test but NOT to the centering: the document is centered in the
+    /// whole canvas area, and the margin only guarantees the desk keeps showing around it rather
+    /// than the card butting up against the panel edges. Shrinking `available` for both would push
+    /// the document off-centre by half the margin.
+    pub fn fit_to_window(
+        &mut self,
+        available: Vec2,
+        margin: f32,
+        doc_extent: DocExtent,
+        ctx: &egui::Context,
+    ) {
+        let room = Vec2::new(
+            (available.x - margin * 2.0).max(1.0),
+            (available.y - margin * 2.0).max(1.0),
+        );
         let mut best_step = 0usize;
         let mut cells = [Vec2::ZERO; ZOOM_SCALES.len()];
         for (step, &scale) in ZOOM_SCALES.iter().enumerate() {
@@ -194,7 +210,7 @@ impl Viewport {
             cells[step] = cell;
             let w = doc_extent.width as f32 * cell.x;
             let h = doc_extent.height as f32 * cell.y;
-            if w <= available.x && h <= available.y {
+            if w <= room.x && h <= room.y {
                 best_step = step;
             }
         }
@@ -392,7 +408,7 @@ mod tests {
     /// the staged Iosevka Fixed registration before querying any glyph metrics.
     fn headless_ctx_with_canvas_font() -> egui::Context {
         let ctx = egui::Context::default();
-        crate::fonts::install_canvas_font(&ctx);
+        crate::fonts::install_fonts(&ctx);
         let _ = ctx.run_ui(egui::RawInput::default(), |_ui| {});
         ctx
     }
@@ -460,7 +476,7 @@ mod tests {
             cell_at_default.y * doc_extent.height as f32 * 0.6,
         );
 
-        vp.fit_to_window(available, doc_extent, &ctx);
+        vp.fit_to_window(available, 0.0, doc_extent, &ctx);
 
         assert_eq!(vp.zoom_step, 0, "expected the smallest zoom step to fit the shrunk window");
 
@@ -547,7 +563,7 @@ mod tests {
                 doc_extent.height as f32 * min_cell.y * 1.5 + 10.0,
             );
             let mut vp = Viewport::default();
-            vp.fit_to_window(available, doc_extent, &ctx);
+            vp.fit_to_window(available, 0.0, doc_extent, &ctx);
             let cell = vp.cell_size(&ctx);
             let doc_w = doc_extent.width as f32 * cell.x;
             let doc_h = doc_extent.height as f32 * cell.y;
@@ -568,6 +584,40 @@ mod tests {
         }
     }
 
+    /// The desk margin's two halves, which pull in opposite directions and are easy to conflate:
+    /// it must shrink the room the fit test uses (so the card never butts against the panels), but
+    /// must NOT shrink the box the document is centred in (or the card sits off-centre by half the
+    /// margin). Applying it to both — the obvious implementation — silently does the second.
+    #[test]
+    fn fit_margin_insets_the_fit_but_leaves_the_document_centered() {
+        let ctx = headless_ctx_with_canvas_font();
+        let doc_extent = DocExtent { width: 80, height: 25 };
+        let available = Vec2::new(1000.0, 700.0);
+        const MARGIN: f32 = 28.0;
+
+        let mut vp = Viewport::default();
+        vp.fit_to_window(available, MARGIN, doc_extent, &ctx);
+        let cell = vp.cell_size(&ctx);
+        let (doc_w, doc_h) = (doc_extent.width as f32 * cell.x, doc_extent.height as f32 * cell.y);
+
+        // Still centred in the FULL area, not in the inset one.
+        assert!(
+            (vp.pan.x - (available.x - doc_w) / 2.0).abs() < 0.5,
+            "the margin pushed the document off-centre horizontally"
+        );
+        assert!(
+            (vp.pan.y - (available.y - doc_h) / 2.0).abs() < 0.5,
+            "the margin pushed the document off-centre vertically"
+        );
+        // And the margin is real: the desk still shows on every side.
+        assert!(vp.pan.x >= MARGIN && vp.pan.y >= MARGIN, "the card butts against the panel edge");
+
+        // A margin large enough to matter must be able to force a smaller step than no margin does.
+        let mut tight = Viewport::default();
+        tight.fit_to_window(available, 0.0, doc_extent, &ctx);
+        assert!(vp.zoom_step <= tight.zoom_step, "the margin must never pick a LARGER step");
+    }
+
     #[test]
     fn fit_to_window_when_no_step_fits_falls_back_to_smallest_step_without_panicking() {
         // Documents current behavior rather than asserting a chosen design: when the window is
@@ -577,7 +627,7 @@ mod tests {
         let doc_extent = DocExtent { width: 1024, height: 1024 };
         let available = Vec2::new(10.0, 10.0); // far smaller than the doc even at the smallest step
         let mut vp = Viewport::default();
-        vp.fit_to_window(available, doc_extent, &ctx);
+        vp.fit_to_window(available, 0.0, doc_extent, &ctx);
 
         assert_eq!(vp.zoom_step, 0, "falls back to the smallest zoom step when nothing fits");
         let cell = vp.cell_size(&ctx);

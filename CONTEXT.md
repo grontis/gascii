@@ -37,7 +37,16 @@ One continuous pointer gesture from press to release, reduced to a set of (cell,
 _Avoid_: Drag, gesture, path
 
 **Tool**:
-A mode that translates pointer/keyboard input into Strokes (pencil, eraser, fill, rectangle, line, text, selection).
+A translator from pointer/keyboard input into Strokes (pencil, eraser, eyedropper, text, fill, rectangle, line, selection, brush). Not a mode — two are live at once, one per Binding, and neither is "current".
+_Avoid_: Mode
+
+**Binding**:
+One mouse button's attachment to a Tool: L (left) or R (right). Exactly one Tool is bound to each at all times, and each keeps its own footprint settings. Keyboard shortcuts set L; right-clicking a toolbox cell sets R.
+_Avoid_: Slot (that's where a Binding's state lives), assignment
+
+**Session**:
+A Tool's uncommitted work that outlives a single Stroke — a Text burst or a Floating stamp. At most one exists at a time across both Bindings, and it owns the keyboard. Starting one finishes the other Binding's.
+_Avoid_: Burst (that's the Text tool's own), pending, in-progress edit
 
 **Auto-join**:
 Junction resolution for the rectangle/line tools: where strokes cross box-drawing characters, the union of arm directions picks the right glyph (`├ ┬ ┼`).

@@ -3,11 +3,25 @@ mod canvas;
 mod font_coverage;
 mod fonts;
 mod png_export;
+mod ui;
 mod viewport;
 
 fn main() -> eframe::Result {
     let t0 = std::time::Instant::now();
-    let options = eframe::NativeOptions::default();
+    let options = eframe::NativeOptions {
+        // The design's own reference width. eframe's default opens too small to fit the options
+        // bar's controls, which then wrap and clip. The minimum is the sidebar plus enough desk for
+        // the default 80×25 document to be worth looking at.
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_inner_size([1280.0, 800.0])
+            .with_min_inner_size([880.0, 560.0])
+            // The design draws its own title bar, so the OS one is off. That also removes winit's
+            // resize borders and drag region — `ui::titlebar` reimplements both.
+            .with_decorations(false)
+            .with_resizable(true)
+            .with_title("GASCII"),
+        ..Default::default()
+    };
     eframe::run_native(
         "GASCII",
         options,
