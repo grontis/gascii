@@ -63,6 +63,10 @@ pub struct Tokens {
     pub shadow: Color32,
     /// Title-bar pinstripe lines, already at their intended opacity.
     pub pinstripe: Color32,
+    /// Error text. The one non-monochrome chrome colour: an error must not read as ordinary
+    /// telemetry, inversion already means selection, and the accent belongs to the canvas — so
+    /// errors get their own warm red, toned to each theme.
+    pub fg_error: Color32,
 }
 
 impl Tokens {
@@ -79,6 +83,7 @@ impl Tokens {
         window_edge: Color32::from_rgb(0x1C, 0x1B, 0x19),
         shadow: translucent(0x1C, 0x1B, 0x19, 0x2E),
         pinstripe: translucent(0x1C, 0x1B, 0x19, 0x47),
+        fg_error: Color32::from_rgb(0x9E, 0x2B, 0x25),
     };
 
     pub const DARK: Self = Self {
@@ -94,6 +99,7 @@ impl Tokens {
         window_edge: Color32::from_rgb(0x06, 0x06, 0x06),
         shadow: translucent(0x00, 0x00, 0x00, 0x66),
         pinstripe: translucent(0xE6, 0xE3, 0xDE, 0x2E),
+        fg_error: Color32::from_rgb(0xE0, 0x6C, 0x5E),
     };
 
     pub fn of(theme: Theme) -> Self {

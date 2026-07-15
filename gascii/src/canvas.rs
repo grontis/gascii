@@ -296,7 +296,10 @@ pub(crate) fn begin_gesture(app: &mut GasciiApp, b: Binding, x: u16, y: u16) -> 
     true
 }
 
-pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
+/// `pointer_on_resize_grip`: the pointer sits in the window-edge resize ring this frame. The press
+/// branch must yield to it — this function reads raw pointer edges, not egui interactions, so the
+/// grip cannot win any other way.
+pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool) {
     let ctx = ui.ctx().clone();
     if app.pending_fit {
         app.viewport
@@ -370,7 +373,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
         // mode (primary pans, secondary is inert, neither draws), and only one gesture may own the
         // canvas at a time. Two simultaneous strokes would interleave two `apply_edit` calls and pin
         // each slot's `before` values against the other's uncommitted writes.
-        if app.gesture.is_none() && !app.space_pan_active {
+        if app.gesture.is_none() && !app.space_pan_active && !pointer_on_resize_grip {
             if primary_pressed && space {
                 app.space_pan_active = true;
             } else if !space {
@@ -423,6 +426,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
                 // so discharge the same obligation here: the other slot's pending session may now
                 // hold `before` values pinned against the pre-commit document.
                 app.resync_slots(Some(b));
+                // A committed stroke that stamped the active glyph counts as "using" it.
+                let kind = app.slots[b.ix()].kind;
+                app.note_glyph_drawn(kind);
             }
             if tail.ended {
                 app.gesture = None;

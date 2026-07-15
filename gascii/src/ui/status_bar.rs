@@ -36,10 +36,11 @@ pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
     }
 
     // An error has no home in the spec's status bar, so it takes the flexible middle — the one place
-    // with room, and next to nothing it would push around.
+    // with room, and next to nothing it would push around. `fg_error`, never `fg_text`: an error
+    // rendered like ordinary telemetry is an error the user misses.
     if let Some(err) = app.last_error.clone() {
         let t = theme::current(ui.ctx());
-        ui.label(egui::RichText::new(err).font(fonts::mono_id(11.0)).color(t.fg_text));
+        ui.label(egui::RichText::new(err).font(fonts::mono_id(11.0)).color(t.fg_error));
     }
 
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

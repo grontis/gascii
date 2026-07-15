@@ -74,7 +74,7 @@ fn cell(painter: &Painter, rect: Rect, t: &Tokens, selected: bool, hovered: bool
 
 /// A segmented control: one bordered group, 1px dividers, the selected segment inverted.
 ///
-/// Returns true if the selection changed. Used for the L/R binding, brush shape, palette tabs,
+/// Returns true if the selection changed. Used for the L/R binding, brush shape, palette Pages,
 /// presets, export format and the zoom cluster — `soft` picks the quieter border the status bar's
 /// cluster uses.
 pub fn segmented<T: PartialEq + Copy>(
@@ -92,14 +92,17 @@ pub fn segmented<T: PartialEq + Copy>(
     let row_h = sizes.iter().map(|s| s.y).fold(0.0, f32::max);
     let total = Vec2::new(widths.iter().sum(), row_h + SEG_PAD.y * 2.0);
 
-    let (rect, _) = ui.allocate_exact_size(total, Sense::hover());
+    let (rect, group) = ui.allocate_exact_size(total, Sense::hover());
     let painter = ui.painter().clone();
     let mut changed = false;
     let mut x = rect.min.x;
 
-    for ((opt, label), w) in options.iter().zip(&widths) {
+    for (i, ((opt, label), w)) in options.iter().zip(&widths).enumerate() {
         let seg = Rect::from_min_size(Pos2::new(x, rect.min.y), Vec2::new(*w, rect.height()));
-        let resp = ui.interact(seg, ui.id().with((label, x as i32)), Sense::click());
+        // Salted off the group's own allocation id + index — never off screen position, which
+        // changes whenever a neighbouring label grows (a tool rebind widens the L/R segment) and
+        // makes egui see a brand-new widget mid-interaction, dropping its press state.
+        let resp = ui.interact(seg, group.id.with(i), Sense::click());
         let selected = *value == *opt;
         let fg = cell(&painter, seg, &t, selected, resp.hovered());
         painter.text(seg.center(), Align2::CENTER_CENTER, *label, font.clone(), fg);
@@ -121,7 +124,7 @@ pub fn segmented<T: PartialEq + Copy>(
 pub fn stepper(ui: &mut Ui, value: &mut u16, min: u16, max: u16) -> bool {
     let t = tokens(ui);
     let size = Vec2::new(STEPPER_BTN_W * 2.0 + STEPPER_VALUE_W, STEPPER_H);
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let (rect, group) = ui.allocate_exact_size(size, Sense::hover());
     let painter = ui.painter().clone();
     let before = *value;
 
@@ -133,7 +136,7 @@ pub fn stepper(ui: &mut Ui, value: &mut u16, min: u16, max: u16) -> bool {
     let plus = Rect::from_min_size(Pos2::new(val.max.x, rect.min.y), Vec2::new(STEPPER_BTN_W, STEPPER_H));
 
     for (r, label, delta) in [(minus, "–", -1i32), (plus, "+", 1)] {
-        let resp = ui.interact(r, ui.id().with((label, r.min.x as i32)), Sense::click());
+        let resp = ui.interact(r, group.id.with(label), Sense::click());
         let fg = cell(&painter, r, &t, false, resp.hovered());
         painter.text(r.center(), Align2::CENTER_CENTER, label, fonts::ui_medium_id(12.0), fg);
         if resp.clicked() {
@@ -141,7 +144,7 @@ pub fn stepper(ui: &mut Ui, value: &mut u16, min: u16, max: u16) -> bool {
         }
     }
 
-    let val_resp = ui.interact(val, ui.id().with(("stepper_val", rect.min.x as i32)), Sense::hover());
+    let val_resp = ui.interact(val, group.id.with("val"), Sense::hover());
     painter.text(
         val.center(),
         Align2::CENTER_CENTER,
@@ -150,7 +153,20 @@ pub fn stepper(ui: &mut Ui, value: &mut u16, min: u16, max: u16) -> bool {
         t.fg_text,
     );
     if val_resp.hovered() {
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        // Raw `MouseWheel` events, NOT `smooth_scroll_delta`: the smoothed value eases one wheel
+        // notch across several frames, and stepping on each nonzero frame turns one notch into
+        // 5–10 steps. A notch is one event, so summing the frame's events and taking the sign
+        // gives exactly one step per notch (a trackpad's stream of small deltas still reads as
+        // smooth stepping — one step per frame while the fingers move).
+        let scroll: f32 = ui.input(|i| {
+            i.events
+                .iter()
+                .map(|e| match e {
+                    egui::Event::MouseWheel { delta, .. } => delta.y,
+                    _ => 0.0,
+                })
+                .sum()
+        });
         if scroll != 0.0 {
             *value = (*value as i32 + scroll.signum() as i32).clamp(min as i32, max as i32) as u16;
         }
@@ -324,8 +340,8 @@ pub fn swap_button(ui: &mut Ui) -> bool {
 
 /// A button: 1px border, transparent fill. `primary` inverts and gains a 2px hard offset shadow.
 ///
-/// No callers yet: its consumers are the New Document / Resize / Export dialogs, which are round 2.
-/// Kept because the spec defines it alongside the rest of the kit and the shape is settled.
+/// No callers yet — dialogs are the consumers, and none is custom-painted so far. Part of the
+/// control kit regardless: the shape is settled and belongs with its siblings.
 #[allow(dead_code)]
 pub fn button(ui: &mut Ui, label: &str, primary: bool) -> Response {
     let t = tokens(ui);

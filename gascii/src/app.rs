@@ -331,8 +331,8 @@ pub struct GasciiApp {
     pub(crate) internal_clipboard: Option<CellPatch>,
     pub(crate) pages: Vec<Page>,
     pub(crate) active_page: usize,
-    /// The last [`RECENT_GLYPHS`] glyphs used, most recent first. Fed by picking a swatch and by
-    /// actually drawing with one, per workflow W4.
+    /// The last [`RECENT_GLYPHS`] glyphs used, most recent first. Fed by picking a swatch
+    /// (`pick_glyph`) and by a committed stroke that stamped the active glyph (`note_glyph_drawn`).
     pub(crate) recent_glyphs: Vec<char>,
     /// Built-in Ramps, populated at startup — the density brush's glyph sources.
     pub(crate) ramps: Vec<Ramp>,
@@ -457,6 +457,10 @@ impl GasciiApp {
         // Only this slot's claim on the keyboard is released — rebinding L must not silently mute a
         // live session on R.
         self.release_keyboard(b);
+        // The options bar (and the [/] size keys behind it) follows the binding the user just
+        // acted on — the same rule a canvas gesture applies. Without this, picking a tool by
+        // shortcut or toolbox click leaves the bar editing the OTHER binding's stamp.
+        self.options_focus = b;
     }
 
     /// Releases `b`'s claim on the keyboard, if it holds one. A no-op for the other slot's claim.
@@ -475,6 +479,20 @@ impl GasciiApp {
     pub(crate) fn pick_glyph(&mut self, ch: char) {
         self.active_glyph = ch;
         push_recent(&mut self.recent_glyphs, ch);
+    }
+
+    /// Records the active glyph in RECENT after a committed stroke actually used it — the other
+    /// half of RECENT's contract, alongside picking a swatch. Only kinds that stamp `ctx.glyph`
+    /// count (the Brush writes ramp characters, the Eraser writes Blank), and only when the glyph
+    /// plane was being written at all.
+    pub(crate) fn note_glyph_drawn(&mut self, kind: ToolKind) {
+        let stamps_glyph = matches!(
+            kind,
+            ToolKind::Pencil | ToolKind::Fill | ToolKind::Rectangle | ToolKind::Line
+        );
+        if stamps_glyph && self.mask.glyph {
+            push_recent(&mut self.recent_glyphs, self.active_glyph);
+        }
     }
 
     /// Swaps FG and BG (the `X` shortcut and the `⇄` control).
@@ -663,9 +681,11 @@ impl GasciiApp {
         if self.slot(b).kind != ToolKind::Selection {
             self.set_tool(b, ToolKind::Selection);
         }
-        // A pasted float is a session, and only one exists at a time.
+        // A pasted float is a session, and only one exists at a time. Focus follows the session,
+        // exactly as a canvas press would set it.
         self.flush_slot(b.other());
         self.keyboard_owner = Some(b);
+        self.options_focus = b;
         self.slots[b.ix()].tool.accept_stamp(patch, anchor, &self.doc);
     }
 
@@ -694,27 +714,17 @@ impl GasciiApp {
     /// text mode, doesn't get swallowed as a tool switch.
     fn handle_keys(&mut self, ui: &mut egui::Ui) {
         let focused = ui.memory(|m| m.focused().is_some()) || self.keyboard_owner.is_some();
-        let (redo_shift, undo, redo_y, save, pencil, eraser, eyedropper, text, fill, rect, line, select, brush, copy) =
-            ui.input_mut(|i| {
-                // Cmd/Ctrl+Shift+Z must be consumed before the plain Cmd/Ctrl+Z pattern, since
-                // `matches_logically` ignores extra Shift/Alt — checking undo first would swallow
-                // the redo shortcut's Z key press.
-                let redo_shift = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z);
-                let undo = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
-                let redo_y = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y);
-                let save = i.consume_key(egui::Modifiers::COMMAND, egui::Key::S);
-                let pencil = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::P);
-                let eraser = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::E);
-                let eyedropper = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::I);
-                let text = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::T);
-                let fill = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::F);
-                let rect = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::R);
-                let line = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::L);
-                let select = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::S);
-                let brush = !focused && i.consume_key(egui::Modifiers::NONE, egui::Key::B);
-                let copy = i.consume_key(egui::Modifiers::COMMAND, egui::Key::C);
-                (redo_shift, undo, redo_y, save, pencil, eraser, eyedropper, text, fill, rect, line, select, brush, copy)
-            });
+        let (redo_shift, undo, redo_y, save, copy) = ui.input_mut(|i| {
+            // Cmd/Ctrl+Shift+Z must be consumed before the plain Cmd/Ctrl+Z pattern, since
+            // `matches_logically` ignores extra Shift/Alt — checking undo first would swallow
+            // the redo shortcut's Z key press.
+            let redo_shift = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z);
+            let undo = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
+            let redo_y = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y);
+            let save = i.consume_key(egui::Modifiers::COMMAND, egui::Key::S);
+            let copy = i.consume_key(egui::Modifiers::COMMAND, egui::Key::C);
+            (redo_shift, undo, redo_y, save, copy)
+        });
 
         // Undo/redo mid-pointer-gesture would mutate the document under the stroke's pinned
         // `before` values — the eventual commit would write stale planes back over the undone
@@ -729,32 +739,19 @@ impl GasciiApp {
         if save {
             self.save_file();
         }
-        if pencil {
-            self.set_tool(Binding::L, ToolKind::Pencil);
-        }
-        if eraser {
-            self.set_tool(Binding::L, ToolKind::Eraser);
-        }
-        if eyedropper {
-            self.set_tool(Binding::L, ToolKind::Eyedropper);
-        }
-        if text {
-            self.set_tool(Binding::L, ToolKind::Text);
-        }
-        if fill {
-            self.set_tool(Binding::L, ToolKind::Fill);
-        }
-        if rect {
-            self.set_tool(Binding::L, ToolKind::Rectangle);
-        }
-        if line {
-            self.set_tool(Binding::L, ToolKind::Line);
-        }
-        if select {
-            self.set_tool(Binding::L, ToolKind::Selection);
-        }
-        if brush {
-            self.set_tool(Binding::L, ToolKind::Brush);
+        // The tool shortcuts come from the TOOLS table, so a tool and its key can never drift
+        // apart. A shortcut always sets the L binding; right-clicking a toolbox cell is the only
+        // way to set R.
+        if !focused {
+            let picked = ui.input_mut(|i| {
+                TOOLS
+                    .iter()
+                    .find(|def| i.consume_key(egui::Modifiers::NONE, def.key))
+                    .map(|def| def.kind)
+            });
+            if let Some(kind) = picked {
+                self.set_tool(Binding::L, kind);
+            }
         }
         if copy {
             self.copy_selection(ui.ctx());
@@ -1185,8 +1182,10 @@ impl eframe::App for GasciiApp {
 
         let t = crate::ui::theme::current(&ctx);
         // The window edge's resize grips, before the panels: the grip is a 5px ring around the whole
-        // window and must win over any widget sitting under it.
-        crate::ui::titlebar::handle_resize(&ctx);
+        // window and must win over any widget sitting under it. The canvas reads raw pointer state
+        // rather than egui interactions, so it must be told explicitly — a press on the grip would
+        // otherwise both begin an OS resize and stamp a stroke on the document in the same click.
+        let pointer_on_resize_grip = crate::ui::titlebar::handle_resize(&ctx);
 
         // Panel stack per spec §4.
         egui::Panel::top("titlebar")
@@ -1225,7 +1224,7 @@ impl eframe::App for GasciiApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(t.bg_desk))
             .show(ui, |ui| {
-                canvas::show(ui, self);
+                canvas::show(ui, self, pointer_on_resize_grip);
             });
 
         self.resize_dialog(&ctx);

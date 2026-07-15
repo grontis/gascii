@@ -19,9 +19,9 @@ const SWATCH_GAP: f32 = 3.0;
 /// to push it, so being a few px out costs nothing but the gap above it.
 const BOTTOM_BLOCK: f32 = 44.0 + 4.0 + 1.0 + 4.0 + 14.0 + 8.0 + 18.0;
 
-/// The spec's short tab names. `Page::name` stays as the domain term — this is display only, and
-/// deliberately does not reach into `gascii-core` to rename anything.
-fn tab_label(page_name: &str) -> &str {
+/// The design's short display names for the palette Pages. `Page::name` stays as the domain term —
+/// this is display only, and deliberately does not reach into `gascii-core` to rename anything.
+fn page_label(page_name: &str) -> &str {
     match page_name {
         "Box Drawing" => "Box",
         "Blocks & Shades" => "Blocks",
@@ -122,7 +122,7 @@ fn palette(ui: &mut Ui, app: &mut GasciiApp) {
         .pages
         .iter()
         .enumerate()
-        .map(|(i, p)| (i, tab_label(p.name)))
+        .map(|(i, p)| (i, page_label(p.name)))
         .collect();
     if widgets::segmented(ui, &mut page, &options, false) {
         app.active_page = page;
@@ -183,9 +183,8 @@ const ANSI16: [(&str, gascii_core::Rgba); 16] = [
     ("Bright White", gascii_core::Rgba(255, 255, 255, 255)),
 ];
 
-/// The picker hung off a colour well. Still egui's stock truecolor widget — the spec asks for "full
-/// RGB" but never mocks a picker, so a custom one would be inventing design rather than following
-/// it. Flagged for round 2.
+/// The picker hung off a colour well. Deliberately egui's stock truecolor widget: no design exists
+/// for a custom picker, and building one would be inventing design rather than following it.
 fn color_popup(ui: &Ui, resp: &egui::Response, color: &mut gascii_core::Rgba) {
     egui::Popup::from_toggle_button_response(resp).show(|ui| {
         widgets::micro_label(ui, "ANSI 16");

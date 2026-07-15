@@ -111,7 +111,7 @@ fn ui_semibold_family() -> FontFamily {
 // The three helpers below are the type ramp's call surface for the custom-painted widgets, which
 // paint text at explicit sizes rather than through a `TextStyle`. They have no callers until that
 // widget kit exists.
-/// Instrument Sans Medium — segmented controls and palette tabs.
+/// Instrument Sans Medium — segmented controls and the palette's Page selector.
 #[allow(dead_code)]
 pub fn ui_medium_id(px: f32) -> FontId {
     FontId::new(px, FontFamily::Name(family_name(1)))
