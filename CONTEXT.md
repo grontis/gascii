@@ -45,7 +45,7 @@ One mouse button's attachment to a Tool: L (left) or R (right). Exactly one Tool
 _Avoid_: Slot (that's where a Binding's state lives), assignment
 
 **Session**:
-A Tool's uncommitted work that outlives a single Stroke — a Text burst or a Floating stamp. At most one exists at a time across both Bindings, and it owns the keyboard. Starting one finishes the other Binding's.
+A Tool's uncommitted work that outlives a single Stroke — a Text burst or a Floating stamp. At most one exists at a time across both Bindings; starting one finishes (commits, then fully clears) the other Binding's. A committed Session's tool may still hold **interactive residue** — a bare marquee, a placed text caret — that keeps the keyboard past the commit, until the tool is rebound, the other Binding starts a new Session, or the user explicitly ends it (Escape).
 _Avoid_: Burst (that's the Text tool's own), pending, in-progress edit
 
 **Auto-join**:

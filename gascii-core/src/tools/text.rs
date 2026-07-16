@@ -18,6 +18,9 @@ pub(crate) struct TextBurst {
     pending: Vec<PendingCell>,
     index: HashMap<(u16, u16), usize>,
     before: HashMap<(u16, u16), Cell>,
+    /// Each pending entry's `(proposed, mask)` inputs, aligned with `pending` — what `resync`
+    /// recomposes from when the document changes underneath the burst. See `resync_pending`.
+    sources: Vec<(Cell, PlaneMask)>,
 }
 
 impl TextBurst {
@@ -33,9 +36,11 @@ impl TextBurst {
         let masked = mask_apply(doc_before, proposed, mask);
         if let Some(&i) = self.index.get(&(x, y)) {
             self.pending[i].cell = masked;
+            self.sources[i] = (proposed, mask);
         } else {
             self.index.insert((x, y), self.pending.len());
             self.pending.push(PendingCell { x, y, cell: masked });
+            self.sources.push((proposed, mask));
         }
     }
 
@@ -51,6 +56,7 @@ impl TextBurst {
         self.pending.clear();
         self.index.clear();
         self.before.clear();
+        self.sources.clear();
         (!cell_edits.is_empty()).then_some(Edit::Cells(cell_edits))
     }
 
@@ -58,17 +64,12 @@ impl TextBurst {
         &self.pending
     }
 
-    /// Re-pins every already-touched cell's `before` to `doc`'s current value. Must be called
-    /// whenever `doc` changes underneath this burst via a path other than the burst's own writes
-    /// (which never touch `doc` until `finish`) — currently only a `History::redo` that runs
-    /// while this burst is still uncommitted. Safe unconditionally: between the burst's own
-    /// writes, the only way a touched cell's `doc` value can change at all is exactly this kind of
-    /// external mutation, so re-reading it is always correct, never a false refresh of a value the
-    /// burst itself is responsible for.
+    /// Re-pins every already-touched cell's `before` to `doc`'s current value and recomposes its
+    /// pending result — see `resync_pending` for why the recompose half is load-bearing. Must be
+    /// called whenever `doc` changes underneath this burst via a path other than the burst's own
+    /// writes (a redo, or another binding's commit or flush).
     fn resync(&mut self, doc: &Document, layer: usize) {
-        for (&(x, y), before) in self.before.iter_mut() {
-            *before = doc.cell(layer, x, y).copied().unwrap_or(Cell::BLANK);
-        }
+        super::resync_pending(&mut self.before, &self.index, &mut self.pending, &self.sources, doc, layer);
     }
 }
 

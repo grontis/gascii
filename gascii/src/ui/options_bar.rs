@@ -8,7 +8,6 @@ use crate::app::{sized_slot, Binding, GasciiApp, ToolKind};
 use crate::fonts;
 use gascii_core::{BrushShape, Buildup, DensityMode, Fixed, MAX_TOOL_SIZE};
 
-/// Spec §4.
 pub const HEIGHT: f32 = 40.0;
 
 /// The mono hint at the bar's trailing edge. One line per tool, describing what the *other* inputs
@@ -99,9 +98,8 @@ fn tool_options(ui: &mut Ui, app: &mut GasciiApp, b: Binding, kind: ToolKind) {
     }
 }
 
-/// Ramp, intensity mode and level. These moved here from the sidebar: the spec makes the options bar
-/// the home for the active binding's options, and a ramp is one. They are app-global state (both
-/// bindings' brushes share them), so the bar shows them whenever the focused binding holds a Brush.
+/// Ramp, intensity mode and level. App-global state (both bindings' brushes share them), so the
+/// bar shows them whenever the focused binding holds a Brush.
 fn brush_options(ui: &mut Ui, app: &mut GasciiApp) {
     label(ui, "Ramp");
     let mut ramp = app.active_ramp;

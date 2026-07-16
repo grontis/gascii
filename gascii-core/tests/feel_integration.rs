@@ -318,9 +318,9 @@ fn brush_stroke_at_the_far_corner_of_a_1024_square_document_commits_and_undoes_b
     assert_eq!(doc, before);
 }
 
-/// Locks the documented, intentional space-first-ramp nuance (`brush.rs`'s `Buildup` doc comment,
-/// and the coder's own flagged implementation-summary deviation note): for the built-in "ASCII
-/// shading" ramp, whose own lightest character IS a literal space, a genuinely Blank cell is
+/// Locks the documented, intentional space-first-ramp nuance (`brush.rs`'s `Buildup` doc
+/// comment): for the built-in "ASCII shading" ramp, whose own lightest character IS a literal
+/// space, a genuinely Blank cell is
 /// already on-ramp at index 0 before any touch — so its first Buildup pass lands on index 1 (the
 /// ramp's second character), NOT index 0 (which would just leave it looking blank). This is the
 /// single highest-stakes new assertion in this file (an easy off-by-one/inverted-special-case bug

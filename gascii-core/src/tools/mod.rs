@@ -221,10 +221,12 @@ pub trait Tool {
     fn update(&mut self, ev: ToolEvent, ctx: &ToolCtx, doc: &Document) -> ToolResponse;
     fn pending(&self) -> &[PendingCell];
     /// Called whenever `doc` was just mutated through some path other than this tool's own
-    /// `update` calls — currently only a `History::redo` run while a gesture is still pending and
-    /// uncommitted. Default no-op: only `TextTool` can straddle an external mutation like this
-    /// (its burst spans multiple frames while idle, unlike `FreehandStroke`, which commits
-    /// atomically on release), so it's the only implementor that needs to override this.
+    /// `update` calls (a redo, or another binding's commit or flush landing while this tool still
+    /// holds uncommitted work). Any tool that pins per-cell `before` values or composes pending
+    /// cells against the document MUST override this to re-pin and recompose — see
+    /// `resync_pending` — or its eventual commit writes the superseded content back over whatever
+    /// mutated underneath it. Default no-op, correct only for tools with no cross-call pinned
+    /// state (`SelectionTool` reads `before` from the document at drop time).
     fn resync(&mut self, _doc: &Document, _layer: usize) {}
     /// Inject a floating stamp (paste) at `at`. Default no-op; only `SelectionTool` overrides it —
     /// mirrors `resync`'s precedent of a default-no-op hook taking non-`Copy` args that serves a
@@ -307,6 +309,11 @@ pub(crate) struct FreehandStroke {
     /// The document's value at first touch this stroke, pinned so every revisit's `mask_apply`
     /// still references the true pre-stroke cell, not an intermediate in-stroke write.
     before: HashMap<(u16, u16), Cell>,
+    /// Each pending entry's `(proposed, mask)` inputs, aligned with `pending`. A pending cell is a
+    /// *composition* of `before` with these — keeping the inputs is what lets `resync` recompose
+    /// the composition when `before` changes underneath the stroke, instead of committing a value
+    /// whose masked-off planes still carry the superseded content.
+    sources: Vec<(Cell, PlaneMask)>,
     last: Option<(u16, u16)>,
     buf: Vec<(u16, u16)>,
     fp: Vec<(u16, u16)>,
@@ -318,6 +325,7 @@ impl FreehandStroke {
             pending: Vec::new(),
             index: HashMap::new(),
             before: HashMap::new(),
+            sources: Vec::new(),
             last: None,
             buf: Vec::new(),
             fp: Vec::new(),
@@ -328,6 +336,7 @@ impl FreehandStroke {
         self.pending.clear();
         self.index.clear();
         self.before.clear();
+        self.sources.clear();
         self.last = None;
     }
 
@@ -345,10 +354,14 @@ impl FreehandStroke {
             .or_insert_with(|| doc.cell(layer, x, y).copied().unwrap_or(Cell::BLANK));
         let after = mask_apply(before, proposed, mask);
         match self.index.get(&(x, y)) {
-            Some(&i) => self.pending[i].cell = after,
+            Some(&i) => {
+                self.pending[i].cell = after;
+                self.sources[i] = (proposed, mask);
+            }
             None => {
                 self.index.insert((x, y), self.pending.len());
                 self.pending.push(PendingCell { x, y, cell: after });
+                self.sources.push((proposed, mask));
             }
         }
         true
@@ -416,6 +429,7 @@ impl FreehandStroke {
         self.pending.clear();
         self.index.clear();
         self.before.clear();
+        self.sources.clear();
         self.last = None;
         if cell_edits.is_empty() {
             None
@@ -428,11 +442,45 @@ impl FreehandStroke {
         self.pending.clear();
         self.index.clear();
         self.before.clear();
+        self.sources.clear();
         self.last = None;
     }
 
     pub(crate) fn pending(&self) -> &[PendingCell] {
         &self.pending
+    }
+
+    /// Re-pins every already-touched cell's `before` to `doc`'s current value AND recomposes that
+    /// cell's pending result from its stored `(proposed, mask)` inputs. Must be called whenever
+    /// `doc` changes underneath this stroke via a path other than the stroke's own writes.
+    ///
+    /// Re-pinning alone is not enough: a pending cell's masked-off planes carry `before`'s values
+    /// from composition time, and `finish` commits pending cells as-is — so without the recompose,
+    /// a cell touched before the external mutation and never revisited would commit the superseded
+    /// content back over it, on exactly the planes the mask promised not to write.
+    pub(crate) fn resync(&mut self, doc: &Document, layer: usize) {
+        resync_pending(&mut self.before, &self.index, &mut self.pending, &self.sources, doc, layer);
+    }
+}
+
+/// The shared re-pin + recompose behind every pending-cell buffer's `Tool::resync`: refresh each
+/// touched cell's `before` from `doc`, then rebuild its pending composition from the stored
+/// `(proposed, mask)` so masked-off planes reflect the document's *current* content rather than
+/// the content at composition time.
+pub(crate) fn resync_pending(
+    before: &mut HashMap<(u16, u16), Cell>,
+    index: &HashMap<(u16, u16), usize>,
+    pending: &mut [PendingCell],
+    sources: &[(Cell, PlaneMask)],
+    doc: &Document,
+    layer: usize,
+) {
+    for (&(x, y), b) in before.iter_mut() {
+        *b = doc.cell(layer, x, y).copied().unwrap_or(Cell::BLANK);
+        if let Some(&i) = index.get(&(x, y)) {
+            let (proposed, mask) = sources[i];
+            pending[i].cell = mask_apply(*b, proposed, mask);
+        }
     }
 }
 
@@ -715,5 +763,41 @@ mod tests {
     fn eyedrop_returns_fg_and_bg() {
         let cell = c('x', Rgba(9, 8, 7, 255), Rgba(1, 2, 3, 128));
         assert_eq!(eyedrop(&cell), (cell.fg, cell.bg));
+    }
+
+    /// After an external mutation lands on a cell this stroke already touched (another binding's
+    /// commit or flush arriving mid-stroke), `resync` must both re-pin that cell's `before` AND
+    /// recompose its pending result — with a partial mask, the pending cell's masked-off planes
+    /// carry `before`'s content, so a stale composition would commit the superseded value back
+    /// over the mutation on exactly the planes the mask promised not to write.
+    ///
+    /// Deliberately a bg-only mask, and the stroke deliberately never revisits (5,5) after the
+    /// mutation: a full mask would make `after` independent of `before`, and a revisit would
+    /// recompose as a side effect of stamping — either would let this test pass with `resync`
+    /// deleted. Verified to fail against a no-op `resync`.
+    #[test]
+    fn freehand_stroke_resync_repins_before_after_an_external_mutation() {
+        let mut doc = Document::new(20, 20);
+        let ctx = ToolCtx { mask: PlaneMask { glyph: false, bg: true }, ..sized_ctx() };
+        let proposed = c('#', Rgba::WHITE, Rgba(1, 2, 3, 255));
+        let mut stroke = FreehandStroke::new();
+        stroke.press(5, 5, proposed, &ctx, &doc); // pins before=(5,5), Blank; pending glyph = ' '
+        stroke.drag(6, 5, proposed, &ctx, &doc); // moves on; (5,5) is never revisited
+
+        // An external mutation (another binding's flush) lands on the already-touched cell,
+        // bypassing the stroke entirely.
+        let externally_written = c('Z', Rgba(9, 9, 9, 255), Rgba(8, 8, 8, 255));
+        doc.set_cell(0, 5, 5, externally_written);
+        stroke.resync(&doc, 0);
+
+        let edit = stroke.finish(&doc, 0).expect("expected a committed edit");
+        let Edit::Cells(cells) = edit else { panic!("expected Edit::Cells") };
+        let touched = cells.iter().find(|e| (e.x, e.y) == (5, 5)).expect("(5,5) must still commit");
+        assert_eq!(touched.before, externally_written, "resync must re-pin before to doc's post-mutation value");
+        assert_eq!(
+            touched.after.ch, 'Z',
+            "the masked-off glyph plane must carry the externally-written content, not the stale pre-mutation Blank"
+        );
+        assert_eq!(touched.after.bg, Rgba(1, 2, 3, 255), "the masked bg plane still carries the stroke's own write");
     }
 }

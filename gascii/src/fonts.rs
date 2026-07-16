@@ -32,7 +32,7 @@ fn family_name(which: usize) -> Arc<str> {
         .clone()
 }
 
-/// Registers every bundled face and pins the text styles to the design spec's sizes.
+/// Registers every bundled face and pins the text styles to fixed sizes.
 ///
 /// The UI faces go at the FRONT of egui's stock Proportional/Monospace families rather than
 /// replacing them: the chrome draws symbols the two bundled faces don't carry (`⇄ ✓ ▲ ▼ × □`), and
@@ -54,10 +54,10 @@ pub fn install_fonts(ctx: &egui::Context) {
     }
 
     // Iosevka goes on the TAIL of both chrome chains as a last-resort backstop. It is already
-    // embedded, and its coverage is vast where the two design faces are narrow: `⇄` (the swap
+    // embedded, and its coverage is vast where the two UI faces are narrow: `⇄` (the swap
     // control) exists in neither Instrument Sans nor Fragment Mono nor egui's stock faces, and `□`
     // (the maximize box) is missing from Instrument Sans. Being last, it is consulted only for
-    // glyphs nothing ahead of it carries, so it never displaces the design's typefaces.
+    // glyphs nothing ahead of it carries, so it never displaces the faces ahead of it.
     for (family, primary) in [
         (FontFamily::Proportional, "ui-regular"),
         (FontFamily::Monospace, "mono"),
@@ -108,17 +108,14 @@ fn ui_semibold_family() -> FontFamily {
     FontFamily::Name(family_name(2))
 }
 
-// The three helpers below are the type ramp's call surface for the custom-painted widgets, which
-// paint text at explicit sizes rather than through a `TextStyle`. They have no callers until that
-// widget kit exists.
+// The helpers below are the type ramp's call surface for the custom-painted widgets, which paint
+// text at explicit sizes rather than through a `TextStyle`.
 /// Instrument Sans Medium — segmented controls and the palette's Page selector.
-#[allow(dead_code)]
 pub fn ui_medium_id(px: f32) -> FontId {
     FontId::new(px, FontFamily::Name(family_name(1)))
 }
 
 /// Instrument Sans SemiBold — titles only.
-#[allow(dead_code)]
 pub fn ui_semibold_id(px: f32) -> FontId {
     FontId::new(px, ui_semibold_family())
 }

@@ -1,6 +1,6 @@
 //! The design system's color tokens and their mapping onto egui's `Visuals`.
 //!
-//! Two rules from the spec shape everything here:
+//! Two rules shape everything here:
 //!
 //! - **Inversion is selection.** A selected control swaps fg/bg (`bg_inverse`/`fg_inverse`). No
 //!   accent-colored fills anywhere in the chrome.
@@ -129,7 +129,7 @@ impl Tokens {
         // selected tool/tab/swatch would render as a blank filled block.
         v.override_text_color = None;
 
-        // Square everywhere: the spec allows no rounding above 0px.
+        // Square everywhere: no corner rounds anywhere in the chrome.
         v.window_corner_radius = CornerRadius::ZERO;
         v.menu_corner_radius = CornerRadius::ZERO;
 
@@ -173,7 +173,7 @@ impl Tokens {
         v.widgets.hovered.bg_stroke = Stroke::new(1.0, self.border_strong);
         v.widgets.hovered.fg_stroke = Stroke::new(1.0, self.fg_text);
 
-        // Pressed/selected inverts, per the spec's core rule.
+        // Pressed/selected inverts — the core selection rule.
         v.widgets.active.bg_fill = self.bg_inverse;
         v.widgets.active.weak_bg_fill = self.bg_inverse;
         v.widgets.active.bg_stroke = Stroke::new(1.0, self.border_strong);

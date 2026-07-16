@@ -42,6 +42,10 @@ impl Tool for Pencil {
     fn pending(&self) -> &[PendingCell] {
         self.stroke.pending()
     }
+
+    fn resync(&mut self, doc: &Document, layer: usize) {
+        self.stroke.resync(doc, layer);
+    }
 }
 
 #[cfg(test)]

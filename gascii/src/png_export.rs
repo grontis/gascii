@@ -212,10 +212,9 @@ mod tests {
         assert!(decoded.pixels().all(|p| p.0 == [10, 20, 30, 255]));
     }
 
-    // `composite_over` regression tests: hand-computed straight-alpha "over" results (see the
-    // module-level `python3` cross-check performed during implementation — reproduced here as
-    // fixed expected values, not re-derived at test time, so a regression to the old
-    // premultiplied-but-stored-straight bug is caught).
+    // `composite_over` regression tests: hand-computed straight-alpha "over" results, kept as
+    // fixed expected values rather than re-derived at test time, so a regression to the old
+    // premultiplied-but-stored-straight bug is caught.
 
     #[test]
     fn partial_alpha_source_over_a_fully_transparent_dest_reproduces_the_sources_own_straight_color() {

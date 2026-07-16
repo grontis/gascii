@@ -7,8 +7,8 @@ use super::theme;
 use crate::app::{Binding, GasciiApp, ToolKind, TOOLS};
 use crate::fonts;
 
-/// Spec §4. The panel is fixed at this and not resizable; its 12px padding is set by the `Frame` at
-/// the call site, so the content width here is 184.
+/// The panel is fixed at this and not resizable; its 12px padding is set by the `Frame` at the
+/// call site, so the content width here is 184.
 pub const WIDTH: f32 = 208.0;
 const TOOL_COLS: usize = 3;
 const SWATCH_COLS: usize = 6;
@@ -19,8 +19,8 @@ const SWATCH_GAP: f32 = 3.0;
 /// to push it, so being a few px out costs nothing but the gap above it.
 const BOTTOM_BLOCK: f32 = 44.0 + 4.0 + 1.0 + 4.0 + 14.0 + 8.0 + 18.0;
 
-/// The design's short display names for the palette Pages. `Page::name` stays as the domain term —
-/// this is display only, and deliberately does not reach into `gascii-core` to rename anything.
+/// Short display names for the palette Pages. `Page::name` stays as the domain term — this is
+/// display only, and deliberately does not reach into `gascii-core` to rename anything.
 fn page_label(page_name: &str) -> &str {
     match page_name {
         "Box Drawing" => "Box",
@@ -45,9 +45,9 @@ pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
     ui.add_space(2.0);
     palette(ui, app);
 
-    // Colours and write toggles sit at the foot of the panel, per the mockup. Pushed there with an
-    // explicit spacer rather than a `bottom_up` layout: bottom-up mis-measures the nested rows here
-    // and draws the rule straight through the colour wells.
+    // Colours and write toggles sit at the foot of the panel, pushed there with an explicit
+    // spacer rather than a `bottom_up` layout: bottom-up mis-measures the nested rows here and
+    // draws the rule straight through the colour wells.
     let gap = (ui.available_height() - BOTTOM_BLOCK).max(8.0);
     ui.add_space(gap);
     colors(ui, app);
@@ -57,8 +57,8 @@ pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
     write_toggles(ui, app);
 }
 
-/// A full-width 1px separator. `ui.separator()` sizes itself from the surrounding layout and
-/// collapses to a stub inside the bottom-up column, which is not what the mockup's `border-top` is.
+/// A full-width 1px separator. `ui.separator()` sizes itself from the surrounding layout and can
+/// collapse to a stub, so the line is allocated and painted explicitly.
 fn rule(ui: &mut Ui, color: egui::Color32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
     ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, color));
@@ -97,8 +97,7 @@ fn toolbox(ui: &mut Ui, app: &mut GasciiApp) {
         };
         let resp = widgets::tool_cell(&mut child, def.kind, bound, cell)
             .on_hover_text(format!("{} ({})  —  {}", def.name, def.key.name(), def.tip));
-        // Click binds L, right-click binds R: the spec's rule, and the only place R is set by
-        // pointer.
+        // Click binds L, right-click binds R — the only place R is set by pointer.
         if resp.clicked() {
             rebind = Some((Binding::L, def.kind));
         } else if resp.secondary_clicked() {
@@ -134,8 +133,8 @@ fn palette(ui: &mut Ui, app: &mut GasciiApp) {
         swatch_row(ui, app, &recent);
     }
 
-    // The ASCII page is 95 glyphs and Box Drawing is 128 — 16 and 22 rows at six per row. The
-    // mockup only ever shows one screenful, so this has to scroll.
+    // The ASCII page is 95 glyphs and Box Drawing is 128 — 16 and 22 rows at six per row, far
+    // more than one screenful, so this has to scroll.
     let glyphs = app.pages[app.active_page].glyphs.clone();
     egui::ScrollArea::vertical()
         .max_height(220.0)
@@ -183,8 +182,8 @@ const ANSI16: [(&str, gascii_core::Rgba); 16] = [
     ("Bright White", gascii_core::Rgba(255, 255, 255, 255)),
 ];
 
-/// The picker hung off a colour well. Deliberately egui's stock truecolor widget: no design exists
-/// for a custom picker, and building one would be inventing design rather than following it.
+/// The picker hung off a colour well. Deliberately egui's stock truecolor widget rather than a
+/// custom-painted one.
 fn color_popup(ui: &Ui, resp: &egui::Response, color: &mut gascii_core::Rgba) {
     egui::Popup::from_toggle_button_response(resp).show(|ui| {
         widgets::micro_label(ui, "ANSI 16");

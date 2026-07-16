@@ -174,9 +174,9 @@ fn a_freshly_opened_document_reports_a_none_marker_matching_a_brand_new_history(
 
 #[test]
 fn saving_with_no_prior_edits_then_drawing_then_undoing_the_only_edit_returns_to_the_initial_none_marker() {
-    // The "brand-new/untitled document is clean by construction" edge case from the architect
-    // plan: `saved_marker == None` on a fresh app agrees with a fresh `History::new()`. This test
-    // proves the property survives a single edit + undo round trip, not just at t=0.
+    // The "brand-new/untitled document is clean by construction" edge case: `saved_marker == None`
+    // on a fresh app agrees with a fresh `History::new()`. This test proves the property survives
+    // a single edit + undo round trip, not just at t=0.
     let mut doc = Document::new(8, 8);
     let mut history = History::new();
     let saved_marker_at_launch = history.top_edit_id();

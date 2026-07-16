@@ -15,13 +15,12 @@ use super::widgets;
 use crate::app::GasciiApp;
 use crate::fonts;
 
-/// Spec §4.
 pub const HEIGHT: f32 = 30.0;
-/// Caption boxes, per the mockup.
+/// Caption box side.
 const BOX: f32 = 14.0;
 /// How far in from the window edge still counts as a resize grip.
 const RESIZE_GRIP: f32 = 5.0;
-/// Pinstripe band height, per the mockup.
+/// Pinstripe band height.
 const PINSTRIPE_H: f32 = 9.0;
 
 pub fn show(ui: &mut Ui, app: &mut GasciiApp) {

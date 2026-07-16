@@ -1,12 +1,12 @@
 //! The custom-painted control kit.
 //!
-//! The design spec calls for these to be allocated and painted by hand rather than styled from
-//! egui's stock widgets, and the reason is [`theme`](super::theme)'s core rule: selection is
-//! inversion. egui expresses a selected control through `Visuals`, which cannot express "swap fg and
-//! bg, keep the 1px border, change nothing else" without fighting every default it ships with.
+//! These are allocated and painted by hand rather than styled from egui's stock widgets because of
+//! [`theme`](super::theme)'s core rule: selection is inversion. egui expresses a selected control
+//! through `Visuals`, which cannot express "swap fg and bg, keep the 1px border, change nothing
+//! else" without fighting every default it ships with.
 //!
 //! Each widget reads [`Tokens`] from the context itself, so call sites never thread a palette
-//! through. Sizes come from the spec's §4/§5 and live in the consts below.
+//! through.
 
 use eframe::egui::{
     self, Align2, Color32, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2,
@@ -16,22 +16,21 @@ use super::theme::{self, Tokens};
 use crate::app::ToolKind;
 use crate::fonts;
 
-/// Toolbox cell, per spec §4. Icons are 17px inside it.
+/// Toolbox cell height; icons are 17px inside it.
 pub const TOOL_CELL: f32 = 42.0;
 const ICON: f32 = 17.0;
-/// Palette glyph swatch, per spec §4.
+/// Palette glyph swatch.
 pub const SWATCH: f32 = 26.0;
-/// FG/BG colour wells, per spec §5.
+/// FG/BG colour wells.
 const WELL: f32 = 24.0;
-/// How far the FG well overlaps the BG well, per spec §5.
+/// How far the FG well overlaps the BG well.
 const WELL_OVERLAP: f32 = 4.0;
 const CHECKBOX: f32 = 12.0;
 const STEPPER_H: f32 = 24.0;
 const STEPPER_BTN_W: f32 = 22.0;
 const STEPPER_VALUE_W: f32 = 30.0;
-/// Segmented control padding, per spec §5 (4–6px vertical, 10–12px horizontal).
 const SEG_PAD: Vec2 = Vec2::new(11.0, 5.0);
-/// The mono `L`/`R` corner badges — the one place the spec allows text below 10px.
+/// The mono `L`/`R` corner badges — the only text drawn below 10px.
 const BADGE_PX: f32 = 8.0;
 
 fn tokens(ui: &Ui) -> Tokens {
@@ -51,7 +50,7 @@ fn border(painter: &Painter, rect: Rect, color: Color32) {
     painter.rect_stroke(rect, 0.0, Stroke::new(1.0, color), StrokeKind::Inside);
 }
 
-/// Hard offset shadow — no blur, per the design's one depth rule.
+/// Hard offset shadow — no blur, the one depth treatment used anywhere.
 fn hard_shadow(painter: &Painter, rect: Rect, offset: f32, color: Color32) {
     painter.rect_filled(rect.translate(Vec2::splat(offset)), 0.0, color);
 }
@@ -66,7 +65,7 @@ fn cell(painter: &Painter, rect: Rect, t: &Tokens, selected: bool, hovered: bool
     };
     painter.rect_filled(rect, 0.0, fill);
     if !selected && hovered {
-        // Hover darkens the border rather than filling — the spec allows no hover fills.
+        // Hover darkens the border rather than filling — a fill would read as selection.
         border(painter, rect, t.border_strong);
     }
     fg
@@ -120,7 +119,7 @@ pub fn segmented<T: PartialEq + Copy>(
     changed
 }
 
-/// A `[−][value][+]` stepper. The value cell is mono and scroll-wheel-adjustable, per spec §5.
+/// A `[−][value][+]` stepper. The value cell is mono and scroll-wheel-adjustable.
 pub fn stepper(ui: &mut Ui, value: &mut u16, min: u16, max: u16) -> bool {
     let t = tokens(ui);
     let size = Vec2::new(STEPPER_BTN_W * 2.0 + STEPPER_VALUE_W, STEPPER_H);
@@ -180,7 +179,7 @@ pub fn stepper(ui: &mut Ui, value: &mut u16, min: u16, max: u16) -> bool {
     *value != before
 }
 
-/// A 12px square checkbox; checked inverts and shows a tick, per spec §5.
+/// A 12px square checkbox; checked inverts and shows a tick.
 pub fn checkbox(ui: &mut Ui, checked: &mut bool, label: &str) -> bool {
     let t = tokens(ui);
     let font = fonts::ui_medium_id(12.0);
@@ -224,8 +223,8 @@ pub struct Bound {
 
 /// A toolbox cell: icon, inversion when it holds L, and mono corner badges for each binding.
 ///
-/// `size` is passed in because the mockup's grid is `repeat(3, 1fr)` — cells stretch to fill the
-/// sidebar's content width and are only [`TOOL_CELL`] tall, not square.
+/// `size` is passed in because cells stretch to fill the sidebar's content width and are only
+/// [`TOOL_CELL`] tall, not square.
 ///
 /// The cell inverts for L only. R is shown as a badge alone, because inversion is what marks "the
 /// tool you are drawing with", and every keyboard shortcut and every glyph action targets L.
@@ -238,8 +237,8 @@ pub fn tool_cell(ui: &mut Ui, kind: ToolKind, bound: Bound, size: Vec2) -> Respo
         painter.rect_filled(rect, 0.0, t.bg_inverse);
         t.fg_inverse
     } else {
-        // Idle sits on the panel; hover gets the soft fill the spec specifies for this control
-        // (the one place a hover fill is allowed, since a border would fight the grid's own lines).
+        // Idle sits on the panel; hover gets a soft fill — the one control where a hover fill is
+        // used, since a border would fight the grid's own lines.
         painter.rect_filled(rect, 0.0, if resp.hovered() { t.border_soft } else { t.bg_panel });
         t.fg_text
     };
@@ -298,7 +297,7 @@ pub struct WellsResponse {
     pub bg: Response,
 }
 
-/// Overlapping FG/BG wells, per spec §5 — the paint-app convention. FG sits in front, top-left.
+/// Overlapping FG/BG wells — the paint-app convention. FG sits in front, top-left.
 pub fn color_wells(ui: &mut Ui, fg: Color32, bg: Color32) -> WellsResponse {
     let t = tokens(ui);
     let span = WELL * 2.0 - WELL_OVERLAP;
@@ -322,8 +321,8 @@ pub fn color_wells(ui: &mut Ui, fg: Color32, bg: Color32) -> WellsResponse {
     WellsResponse { fg: fg_resp, bg: bg_resp }
 }
 
-/// The ⇄ swap control that sits beside the wells. Separate from [`color_wells`] so callers can place
-/// it per the mockup (pushed to the row's trailing edge).
+/// The ⇄ swap control that sits beside the wells. Separate from [`color_wells`] so callers can push
+/// it to the row's trailing edge.
 pub fn swap_button(ui: &mut Ui) -> bool {
     let t = tokens(ui);
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
@@ -347,7 +346,7 @@ pub fn button(ui: &mut Ui, label: &str, primary: bool) -> Response {
     let t = tokens(ui);
     let font = fonts::ui_medium_id(12.0);
     let text = measure(ui, label, &font);
-    // Spec §5: 6px vertical, 16px horizontal padding.
+    // 6px vertical, 16px horizontal padding.
     let size = Vec2::new(text.x + 32.0, text.y + 12.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter().clone();
@@ -390,7 +389,7 @@ pub fn pinstripe(painter: &Painter, rect: Rect, color: Color32) {
 /// A section micro-label: mono 10px, uppercase, letter-spaced — `RECENT`, `WRITE`.
 pub fn micro_label(ui: &mut Ui, text: &str) {
     let t = tokens(ui);
-    // egui has no letter-spacing, so the +0.08em the spec asks for is faked by spacing the chars.
+    // egui has no letter-spacing, so it is faked by interleaving thin spaces.
     let spaced: String = text.chars().flat_map(|c| [c, '\u{2009}']).collect();
     ui.label(
         egui::RichText::new(spaced).font(fonts::mono_id(10.0)).color(t.fg_secondary),

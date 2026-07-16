@@ -1,20 +1,20 @@
-//! The nine tool icons, transcribed from the mockup's SVG paths.
+//! The nine tool icons, transcribed from SVG paths (quoted above each constant).
 //!
-//! egui cannot render SVG without a new dependency, so each path is stored as polylines in the
-//! mockup's own 16×16 viewBox and stroked at 1.4px, exactly as the source markup specifies. Curves
+//! egui cannot render SVG without a new dependency, so each path is stored as polylines in its
+//! source 16×16 viewBox and stroked at 1.4px, exactly as the source markup specifies. Curves
 //! (the fill droplet, the brush head) are approximated with a few points — at the 17px they render
 //! at, the difference from a true bézier is below one pixel.
 //!
 //! Keeping the coordinates in viewBox space means `paint` is the only place that knows about
-//! scaling, and the numbers here can be diffed against the mockup by eye.
+//! scaling, and the numbers here can be diffed against the quoted paths by eye.
 
 use eframe::egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 
 use crate::app::ToolKind;
 
-/// The viewBox the mockup's paths are authored in.
+/// The viewBox the source paths are authored in.
 const VIEW_BOX: f32 = 16.0;
-/// Stroke width in viewBox units, per the mockup's `stroke-width="1.4"`.
+/// Stroke width in viewBox units (`stroke-width="1.4"` in the source paths).
 const STROKE_W: f32 = 1.4;
 /// The Selection icon's `stroke-dasharray="2.5 2"`.
 const DASH: (f32, f32) = (2.5, 2.0);
@@ -167,9 +167,9 @@ mod tests {
         }
     }
 
-    /// The paths are authored in the mockup's 16×16 viewBox, and `paint` maps that box onto the
-    /// cell. A stray coordinate outside it would silently paint over the cell's border or bleed into
-    /// the neighbouring tool.
+    /// The paths are authored in a 16×16 viewBox, and `paint` maps that box onto the cell. A stray
+    /// coordinate outside it would silently paint over the cell's border or bleed into the
+    /// neighbouring tool.
     #[test]
     fn every_icon_point_stays_inside_the_view_box() {
         for kind in ALL {

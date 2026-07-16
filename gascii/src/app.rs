@@ -33,7 +33,7 @@ fn edit_marker_differs(current: Option<u64>, saved: Option<u64>) -> bool {
     current != saved
 }
 
-/// How many glyphs the RECENT row remembers, per spec §5.
+/// How many glyphs the RECENT row remembers.
 pub(crate) const RECENT_GLYPHS: usize = 6;
 
 /// Pushes `ch` to the front of a most-recent-first list, de-duplicated and capped.
@@ -48,7 +48,7 @@ fn push_recent(recent: &mut Vec<char>, ch: char) {
 }
 
 /// The binding a pasted float lands in: whichever is already bound to Selection (L wins if both),
-/// else L — rebound, matching the pre-slot behavior.
+/// else L, rebound.
 ///
 /// Never R by default: a paste is a keyboard command, the keyboard's tool is L's, and silently
 /// rebinding the right button out from under the user is worse than rebinding the left. Pure, so the
@@ -63,6 +63,23 @@ fn paste_target(l: ToolKind, r: ToolKind) -> Binding {
     }
 }
 
+/// Whether typed single-letter keys should be swallowed as tool-select shortcuts rather than
+/// routed to the keyboard-owning slot's tool. True only while that slot is Text: Text is the only
+/// kind whose `Tool::update` consumes a bare `Char` event as content — `SelectionTool`'s `Char`
+/// falls through to its catch-all no-op — so suppressing shortcuts for any other owning kind
+/// makes the shortcuts dead weight for no correctness benefit.
+fn suppresses_tool_shortcuts(owner_kind: Option<ToolKind>) -> bool {
+    matches!(owner_kind, Some(ToolKind::Text))
+}
+
+/// Whether this kind can hold a cross-frame Session (uncommitted work outliving a single stroke —
+/// a Text burst, a floating stamp). The one place that fact lives: `flush_slot`, `end_session`,
+/// the document-swap reset, and the takeover in `begin_gesture` all consult it, so a future
+/// session-holding kind is a one-line change here rather than a four-site hunt.
+pub(crate) fn holds_session(kind: ToolKind) -> bool {
+    matches!(kind, ToolKind::Text | ToolKind::Selection)
+}
+
 /// The order the two bindings commit, given which one (if any) the pointer is currently driving.
 ///
 /// Overlay order *is* commit order: an overlay is a promise about the document's final state, and
@@ -72,8 +89,8 @@ fn paste_target(l: ToolKind, r: ToolKind) -> Binding {
 ///
 /// Pure, mirroring `is_own_clipboard_text` and `edit_marker_differs`, so the rule is testable
 /// without a live `GasciiApp` — and so `flush_all` and the painter cannot disagree about it.
-fn order_for(gesture: Option<Binding>) -> [Binding; 2] {
-    match gesture {
+fn order_for(stroke_owner: Option<Binding>) -> [Binding; 2] {
+    match stroke_owner {
         Some(b) => [b, b.other()],
         None => [Binding::L, Binding::R],
     }
@@ -306,13 +323,10 @@ pub struct GasciiApp {
     /// Which binding the options bar edits. A gesture on either button selects that button's
     /// segment.
     pub(crate) options_focus: Binding,
-    /// The transient tool instance a secondary-button stroke drives, `Some` only while that
-    /// stroke is in flight. `self.slots[0].tool` (and any pending text burst or floating selection) stays
-    /// untouched underneath it.
-    /// Which slot's tool the pointer is currently driving, if any. Gesture ownership is one
+    /// Which slot's tool the pointer is currently driving, if any. Stroke ownership is one
     /// question, so it is one field — which is what let the press/drag/release paths collapse to a
-    /// single parameterized call site. At most one gesture is live across both buttons.
-    pub(crate) gesture: Option<Binding>,
+    /// single parameterized call site. At most one stroke is live across both buttons.
+    pub(crate) stroke_owner: Option<Binding>,
     pub(crate) space_pan_active: bool,
     /// Which slot's tool receives keystrokes. There is one keyboard and both slots can be bound to
     /// keyboard-driven tools, so ownership is explicit state rather than something derived: it is
@@ -321,8 +335,14 @@ pub struct GasciiApp {
     ///
     /// Deliberately not derived from tool state. Escape ends a text session while `TextTool` keeps
     /// its cursor placed, so "has a caret" and "is accepting keys" genuinely differ. It also gates
-    /// every single-letter tool-select key, so typing never switches tools.
-    pub(crate) keyboard_owner: Option<Binding>,
+    /// every single-letter tool-select key, so typing never switches tools — though which keys
+    /// actually get suppressed is `suppresses_tool_shortcuts`'s call, not merely "is this `Some`".
+    ///
+    /// Private: `canvas.rs` cannot write this field directly. `keyboard_owner()`/`acquire_keyboard`/
+    /// `release_keyboard`/`end_session` are the only ways to read or mutate it from outside this
+    /// module — see `end_session` for the composite "this binding's session is over" operation, and
+    /// `flush_slot` for why committing pending work deliberately does NOT release this on its own.
+    keyboard_owner: Option<Binding>,
     /// Previous frame's window-focus state, for edge-detecting focus loss.
     pub(crate) was_focused: bool,
     /// The last region copied via Ctrl+C, kept alongside the plain text written to the OS
@@ -396,7 +416,7 @@ impl GasciiApp {
             mask: PlaneMask::default(),
             slots: [ToolSlot::new(ToolKind::Pencil), ToolSlot::new(ToolKind::Eraser)],
             options_focus: Binding::L,
-            gesture: None,
+            stroke_owner: None,
             space_pan_active: false,
             keyboard_owner: None,
             was_focused: true,
@@ -426,7 +446,7 @@ impl GasciiApp {
     /// Whether any pointer gesture — primary stroke or right-click stroke — currently owns the
     /// canvas.
     pub(crate) fn stroke_in_progress(&self) -> bool {
-        self.gesture.is_some()
+        self.stroke_owner.is_some()
     }
 
     pub(crate) fn slot(&self, b: Binding) -> &ToolSlot {
@@ -443,28 +463,37 @@ impl GasciiApp {
     /// Binds `kind` to `b`, replacing that slot's instance. A no-op while a gesture is active: the
     /// pointer is captured by it, so rebinding is suppressed mid-stroke.
     ///
-    /// Flushes the slot first, unconditionally — `flush_slot` is self-gating, and the instance is
-    /// about to be replaced regardless of whether the kind actually changed. Without this,
-    /// re-selecting Text/Selection while already active would silently discard the pending,
-    /// uncommitted burst or float.
+    /// Ends the slot's session first, unconditionally — `end_session` is self-gating (via
+    /// `flush_slot`), and the instance is about to be replaced regardless of whether the kind
+    /// actually changed. Without this, re-selecting Text/Selection while already active would
+    /// silently discard the pending, uncommitted burst or float — and only this slot's claim on the
+    /// keyboard is released, so rebinding L must not silently mute a live session on R.
     fn set_tool(&mut self, b: Binding, kind: ToolKind) {
         if self.stroke_in_progress() {
             return;
         }
-        self.flush_slot(b);
+        self.end_session(b);
         self.slots[b.ix()].kind = kind;
         self.slots[b.ix()].tool = make_tool(kind);
-        // Only this slot's claim on the keyboard is released — rebinding L must not silently mute a
-        // live session on R.
-        self.release_keyboard(b);
         // The options bar (and the [/] size keys behind it) follows the binding the user just
         // acted on — the same rule a canvas gesture applies. Without this, picking a tool by
         // shortcut or toolbox click leaves the bar editing the OTHER binding's stamp.
         self.options_focus = b;
     }
 
+    /// Which slot currently holds the keyboard, if any.
+    pub(crate) fn keyboard_owner(&self) -> Option<Binding> {
+        self.keyboard_owner
+    }
+
+    /// Gives `b` the keyboard, unconditionally. The only setter of `Some` — every acquisition
+    /// (a canvas press on Text/Selection, a paste) routes through this.
+    pub(crate) fn acquire_keyboard(&mut self, b: Binding) {
+        self.keyboard_owner = Some(b);
+    }
+
     /// Releases `b`'s claim on the keyboard, if it holds one. A no-op for the other slot's claim.
-    fn release_keyboard(&mut self, b: Binding) {
+    pub(crate) fn release_keyboard(&mut self, b: Binding) {
         if self.keyboard_owner == Some(b) {
             self.keyboard_owner = None;
         }
@@ -541,13 +570,27 @@ impl GasciiApp {
         }
     }
 
-    /// Finalizes slot `b`'s pending cross-frame session (Text's burst, Selection's float) into one
+    /// Commits slot `b`'s pending cross-frame session (Text's burst, Selection's float) into one
     /// undo entry. A no-op for every other kind.
+    ///
+    /// Narrowed contract: commits pending work only. Never touches keyboard ownership or a tool's
+    /// residual interactive state (a bare marquee, a placed caret) — see `end_session` for the
+    /// operation that also clears those. A structural trigger (Ctrl+S, Ctrl+Z, opening a dialog,
+    /// focus loss) must be able to commit in-flight work without silently killing an otherwise-idle
+    /// marquee or caret's claim on the keyboard.
+    ///
+    /// Deliberately NOT gated on the binding being mid-stroke. Every flush caller either reads the
+    /// document right after (save, the close-confirm dirty check, copy) or follows up with a
+    /// `Cancel` (`end_session`, focus loss) — skipping the commit for an in-flight stroke would
+    /// hand those callers a document missing work the user can see, or let the `Cancel` discard it
+    /// outright. Committing a Text/Selection session mid-stroke is well-defined in core (the float
+    /// drops at its current position, the burst commits, the remaining pointer motion goes inert
+    /// until release): a prematurely-ended stroke is a startle, silently lost work is not.
     ///
     /// The kind gate isn't correctness — every stroke tool's catch-all swallows `Commit`
     /// harmlessly — it avoids building a `ToolCtx`, which clones the active ramp's `Vec<char>`.
     pub(crate) fn flush_slot(&mut self, b: Binding) {
-        if !matches!(self.slots[b.ix()].kind, ToolKind::Text | ToolKind::Selection) {
+        if !holds_session(self.slots[b.ix()].kind) {
             return;
         }
         let tctx = crate::canvas::tool_ctx(self, b);
@@ -555,6 +598,20 @@ impl GasciiApp {
             self.slots[b.ix()].tool.update(ToolEvent::Commit, &tctx, &self.doc)
         {
             self.apply_edit(edit, Some(b));
+        }
+    }
+
+    /// Fully ends slot `b`'s interactive session, right now: commits whatever is pending (never
+    /// silently discarding it — see `flush_slot`), then clears the tool's residual interactive state
+    /// (a bare marquee, a placed caret) via `ToolEvent::Cancel`, then releases the keyboard if `b`
+    /// held it. The single choke point for "b's session is over" — as opposed to `flush_slot`, which
+    /// deliberately leaves both residue and keyboard ownership alone so a structural trigger (Ctrl+S,
+    /// Ctrl+Z, opening a dialog, focus loss) doesn't silently kill an otherwise-idle marquee or caret.
+    pub(crate) fn end_session(&mut self, b: Binding) {
+        self.flush_slot(b);
+        if holds_session(self.slots[b.ix()].kind) {
+            let tctx = crate::canvas::tool_ctx(self, b);
+            self.slots[b.ix()].tool.update(ToolEvent::Cancel, &tctx, &self.doc);
         }
         self.release_keyboard(b);
     }
@@ -574,12 +631,7 @@ impl GasciiApp {
 
     /// The order the slots commit — and therefore the order their overlays paint (bottom first).
     pub(crate) fn commit_order(&self) -> [Binding; 2] {
-        order_for(self.gesture_owner())
-    }
-
-    /// Which slot the pointer is currently driving, if any.
-    pub(crate) fn gesture_owner(&self) -> Option<Binding> {
-        self.gesture
+        order_for(self.stroke_owner)
     }
 
     /// Commits any pending text burst or floating selection, then undoes the most recent edit.
@@ -683,27 +735,32 @@ impl GasciiApp {
         }
         // A pasted float is a session, and only one exists at a time. Focus follows the session,
         // exactly as a canvas press would set it.
-        self.flush_slot(b.other());
-        self.keyboard_owner = Some(b);
+        self.end_session(b.other());
+        self.acquire_keyboard(b);
         self.options_focus = b;
         self.slots[b.ix()].tool.accept_stamp(patch, anchor, &self.doc);
     }
 
-    /// Discards (not commits) whatever cross-frame session the active tool has pending, replacing
-    /// it with a fresh instance. Called when the document itself is about to be replaced (Open):
-    /// a pending burst's or float's `before` values are pinned against the doc that's about to be
-    /// discarded, so committing into the *new* doc would graft stale edits onto unrelated content.
+    /// Discards (not commits) all pending work: each session-holding slot's tool is replaced with
+    /// a fresh instance, and any in-flight stroke is cancelled. Called when the document itself is
+    /// about to be replaced (Open): pending `before` values are pinned against the doc that's
+    /// about to be discarded, so committing into the *new* doc would graft stale edits onto
+    /// unrelated content.
     fn reset_cross_frame_tool(&mut self) {
         // Both slots: either may hold a session pinned against the document being discarded.
         for b in Binding::ALL {
-            if matches!(self.slots[b.ix()].kind, ToolKind::Text | ToolKind::Selection) {
+            if holds_session(self.slots[b.ix()].kind) {
                 self.slots[b.ix()].tool = make_tool(self.slots[b.ix()].kind);
             }
         }
-        // An in-flight gesture's pending cells are pinned against the discarded doc too — drop the
-        // ownership outright so a release after the swap can't graft the old document's stroke onto
-        // the new one.
-        self.gesture = None;
+        // An in-flight stroke's pending cells are pinned against the discarded doc too — Cancel
+        // them (dropping the ownership alone would leave them rendering as ghost overlay cells
+        // over the new document until the next press), and drop the ownership so a release after
+        // the swap can't graft the old document's stroke onto the new one.
+        if let Some(b) = self.stroke_owner.take() {
+            let tctx = crate::canvas::tool_ctx(self, b);
+            self.slots[b.ix()].tool.update(ToolEvent::Cancel, &tctx, &self.doc);
+        }
         self.keyboard_owner = None;
     }
 
@@ -713,7 +770,8 @@ impl GasciiApp {
     /// focus *and* not being mid-text-edit so typing into that hex field, or into the canvas in
     /// text mode, doesn't get swallowed as a tool switch.
     fn handle_keys(&mut self, ui: &mut egui::Ui) {
-        let focused = ui.memory(|m| m.focused().is_some()) || self.keyboard_owner.is_some();
+        let owner_kind = self.keyboard_owner().map(|b| self.slot(b).kind);
+        let focused = ui.memory(|m| m.focused().is_some()) || suppresses_tool_shortcuts(owner_kind);
         let (redo_shift, undo, redo_y, save, copy) = ui.input_mut(|i| {
             // Cmd/Ctrl+Shift+Z must be consumed before the plain Cmd/Ctrl+Z pattern, since
             // `matches_logically` ignores extra Shift/Alt — checking undo first would swallow
@@ -995,12 +1053,12 @@ impl GasciiApp {
         match std::fs::read_to_string(&path) {
             Ok(contents) => match load_str(&contents) {
                 Ok(doc) => {
-                    // Cancel, not flush: the old `self.doc` the active tool's pending burst/float
-                    // `before` values were pinned against is about to be discarded, so committing
-                    // into it is pointless — and carrying the same tool instance (and
-                    // `text_editing`) forward would let it later graft edits, and stale pre-edit
+                    // Cancel, not flush: the old `self.doc` that any pending work — a burst, a
+                    // float, or an in-flight stroke — pinned its `before` values against is about
+                    // to be discarded, so committing into it is pointless, and carrying the same
+                    // tool instances forward would let them later graft edits, and stale pre-edit
                     // `before` values on Undo, from the discarded document onto the newly loaded
-                    // one. Only Text and Selection have cross-frame pending state to strand.
+                    // one.
                     self.reset_cross_frame_tool();
                     self.doc = doc;
                     self.history = History::new();
@@ -1126,8 +1184,8 @@ impl GasciiApp {
         }
     }
 
-    /// The window title: `GASCII — <file>`, with a bullet while there are unsaved changes. This is
-    /// where `current_path` lives now — the spec's status bar has no file slot.
+    /// The window title: `GASCII — <file>`, with a bullet while there are unsaved changes. The
+    /// title bar is the only place the current file name is shown.
     pub(crate) fn window_title(&self) -> String {
         let name = self
             .current_path
@@ -1187,7 +1245,6 @@ impl eframe::App for GasciiApp {
         // otherwise both begin an OS resize and stamp a stroke on the document in the same click.
         let pointer_on_resize_grip = crate::ui::titlebar::handle_resize(&ctx);
 
-        // Panel stack per spec §4.
         egui::Panel::top("titlebar")
             .frame(
                 egui::Frame::new()
@@ -1207,9 +1264,9 @@ impl eframe::App for GasciiApp {
             .frame(egui::Frame::new().fill(t.bg_chrome).inner_margin(egui::Margin::symmetric(12, 0)))
             .exact_size(crate::ui::options_bar::HEIGHT)
             .show(ui, |ui| crate::ui::options_bar::show(ui, self));
-        // The status bar is claimed BEFORE the sidebar, so it spans the full window width as the
-        // mockup has it. Panels take their slice in declaration order: sidebar-first would give the
-        // left panel the whole remaining height and leave the status bar starting at x=208.
+        // The status bar is claimed BEFORE the sidebar, so it spans the full window width. Panels
+        // take their slice in declaration order: sidebar-first would give the left panel the whole
+        // remaining height and leave the status bar starting at x=208.
         egui::Panel::bottom("status")
             .frame(egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::symmetric(12, 0)))
             .exact_size(crate::ui::status_bar::HEIGHT)
@@ -1341,9 +1398,8 @@ mod tests {
         }
     }
 
-    /// Both bindings start bound, and to different tools — the spec's "exactly one tool is bound to
-    /// L and one to R at all times" has no unbound state. Pins the migration of the old
-    /// `right_click_tool: 0 // Eraser` default.
+    /// Both bindings start bound, and to different tools — exactly one tool is bound to L and one
+    /// to R at all times; there is no unbound state.
     #[test]
     fn default_bindings_are_pencil_on_l_and_eraser_on_r() {
         let slots = [ToolSlot::new(ToolKind::Pencil), ToolSlot::new(ToolKind::Eraser)];
@@ -1351,9 +1407,9 @@ mod tests {
         assert_eq!(slots[Binding::R.ix()].kind, ToolKind::Eraser);
     }
 
-    /// The spec's named behavior: each binding keeps its own footprint memory, so sizing the
-    /// right button's Eraser must not resize the left button's. Structural here — the two slots own
-    /// separate arrays — but this pins it against a refactor that reintroduces a shared one.
+    /// Each binding keeps its own footprint memory, so sizing the right button's Eraser must not
+    /// resize the left button's. Structural here — the two slots own separate arrays — but this
+    /// pins it against a refactor that reintroduces a shared one.
     #[test]
     fn stamps_are_per_slot_so_sizing_rs_eraser_never_resizes_ls() {
         let mut slots = [ToolSlot::new(ToolKind::Eraser), ToolSlot::new(ToolKind::Eraser)];
@@ -1378,7 +1434,7 @@ mod tests {
     }
 
     /// Overlay order is commit order: a slot mid-gesture commits at its imminent release, so it
-    /// paints underneath the other slot's session, which commits later. Pure over the gesture
+    /// paints underneath the other slot's session, which commits later. Pure over the stroke
     /// owner, so `flush_all` and the painter provably agree.
     #[test]
     fn commit_order_puts_the_gesture_slot_first() {
@@ -1408,7 +1464,6 @@ mod tests {
     ///
     /// Here: R's Pencil draws '#' under L's live text burst, then the burst commits and is undone.
     /// Undo must restore R's '#', not the blank that was there when the burst started.
-    /// Impossible to hit before this refactor, because only one slot could ever hold a session.
     #[test]
     fn a_strokes_commit_repins_the_other_bindings_live_session() {
         let mut app = GasciiApp::headless();
@@ -1479,8 +1534,7 @@ mod tests {
         assert_eq!(app.keyboard_owner, None, "rebinding R should release its own claim");
     }
 
-    /// Every kind is bindable to either button — the point of the refactor. Text, Selection and
-    /// Eyedropper were previously left-only.
+    /// Every kind is bindable to either button — Text, Selection and Eyedropper included.
     #[test]
     fn every_kind_can_bind_to_either_button() {
         for kind in ALL_KINDS {
@@ -1529,5 +1583,438 @@ mod tests {
     #[test]
     fn edit_marker_differs_is_dirty_when_current_is_some_but_saved_is_none() {
         assert!(edit_marker_differs(Some(0), None));
+    }
+
+    /// Pure-function coverage over every `ToolKind` plus `None`: only a Text-owning keyboard
+    /// suppresses tool-select shortcuts — `SelectionTool`'s `Char` arm falls through to a no-op, so
+    /// every other owning kind (and no owner at all) must leave shortcuts live.
+    #[test]
+    fn suppresses_tool_shortcuts_is_true_only_for_text() {
+        for kind in ALL_KINDS {
+            let expected = kind == ToolKind::Text;
+            assert_eq!(suppresses_tool_shortcuts(Some(kind)), expected, "{kind:?}");
+        }
+        assert!(!suppresses_tool_shortcuts(None));
+    }
+
+    /// `flush_slot` commits pending work but never releases the keyboard — that is `end_session`'s
+    /// job. A flushed Text burst must still hold the keyboard, and its caret must still be placed,
+    /// right after the flush.
+    #[test]
+    fn flush_slot_never_releases_keyboard_ownership() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        app.acquire_keyboard(Binding::L);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('a'), &tctx, &app.doc);
+
+        app.flush_slot(Binding::L);
+
+        assert_eq!(app.keyboard_owner(), Some(Binding::L), "flush must never release the keyboard");
+        assert!(
+            app.slots[Binding::L.ix()].tool.caret().is_some(),
+            "the burst's cursor must still be placed after a flush"
+        );
+    }
+
+    /// A flush commits the session's pending work even while its own binding is mid-stroke: every
+    /// flush caller either reads the document right after (save, the close-confirm dirty check,
+    /// copy) or follows up with a `Cancel` — a gated flush would hand them a document missing work
+    /// the user can see, or let the `Cancel` discard it. The scenario: a pasted float is being
+    /// dragged into place when the window is asked to close.
+    #[test]
+    fn a_mid_stroke_flush_commits_the_float_so_the_dirty_check_sees_it() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Selection);
+        let patch = CellPatch { width: 1, height: 1, cells: vec![cell('x')] };
+        app.slots[Binding::L.ix()].tool.accept_stamp(patch, (3, 3), &app.doc);
+        app.acquire_keyboard(Binding::L);
+
+        // Grab the float: the press starts a Move stroke and takes stroke ownership.
+        crate::canvas::begin_gesture(&mut app, Binding::L, 3, 3);
+        assert_eq!(app.stroke_owner, Some(Binding::L), "sanity: L is mid-stroke");
+        assert!(!app.is_dirty(), "sanity: nothing committed yet");
+
+        // Alt+F4 / Ctrl+S while the button is still held.
+        app.flush_all();
+
+        assert_eq!(app.doc.cell(0, 3, 3).unwrap().ch, 'x', "the float must commit at its current spot");
+        assert!(app.is_dirty(), "the close-confirm dirty check must see the committed float");
+    }
+
+    /// `end_session` commits before it clears, even when the binding owns the in-flight stroke —
+    /// Escape pressed while the pointer is still held must never discard what was typed during the
+    /// hold.
+    #[test]
+    fn end_session_commits_pending_work_even_for_the_stroke_owning_binding() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        crate::canvas::begin_gesture(&mut app, Binding::L, 0, 0);
+        assert_eq!(app.stroke_owner, Some(Binding::L), "sanity: the press is still held");
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('h'), &tctx, &app.doc);
+
+        app.end_session(Binding::L); // Escape mid-hold
+
+        assert_eq!(app.doc.cell(0, 0, 0).unwrap().ch, 'h', "the held-press burst must commit, not vanish");
+        assert_eq!(app.keyboard_owner(), None, "the session is over");
+    }
+
+    /// Ctrl+C internally calls `flush_all`, which must not silently drop the marquee or the
+    /// keyboard claim — Delete right afterward must still see the selection and blank it, or the
+    /// standard copy-then-delete cut workflow dies at its second step.
+    #[test]
+    fn ctrl_c_then_delete_workflow_survives_a_flush() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Selection);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 1, y: 1 }, &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Drag { x: 2, y: 2 }, &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc);
+        app.acquire_keyboard(Binding::L);
+        app.doc.set_cell(0, 1, 1, cell('x'));
+        app.doc.set_cell(0, 2, 2, cell('y'));
+
+        let egui_ctx = egui::Context::default();
+        app.copy_selection(&egui_ctx); // internally calls flush_all
+
+        assert_eq!(
+            app.selection_slot(),
+            Some(Binding::L),
+            "a flush triggered by copy must not clear the selection slot"
+        );
+        assert!(
+            app.slots[Binding::L.ix()].tool.selection_overlay().and_then(|v| v.marquee).is_some(),
+            "the marquee must survive a structural flush"
+        );
+
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        let resp = app.slots[Binding::L.ix()].tool.update(ToolEvent::Delete, &tctx, &app.doc);
+        if let ToolResponse::Commit(Some(edit)) = resp {
+            app.apply_edit(edit, Some(Binding::L));
+        }
+        for y in 1..=2u16 {
+            for x in 1..=2u16 {
+                assert_eq!(app.doc.cell(0, x, y), Some(&gascii_core::Cell::BLANK));
+            }
+        }
+    }
+
+    /// A structural flush (Ctrl+S/Ctrl+Z) mid-burst must not release the keyboard, or the very
+    /// next typed letter would be consumed as a tool-select shortcut instead of burst content.
+    #[test]
+    fn mid_typing_structural_flush_does_not_let_the_next_letter_rebind_the_tool() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('a'), &tctx, &app.doc);
+        app.acquire_keyboard(Binding::L);
+
+        app.flush_all(); // simulates the Ctrl+S / Ctrl+Z structural-trigger path
+
+        let owner_kind = app.keyboard_owner().map(|b| app.slot(b).kind);
+        assert_eq!(owner_kind, Some(ToolKind::Text), "a structural flush must not release the keyboard mid-burst");
+        assert!(
+            suppresses_tool_shortcuts(owner_kind),
+            "the very next 's' keypress must still be swallowed as burst content, not routed to set_tool"
+        );
+    }
+
+    /// Starting a session on the other binding must fully clear the losing slot's marquee, not
+    /// merely leave it behind to be masked by render/commit ordering — a lingering invisible
+    /// marquee is what keyboard Delete would silently operate on.
+    #[test]
+    fn starting_a_selection_session_on_the_other_binding_clears_the_losing_slots_marquee() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Selection);
+        app.slots[Binding::R.ix()] = ToolSlot::new(ToolKind::Selection);
+
+        // A press on L starts a marquee and claims the keyboard.
+        crate::canvas::begin_gesture(&mut app, Binding::L, 1, 1);
+        assert!(
+            app.slots[Binding::L.ix()].tool.selection_overlay().and_then(|v| v.marquee).is_some(),
+            "sanity: L has a marquee"
+        );
+
+        // A press on R takes over: L's session must be fully ended, not just masked.
+        crate::canvas::begin_gesture(&mut app, Binding::R, 4, 4);
+
+        assert_eq!(app.keyboard_owner(), Some(Binding::R));
+        assert!(
+            app.slots[Binding::L.ix()].tool.selection_overlay().is_none(),
+            "the losing slot's marquee must be cleared, not merely masked by render order"
+        );
+    }
+
+    /// A flush landing on the idle binding mid-stroke leaves the stroking binding holding pending
+    /// cells composed against the pre-flush document; its own eventual commit must not revert the
+    /// just-flushed content on a masked-off plane. The app-integration face of the resync
+    /// contract (the tool-level pin lives in `gascii-core`).
+    #[test]
+    fn a_strokes_commit_mid_gesture_repins_a_flushed_idle_slots_masked_plane() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        app.slots[Binding::R.ix()] = ToolSlot::new(ToolKind::Pencil);
+        app.acquire_keyboard(Binding::L);
+
+        // L: place a caret at (0,0) and type — commits 'A' once flushed.
+        app.mask = PlaneMask::ALL;
+        let l = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &l, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('A'), &l, &app.doc);
+
+        // R: a glyph-masked-off Pencil stroke touches (0,0) and keeps gesturing — no Release yet.
+        app.mask = PlaneMask { glyph: false, bg: true };
+        app.active_glyph = '#';
+        app.stroke_owner = Some(Binding::R);
+        let r = crate::canvas::tool_ctx(&app, Binding::R);
+        app.slots[Binding::R.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &r, &app.doc);
+
+        // A same-frame flush lands on L mid-R-stroke (Escape/Ctrl+C mid-R-stroke): commits 'A'.
+        app.flush_slot(Binding::L);
+        assert_eq!(app.doc.cell(0, 0, 0).unwrap().ch, 'A', "L's burst committed under R's live stroke");
+
+        // R's stroke moves on WITHOUT revisiting (0,0). Deliberate: a revisit re-stamps the cell
+        // and recomposes as a side effect, hiding a resync that fixed only future stamps — the
+        // corruption lives precisely in the already-stamped, never-revisited pending cell.
+        app.slots[Binding::R.ix()].tool.update(ToolEvent::Drag { x: 2, y: 0 }, &r, &app.doc);
+
+        app.stroke_owner = None;
+        if let ToolResponse::Commit(Some(edit)) =
+            app.slots[Binding::R.ix()].tool.update(ToolEvent::Release, &r, &app.doc)
+        {
+            app.apply_edit(edit, Some(Binding::R));
+        }
+
+        assert_eq!(
+            app.doc.cell(0, 0, 0).unwrap().ch,
+            'A',
+            "R's stroke must not silently revert L's committed glyph on the masked-off plane"
+        );
+    }
+
+    /// The full copy-paste-drag-save cross-feature flow: a pasted float is mid-drag when Save
+    /// fires. The save's flush must commit the float at its current (dragged) position, the saved
+    /// file must reflect that position, and the session must stay coherent afterward — the
+    /// keyboard claim survives (it's still residue, not a discard), and a further press starts a
+    /// clean new marquee rather than getting stuck referencing the just-committed float.
+    #[test]
+    fn copy_paste_drag_then_save_mid_drag_commits_the_float_and_the_session_stays_interactive() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Selection);
+        app.doc.set_cell(0, 1, 1, cell('x'));
+
+        // Select the single cell and copy it.
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 1, y: 1 }, &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc);
+        app.acquire_keyboard(Binding::L);
+        let egui_ctx = egui::Context::default();
+        app.copy_selection(&egui_ctx);
+        let copied_text = app.internal_clipboard.as_ref().unwrap().to_text();
+
+        // Paste: lands as a floating stamp at the hovered cell (the origin — nothing is hovered).
+        app.paste_text(&copied_text);
+        assert_eq!(app.selection_slot(), Some(Binding::L));
+        assert_eq!(app.doc.cell(0, 0, 0).unwrap().ch, ' ', "sanity: a paste floats, it doesn't write yet");
+
+        // Grab the float and drag it.
+        assert!(crate::canvas::begin_gesture(&mut app, Binding::L, 0, 0), "the press on the float starts a drag");
+        assert_eq!(app.stroke_owner, Some(Binding::L));
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Drag { x: 2, y: 2 }, &tctx, &app.doc);
+
+        // Ctrl+S while the button is still held.
+        let dir = scratch_dir("mid_drag_save");
+        let path = dir.join("out.gascii");
+        app.current_path = Some(path.clone());
+        app.save_file();
+
+        assert_eq!(app.doc.cell(0, 2, 2).unwrap().ch, 'x', "the float committed at its dragged position");
+        let saved_doc = load_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved_doc.cell(0, 2, 2).unwrap().ch, 'x', "the saved file reflects the dragged position");
+
+        // The session/keyboard state stays coherent afterward: still residue, not a discard.
+        assert_eq!(app.keyboard_owner(), Some(Binding::L), "the flush must not release the keyboard mid-drag");
+
+        // The physical button releases a beat later; interaction continues cleanly from there.
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc);
+        app.stroke_owner = None;
+        let resp = app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 5, y: 5 }, &tctx, &app.doc);
+        assert!(matches!(resp, ToolResponse::Active), "a fresh press must start a clean marquee, not error");
+        assert!(
+            app.slots[Binding::L.ix()]
+                .tool
+                .selection_overlay()
+                .and_then(|v| v.marquee)
+                .is_some_and(|r| r.contains(5, 5)),
+            "the new marquee must not still be referencing the committed float"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The full cut workflow end to end — select, copy (a structural flush), delete, undo, redo —
+    /// with content asserted at every step, not just the final state.
+    #[test]
+    fn the_cut_workflow_copy_delete_undo_redo_preserves_content_at_every_step() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Selection);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 1, y: 1 }, &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Drag { x: 2, y: 2 }, &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc);
+        app.acquire_keyboard(Binding::L);
+        app.doc.set_cell(0, 1, 1, cell('x'));
+        app.doc.set_cell(0, 2, 2, cell('y'));
+
+        let egui_ctx = egui::Context::default();
+        app.copy_selection(&egui_ctx); // Ctrl+C: a structural flush must not disturb the marquee.
+        assert_eq!(app.doc.cell(0, 1, 1).unwrap().ch, 'x', "copy must not itself mutate the document");
+        assert_eq!(app.doc.cell(0, 2, 2).unwrap().ch, 'y');
+
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        let resp = app.slots[Binding::L.ix()].tool.update(ToolEvent::Delete, &tctx, &app.doc);
+        let ToolResponse::Commit(Some(edit)) = resp else { panic!("Delete must produce a committed edit") };
+        app.apply_edit(edit, Some(Binding::L));
+        for (x, y) in [(1u16, 1u16), (2, 2)] {
+            assert_eq!(app.doc.cell(0, x, y), Some(&gascii_core::Cell::BLANK), "cut must blank the region");
+        }
+
+        app.request_undo();
+        assert_eq!(app.doc.cell(0, 1, 1).unwrap().ch, 'x', "undo restores the cut content");
+        assert_eq!(app.doc.cell(0, 2, 2).unwrap().ch, 'y', "undo restores the cut content");
+
+        app.request_redo();
+        for (x, y) in [(1u16, 1u16), (2, 2)] {
+            assert_eq!(app.doc.cell(0, x, y), Some(&gascii_core::Cell::BLANK), "redo re-applies the cut");
+        }
+    }
+
+    /// `request_redo` deliberately skips flushing first (see its own doc comment), so a live burst
+    /// can still be pending when a Redo mutates the document out from under it on the *other*
+    /// binding. The resync fan-out that follows must reach that live burst too, not just a flush's
+    /// targets — and, on a masked-off plane, recompose its pending content, not merely re-pin
+    /// `before`.
+    #[test]
+    fn redoing_the_other_bindings_stroke_resyncs_a_live_burst_preserving_its_masked_off_plane() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        app.slots[Binding::R.ix()] = ToolSlot::new(ToolKind::Pencil);
+
+        // R draws a colored cell, full mask.
+        app.mask = PlaneMask::ALL;
+        app.active_glyph = '#';
+        app.active_bg = Rgba(1, 2, 3, 255);
+        let r = crate::canvas::tool_ctx(&app, Binding::R);
+        app.slots[Binding::R.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &r, &app.doc);
+        if let ToolResponse::Commit(Some(edit)) =
+            app.slots[Binding::R.ix()].tool.update(ToolEvent::Release, &r, &app.doc)
+        {
+            app.apply_edit(edit, Some(Binding::R));
+        }
+        assert_eq!(app.doc.cell(0, 0, 0).unwrap().bg, Rgba(1, 2, 3, 255), "sanity: R's stroke landed");
+
+        app.request_undo(); // Ctrl+Z: reverts R's stroke back to Blank.
+        assert_eq!(app.doc.cell(0, 0, 0), Some(&gascii_core::Cell::BLANK), "sanity: undo reverted R's stroke");
+
+        // L starts a burst at the now-blank cell, writing only the glyph plane — the bg plane
+        // composes from whatever `before` turns out to be.
+        app.mask = PlaneMask { glyph: true, bg: false };
+        app.acquire_keyboard(Binding::L);
+        let l = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &l, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('B'), &l, &app.doc);
+
+        app.request_redo(); // Ctrl+Shift+Z: redoes R's stroke, without flushing L's live burst first.
+        assert_eq!(app.doc.cell(0, 0, 0).unwrap().bg, Rgba(1, 2, 3, 255), "sanity: redo restored R's stroke");
+
+        app.flush_slot(Binding::L);
+        assert_eq!(app.doc.cell(0, 0, 0).unwrap().ch, 'B', "the burst's glyph committed");
+        assert_eq!(
+            app.doc.cell(0, 0, 0).unwrap().bg,
+            Rgba(1, 2, 3, 255),
+            "the burst's masked-off bg plane must carry the redo's color, not a pre-redo stale value"
+        );
+    }
+
+    /// Rebinding the OTHER binding through several kinds must never disturb a live burst — only
+    /// rebinding the burst's OWN binding may touch it, and when it does, it must commit rather than
+    /// discard.
+    #[test]
+    fn rebinding_the_other_binding_through_several_kinds_leaves_a_live_burst_untouched_then_rebinding_its_own_binding_commits_it(
+    ) {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        app.slots[Binding::R.ix()] = ToolSlot::new(ToolKind::Pencil);
+
+        let l = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &l, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('h'), &l, &app.doc);
+        app.acquire_keyboard(Binding::L);
+
+        for kind in [ToolKind::Eraser, ToolKind::Fill, ToolKind::Selection, ToolKind::Brush, ToolKind::Line] {
+            app.set_tool(Binding::R, kind);
+            assert_eq!(app.slot(Binding::R).kind, kind, "R must actually rebind to {kind:?}");
+            assert_eq!(app.keyboard_owner(), Some(Binding::L), "R's rebind must not touch L's session");
+            assert!(
+                app.slots[Binding::L.ix()].tool.caret().is_some(),
+                "L's caret must survive R's rebind to {kind:?}"
+            );
+        }
+
+        // Continue typing on L: the burst is unaffected by any of R's rebinds.
+        let l = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('i'), &l, &app.doc);
+
+        // Rebinding L itself must commit the burst, not discard it.
+        app.set_tool(Binding::L, ToolKind::Pencil);
+        assert_eq!(app.doc.cell(0, 0, 0).unwrap().ch, 'h', "rebinding L must commit, not discard, the burst");
+        assert_eq!(app.keyboard_owner(), None, "L released its own claim");
+        assert_eq!(app.slot(Binding::L).kind, ToolKind::Pencil);
+    }
+
+    /// Opening a file must strand neither a live Session (a Text burst) nor an in-flight Stroke (a
+    /// Pencil drag still held) that exist simultaneously on the two bindings — nothing grafts onto
+    /// the newly loaded document, and neither binding's ownership claim survives the swap.
+    #[test]
+    fn opening_a_file_strands_neither_a_live_burst_nor_an_in_flight_stroke_onto_the_new_document() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        app.slots[Binding::R.ix()] = ToolSlot::new(ToolKind::Pencil);
+
+        // L: a live burst, pinned against the document that's about to be discarded.
+        let l = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &l, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('h'), &l, &app.doc);
+        app.acquire_keyboard(Binding::L);
+
+        // R: a pencil stroke still physically held when Open fires.
+        assert!(crate::canvas::begin_gesture(&mut app, Binding::R, 2, 2));
+        let r = crate::canvas::tool_ctx(&app, Binding::R);
+        app.slots[Binding::R.ix()].tool.update(ToolEvent::Drag { x: 3, y: 2 }, &r, &app.doc);
+        assert_eq!(app.stroke_owner, Some(Binding::R), "sanity: R is mid-stroke");
+
+        // Open: Cancel (not flush) the pending tools, then swap the document — mirrors `open_file`
+        // minus the native file dialog.
+        let extent = app.doc.extent();
+        app.reset_cross_frame_tool();
+        app.doc = Document::new(extent.width, extent.height);
+        app.history = History::new();
+
+        assert_eq!(app.doc.cell(0, 0, 0), Some(&gascii_core::Cell::BLANK), "L's burst must not have committed");
+        assert_eq!(app.doc.cell(0, 2, 2), Some(&gascii_core::Cell::BLANK), "R's in-flight stroke must not have committed");
+        assert_eq!(app.stroke_owner, None, "R's in-flight stroke claim must not survive Open");
+        assert_eq!(app.keyboard_owner(), None, "L's session claim must not survive Open");
+        assert!(app.slots[Binding::L.ix()].tool.caret().is_none(), "L's caret must not survive Open");
+        assert!(app.slots[Binding::R.ix()].tool.pending().is_empty(), "R's in-flight stroke cells must not survive Open");
+
+        // A fresh press on the new document behaves like a clean start.
+        let l2 = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 1, y: 1 }, &l2, &app.doc);
+        assert!(app.slots[Binding::L.ix()].tool.caret().is_some(), "the new Text instance is interactive");
     }
 }

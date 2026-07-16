@@ -1,6 +1,6 @@
 use eframe::egui::{self, Align2, Color32, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2};
 use gascii_core::{
-    CellRect, Direction, DocExtent, Document, History, PendingCell, Rgba, SelectionView, Tool,
+    CellRect, Direction, DocExtent, Document, Edit, PendingCell, Rgba, SelectionView, Tool,
     ToolCtx, ToolEvent, ToolResponse,
 };
 
@@ -19,7 +19,7 @@ const DOC_BG: Color32 = crate::ui::theme::CANVAS_SURFACE;
 /// The accent, used only on canvas overlays.
 const ACCENT: Color32 = crate::ui::theme::CANVAS_ACCENT;
 
-/// Minimum desk showing around the document card, per spec §4.
+/// Minimum desk showing around the document card.
 pub const DESK_MARGIN: f32 = 28.0;
 
 /// The marquee's dash pattern, in points.
@@ -132,9 +132,9 @@ impl CanvasRenderer for NaiveRenderer {
             }
         }
 
-        // Cell cursor: a 1px accent outline on every cell the next application would land on. The
-        // spec's outline-only treatment (a wash would obscure the very glyph you are aiming at); for
-        // a sized tool the same outline traces each cell of the footprint.
+        // Cell cursor: a 1px accent outline on every cell the next application would land on.
+        // Outline only — a wash would obscure the very glyph you are aiming at; for a sized tool
+        // the same outline traces each cell of the footprint.
         for &(hx, hy) in hover {
             if hx < x0 || hx >= x1 || hy < y0 || hy >= y1 {
                 continue;
@@ -198,18 +198,21 @@ pub fn cursor_blink_on(ui: &egui::Ui) -> bool {
 /// Outcome of `drive_stroke_tail` for the caller's ownership bookkeeping.
 struct StrokeTail {
     ended: bool,
-    committed: bool,
+    edit: Option<Edit>,
 }
 
 /// The drag/release tail of a pointer-stroke lifecycle, shared by the primary and right-click
 /// gestures so there is exactly one copy of this state machine. Press-time ownership stays with
 /// each caller — that half genuinely differs per button (tool special cases, space-pan
 /// arbitration).
+///
+/// Never mutates the document itself — `Tool::update` only ever takes `&Document` — and returns
+/// any committed `Edit` rather than applying it, so the caller can route it through `apply_edit`,
+/// keeping that the crate's one and only `History::apply` call site.
 #[allow(clippy::too_many_arguments)]
 fn drive_stroke_tail(
     tool: &mut dyn Tool,
-    doc: &mut Document,
-    history: &mut History,
+    doc: &Document,
     viewport: &Viewport,
     tctx: &ToolCtx,
     response: &egui::Response,
@@ -226,14 +229,13 @@ fn drive_stroke_tail(
             tool.update(ToolEvent::Drag { x, y }, tctx, doc);
         }
     }
-    let mut committed = false;
+    let mut edit = None;
     if ends {
-        if let ToolResponse::Commit(Some(edit)) = tool.update(ToolEvent::Release, tctx, doc) {
-            history.apply(doc, edit);
-            committed = true;
+        if let ToolResponse::Commit(Some(e)) = tool.update(ToolEvent::Release, tctx, doc) {
+            edit = Some(e);
         }
     }
-    StrokeTail { ended: ends, committed }
+    StrokeTail { ended: ends, edit }
 }
 
 /// The `ToolCtx` for one binding. Everything but the footprint is app-global shared state; the
@@ -277,22 +279,20 @@ pub(crate) fn begin_gesture(app: &mut GasciiApp, b: Binding, x: u16, y: u16) -> 
     // `keyboard_owner` be the unique session holder, and keeps "the selection" singular for
     // copy/paste. Only Text and Selection hold sessions, so a quick right-click erase under a live
     // burst still never disturbs it.
-    if matches!(app.slot(b).kind, ToolKind::Text | ToolKind::Selection) {
-        app.flush_slot(b.other());
-        app.keyboard_owner = Some(b);
+    if crate::app::holds_session(app.slot(b).kind) {
+        app.end_session(b.other());
+        app.acquire_keyboard(b);
     }
 
     let tctx = tool_ctx(app, b);
     let resp = app.slots[b.ix()].tool.update(ToolEvent::Press { x, y }, &tctx, &app.doc);
     // Always apply the press response. This is what makes the bindings symmetric: a stroke tool's
     // `Press` returns `Active` and never matches, while Selection's press CAN commit (clicking away
-    // from a float drops it) and discarding that would silently lose the drop. The old right-click
-    // path was allowed to drop this response only because it was restricted to stroke tools — that
-    // restriction, not the response, was the thing standing in the way.
+    // from a float drops it) and discarding that would silently lose the drop.
     if let ToolResponse::Commit(Some(edit)) = resp {
         app.apply_edit(edit, Some(b));
     }
-    app.gesture = Some(b);
+    app.stroke_owner = Some(b);
     true
 }
 
@@ -373,7 +373,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
         // mode (primary pans, secondary is inert, neither draws), and only one gesture may own the
         // canvas at a time. Two simultaneous strokes would interleave two `apply_edit` calls and pin
         // each slot's `before` values against the other's uncommitted writes.
-        if app.gesture.is_none() && !app.space_pan_active && !pointer_on_resize_grip {
+        if app.stroke_owner.is_none() && !app.space_pan_active && !pointer_on_resize_grip {
             if primary_pressed && space {
                 app.space_pan_active = true;
             } else if !space {
@@ -401,7 +401,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
             if gesture_ends {
                 app.space_pan_active = false;
             }
-        } else if let Some(b) = app.gesture {
+        } else if let Some(b) = app.stroke_owner {
             let (down, ends) = match b {
                 Binding::L => (primary_down, gesture_ends),
                 Binding::R => (secondary_down, secondary_released || !secondary_down),
@@ -409,8 +409,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
             let tctx = tool_ctx(app, b);
             let tail = drive_stroke_tail(
                 app.slots[b.ix()].tool.as_mut(),
-                &mut app.doc,
-                &mut app.history,
+                &app.doc,
                 &app.viewport,
                 &tctx,
                 &response,
@@ -421,31 +420,29 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
                 gesture_just_started,
                 ends,
             );
-            if tail.committed {
-                // These cells were committed inside `drive_stroke_tail`, bypassing `apply_edit` —
-                // so discharge the same obligation here: the other slot's pending session may now
-                // hold `before` values pinned against the pre-commit document.
-                app.resync_slots(Some(b));
+            if let Some(edit) = tail.edit {
+                // `apply_edit` performs its own `resync_slots(Some(b))` — the other slot's pending
+                // session may now hold `before` values pinned against the pre-commit document.
+                app.apply_edit(edit, Some(b));
                 // A committed stroke that stamped the active glyph counts as "using" it.
                 let kind = app.slots[b.ix()].kind;
                 app.note_glyph_drawn(kind);
             }
             if tail.ended {
-                app.gesture = None;
+                app.stroke_owner = None;
             }
         }
 
         // Keyboard routing: the owning slot's tool receives keys, dispatched by that slot's kind.
         // At most one slot owns the keyboard, so the Text and Selection routings are mutually
-        // exclusive by construction — the pre-slot code relied on `tool_kind` being global for that.
+        // exclusive by construction.
         //
         // Both are gated on no widget having focus. `TextEdit`'s own key handling (e.g. the hex
         // color popup) reads events via `filtered_events`, which clones rather than consumes, so an
-        // unguarded block fires on keys typed into an unrelated focused field. The selection block
-        // always had this guard; the text block did not, and so fed `Event::Text` to `TextTool`
-        // while you typed into the color picker. Unifying them fixes that.
+        // unguarded block would fire on keys typed into an unrelated focused field — feeding
+        // `Event::Text` to `TextTool` while you type into the color picker.
         let widget_focused = ui.memory(|m| m.focused().is_some());
-        if let Some(b) = app.keyboard_owner.filter(|_| !widget_focused) {
+        if let Some(b) = app.keyboard_owner().filter(|_| !widget_focused) {
             let bi = b.ix();
             let events = ui.input(|i| i.events.clone());
             match app.slots[bi].kind {
@@ -478,7 +475,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
                             }
                             egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
                                 // Escape ends the session; only the owner's, never the other slot's.
-                                app.flush_slot(b);
+                                app.end_session(b);
                             }
                             egui::Event::Key { key, pressed: true, .. } => {
                                 if let Some(dir) = arrow_direction(key) {
@@ -504,9 +501,12 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
                                 app.flush_slot(b);
                             }
                             egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
+                                // Bespoke, deliberately non-flushing: Escape-as-abort must be able to
+                                // discard an in-progress move rather than commit it, so this does NOT
+                                // route through `end_session` (which always commits first).
                                 let tctx = tool_ctx(app, b);
                                 app.slots[bi].tool.update(ToolEvent::Cancel, &tctx, &app.doc);
-                                app.keyboard_owner = None;
+                                app.release_keyboard(b);
                             }
                             _ => {}
                         }
@@ -534,16 +534,23 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
 
         // Focus-loss detection: a burst mid-typing or a floating stamp must commit, not vanish, when
         // the OS window loses focus (a no-op for every other tool). Additionally, an in-progress
-        // gesture has no synthetic mouse-up on an OS-level focus loss (e.g. alt-tabbing mid-drag) —
-        // left alone, `gesture`/`space_pan_active` would stay stuck until the next press. Cancel it
-        // outright so the tool and the app both return to a clean idle state; this guards different
-        // state than the flush (session vs. pointer-gesture ownership), so both run on the same edge.
+        // stroke has no synthetic mouse-up on an OS-level focus loss (e.g. alt-tabbing mid-drag) —
+        // left alone, `stroke_owner`/`space_pan_active` would stay stuck until the next press. Cancel
+        // it outright so the tool and the app both return to a clean idle state; this guards
+        // different state than the flush (session vs. pointer-stroke ownership), so both run on the
+        // same edge.
         let focused = ui.input(|i| i.viewport().focused).unwrap_or(true);
         if app.was_focused && !focused {
+            // Flush first — it commits even a mid-stroke session, so the Cancel below only ever
+            // clears pointer-gesture state, never uncommitted work.
             app.flush_all();
-            if let Some(b) = app.gesture.take() {
+            if let Some(b) = app.stroke_owner.take() {
                 let tctx = tool_ctx(app, b);
                 app.slots[b.ix()].tool.update(ToolEvent::Cancel, &tctx, &app.doc);
+                // The Cancel just cleared this binding's residue (caret, marquee); a keyboard
+                // claim pointing at residue-free Text would silently swallow every keystroke on
+                // return, with no caret to explain why.
+                app.release_keyboard(b);
             }
             app.space_pan_active = false;
         }
@@ -558,7 +565,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
     // display — the tool's cursor may sit one column past the right edge after typing a full row.
     // The blink is the only animation needing unprompted repaints, so the wakeup is gated on it.
     let caret = app
-        .keyboard_owner
+        .keyboard_owner()
         .filter(|&b| app.slot(b).kind == ToolKind::Text)
         .and_then(|b| app.slot(b).tool.caret())
         .map(|(x, y)| (x.min(app.doc.width.saturating_sub(1)), y.min(app.doc.height.saturating_sub(1))));
