@@ -60,16 +60,30 @@ fn blend_pixel(img: &mut image::RgbaImage, x: u32, y: u32, color: Rgba) {
     px.0 = composite_over(color, px.0);
 }
 
-/// Rasterizes `doc`'s composited cells at `cell_px` pixels per cell into PNG bytes. Blank cells
-/// (and any cell whose bg is fully transparent) leave the output transparent at that pixel — the
-/// PNG carries no baked-in editor chrome background, only what `composite()` actually produced.
-pub fn export_png(doc: &Document, cell_px: u32) -> Result<Vec<u8>, PngExportAppError> {
+/// Rasterizes `doc`'s composited cells at `cell_px` pixels per cell into a straight-alpha RGBA8
+/// pixel buffer (row-major, `4 * width * height` bytes) plus its `(width, height)`. `opaque_bg`
+/// pre-fills every pixel with that color before compositing cell content over it (`None` keeps the
+/// buffer transparent, so a cell's own transparent bg stays transparent in the result).
+///
+/// The pure pixel-math half of PNG export, split out from encoding so the export dialog's live
+/// preview can upload these bytes straight into an egui texture without a PNG encode/decode round
+/// trip.
+pub fn rasterize_rgba8(
+    doc: &Document,
+    cell_px: u32,
+    opaque_bg: Option<Rgba>,
+) -> Result<(u32, u32, Vec<u8>), PngExportAppError> {
     let (px_w, px_h) = validate_png_dimensions(doc.width, doc.height, cell_px)
         .map_err(PngExportAppError::Dimensions)?;
     let composited = composite(doc);
     let font = fontdue::Font::from_bytes(crate::fonts::CANVAS_FONT_BYTES, fontdue::FontSettings::default())
         .map_err(|e| PngExportAppError::Font(e.to_string()))?;
     let mut img = image::RgbaImage::new(px_w, px_h);
+    if let Some(bg) = opaque_bg {
+        for px in img.pixels_mut() {
+            px.0 = [bg.0, bg.1, bg.2, bg.3];
+        }
+    }
     let ascent = font
         .horizontal_line_metrics(cell_px as f32)
         .map(|m| m.ascent)
@@ -121,6 +135,17 @@ pub fn export_png(doc: &Document, cell_px: u32) -> Result<Vec<u8>, PngExportAppE
         }
     }
 
+    Ok((px_w, px_h, img.into_raw()))
+}
+
+/// Rasterizes `doc`'s composited cells at `cell_px` pixels per cell into PNG bytes. Blank cells
+/// (and any cell whose bg is fully transparent) leave the output transparent at that pixel when
+/// `opaque_bg` is `None` — the PNG carries no baked-in editor chrome background unless the caller
+/// asks for one (the "transparent background" checkbox unchecked, which passes `Some(doc.background)`).
+pub fn export_png(doc: &Document, cell_px: u32, opaque_bg: Option<Rgba>) -> Result<Vec<u8>, PngExportAppError> {
+    let (px_w, px_h, pixels) = rasterize_rgba8(doc, cell_px, opaque_bg)?;
+    let img = image::RgbaImage::from_raw(px_w, px_h, pixels)
+        .expect("rasterize_rgba8 returns a buffer sized exactly px_w * px_h * 4");
     let mut out = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
         .map_err(|e| PngExportAppError::Encode(e.to_string()))?;
@@ -143,7 +168,7 @@ mod tests {
         let mut doc = doc_with(1, 1);
         let fg = Rgba(10, 20, 30, 255);
         doc.set_cell(0, 0, 0, Cell { ch: '█', fg, bg: Rgba::TRANSPARENT });
-        let bytes = export_png(&doc, 32).unwrap();
+        let bytes = export_png(&doc, 32, None).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
         assert!(
             decoded.pixels().any(|p| p.0 == [fg.0, fg.1, fg.2, fg.3]),
@@ -160,7 +185,7 @@ mod tests {
         let mut doc = doc_with(1, 1);
         let bg = Rgba(10, 20, 30, 255);
         doc.set_cell(0, 0, 0, Cell { ch: ' ', fg: Rgba::WHITE, bg });
-        let bytes = export_png(&doc, 16).unwrap();
+        let bytes = export_png(&doc, 16, None).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
         assert_eq!(decoded.get_pixel(0, 0).0, [bg.0, bg.1, bg.2, bg.3]);
     }
@@ -172,7 +197,7 @@ mod tests {
     #[test]
     fn exported_png_dimensions_match_validate_png_dimensions() {
         let doc = doc_with(10, 4);
-        let bytes = export_png(&doc, 16).expect("export must succeed for a small document");
+        let bytes = export_png(&doc, 16, None).expect("export must succeed for a small document");
         let decoded = image::load_from_memory(&bytes).expect("must decode as a valid image");
         let (expected_w, expected_h) = validate_png_dimensions(doc.width, doc.height, 16).unwrap();
         assert_eq!(decoded.width(), expected_w);
@@ -182,15 +207,38 @@ mod tests {
     #[test]
     fn all_blank_document_exports_a_fully_transparent_image_at_the_requested_size() {
         let doc = doc_with(4, 4);
-        let bytes = export_png(&doc, 8).unwrap();
+        let bytes = export_png(&doc, 8, None).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
         assert!(decoded.pixels().all(|p| p.0[3] == 0), "an all-blank document must export fully transparent");
+    }
+
+    /// `opaque_bg` pre-fills every pixel before compositing — a blank document with a non-
+    /// transparent `opaque_bg` must export fully opaque at that exact color (the "Transparent
+    /// background" checkbox unchecked path), not the fully-transparent result `None` produces.
+    #[test]
+    fn opaque_bg_pre_fills_a_blank_document_instead_of_leaving_it_transparent() {
+        let doc = doc_with(3, 3);
+        let bg = Rgba(10, 20, 30, 255);
+        let bytes = export_png(&doc, 8, Some(bg)).unwrap();
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        assert!(decoded.pixels().all(|p| p.0 == [bg.0, bg.1, bg.2, bg.3]));
+    }
+
+    /// `rasterize_rgba8`'s dimensions and pixel count must agree with `validate_png_dimensions` and
+    /// its own declared buffer length — the export dialog's preview builds an `egui::ColorImage`
+    /// straight from these bytes with no further validation.
+    #[test]
+    fn rasterize_rgba8_returns_a_buffer_sized_exactly_width_times_height_times_4() {
+        let doc = doc_with(5, 3);
+        let (w, h, pixels) = rasterize_rgba8(&doc, 4, None).unwrap();
+        assert_eq!((w, h), (20, 12));
+        assert_eq!(pixels.len(), (w * h * 4) as usize);
     }
 
     #[test]
     fn oversized_request_surfaces_the_dimension_error_without_allocating() {
         let doc = doc_with(1024, 1024);
-        let err = export_png(&doc, 1000).unwrap_err();
+        let err = export_png(&doc, 1000, None).unwrap_err();
         assert!(matches!(err, PngExportAppError::Dimensions(_)));
     }
 
@@ -198,7 +246,7 @@ mod tests {
     fn a_painted_cell_produces_a_visibly_non_transparent_region() {
         let mut doc = doc_with(1, 1);
         doc.set_cell(0, 0, 0, Cell { ch: '#', fg: Rgba(255, 255, 255, 255), bg: Rgba::TRANSPARENT });
-        let bytes = export_png(&doc, 16).unwrap();
+        let bytes = export_png(&doc, 16, None).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
         assert!(decoded.pixels().any(|p| p.0[3] > 0), "a drawn glyph must rasterize to at least one visible pixel");
     }
@@ -207,7 +255,7 @@ mod tests {
     fn opaque_background_fills_the_entire_cell() {
         let mut doc = doc_with(1, 1);
         doc.set_cell(0, 0, 0, Cell { ch: ' ', fg: Rgba::WHITE, bg: Rgba(10, 20, 30, 255) });
-        let bytes = export_png(&doc, 8).unwrap();
+        let bytes = export_png(&doc, 8, None).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
         assert!(decoded.pixels().all(|p| p.0 == [10, 20, 30, 255]));
     }
@@ -254,5 +302,48 @@ mod tests {
         // rather than producing NaN/panic, and return a fully transparent pixel.
         let result = composite_over(Rgba(0, 0, 0, 0), [0, 0, 0, 0]);
         assert_eq!(result, [0, 0, 0, 0]);
+    }
+
+    /// Cross-feature: a document's own custom `background`, carried through a real (anchored, not
+    /// just top-left) `resize_document` grow, must show up exactly at the newly created cells when
+    /// exported opaque — those cells are `Cell::BLANK` (transparent) after the resize, not a
+    /// literal copy of `doc.background`, so this pins that the app's own `opaque_bg` convention
+    /// (`(!transparent).then_some(doc.background)`, the exact expression `run_export` and
+    /// `refresh_export_preview` both use) is what makes "new cells fill with background" true at
+    /// the pixel level, not just at the cell-storage level. The "Transparent background" checkbox
+    /// checked (`None`) must leave that same newly grown region genuinely transparent instead.
+    #[test]
+    fn a_custom_background_grown_into_by_an_anchored_resize_fills_the_new_cells_when_exported_opaque() {
+        use gascii_core::{AxisAnchor, ResizeAnchor};
+
+        let mut doc = doc_with(2, 2);
+        doc.background = Rgba(30, 60, 90, 255);
+        doc.set_cell(0, 0, 0, Cell { ch: 'a', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(0, 1, 1, Cell { ch: 'z', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+
+        // Center/Center grow to 6x6: old content lands at (2,2)-(3,3); every other cell is a
+        // newly created Blank cell this resize introduced.
+        let anchor = ResizeAnchor { h: AxisAnchor::Center, v: AxisAnchor::Center };
+        let edit = gascii_core::resize_document(&doc, 6, 6, anchor).unwrap().unwrap();
+        let mut history = gascii_core::History::new();
+        history.apply(&mut doc, edit);
+        assert_eq!(doc.cell(0, 0, 0), Some(&Cell::BLANK), "sanity: (0,0) is a newly created cell, not old content");
+
+        // Opaque export ("Transparent background" unchecked): the app's own convention.
+        let opaque_bg = Some(doc.background);
+        let opaque_bytes = export_png(&doc, 8, opaque_bg).unwrap();
+        let opaque = image::load_from_memory(&opaque_bytes).unwrap().to_rgba8();
+        let (px, py) = (2, 2); // inside the (0,0) cell's 8x8 pixel block
+        assert_eq!(
+            opaque.get_pixel(px, py).0,
+            [30, 60, 90, 255],
+            "a newly-grown Blank cell must render as the document's own background when exported opaque"
+        );
+
+        // Transparent export ("Transparent background" checked): the same newly-grown region must
+        // stay genuinely transparent, not silently pick up the background anyway.
+        let transparent_bytes = export_png(&doc, 8, None).unwrap();
+        let transparent = image::load_from_memory(&transparent_bytes).unwrap().to_rgba8();
+        assert_eq!(transparent.get_pixel(px, py).0[3], 0, "the same cell must be transparent when opaque_bg is None");
     }
 }

@@ -62,8 +62,15 @@ pub fn mask_apply(before: Cell, proposed: Cell, mask: PlaneMask) -> Cell {
 /// Footprint shape of a sized stroke: the cells one stamp covers around its center.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum BrushShape {
+    /// The true cell grid footprint: `size` × `size` cells, no aspect correction. The default —
+    /// unlike `Square`/`Circle`, it never widens to compensate for the cell's roughly 2:1
+    /// height:width aspect, so at size 1 it is identical to the other two.
     #[default]
+    Raw,
+    /// Aspect-corrected: `size` rows by `size * WIDTH_RATIO` columns, so it reads square against
+    /// the cell grid.
     Square,
+    /// Aspect-corrected ellipse inscribed in the same box `Square` would occupy.
     Circle,
 }
 
@@ -77,18 +84,24 @@ pub const MAX_TOOL_SIZE: u16 = 16;
 pub const WIDTH_RATIO: i32 = 2;
 
 /// Cells covered by one `size`-tall stamp centered on `center`, written into the caller-provided
-/// `out` (cleared first). `size` sets the vertical extent in rows; the horizontal extent is
-/// `WIDTH_RATIO`× wider so the footprint reads as intended against the cell aspect ratio. A stamp
-/// spans a `(size * WIDTH_RATIO)`×`size` box around the center (an even extent biases right/down,
-/// since a cell grid has no true center cell for it); `Circle` keeps only cells within the inscribed
-/// ellipse, shrunk a touch so it sheds its bounding box's corners. Size 1 is a single center cell
-/// for both shapes — a lone cell has no aspect, and this keeps the sized tools' finest stamp one
-/// cell. Cells that would fall off the u16 grid are dropped here; document-bounds clipping stays the
-/// caller's job.
+/// `out` (cleared first). `size` sets the vertical extent in rows; for `Square`/`Circle` the
+/// horizontal extent is `WIDTH_RATIO`× wider so the footprint reads as intended against the cell
+/// aspect ratio, while `Raw` spans exactly `size` columns too — the true cell-grid box, uncorrected.
+/// An aspect-corrected stamp spans a `(size * WIDTH_RATIO)`×`size` box around the center (an even
+/// extent biases right/down, since a cell grid has no true center cell for it; `Raw`'s uncorrected
+/// `size`×`size` box biases the same way for the same reason); `Circle` keeps only cells within the
+/// inscribed ellipse, shrunk a touch so it sheds its bounding box's corners. Size 1 is a single
+/// center cell for every shape — a lone cell has no aspect, and this keeps the sized tools' finest
+/// stamp one cell. Cells that would fall off the u16 grid are dropped here; document-bounds clipping
+/// stays the caller's job.
 pub fn footprint(center: (u16, u16), size: u16, shape: BrushShape, out: &mut Vec<(u16, u16)>) {
     out.clear();
     let size = size.clamp(1, MAX_TOOL_SIZE) as i32;
-    let wsize = if size == 1 { 1 } else { size * WIDTH_RATIO };
+    let wsize = match shape {
+        BrushShape::Raw => size,
+        _ if size == 1 => 1,
+        _ => size * WIDTH_RATIO,
+    };
     let (vlo, vhi) = (-((size - 1) / 2), size / 2);
     let (hlo, hhi) = (-((wsize - 1) / 2), wsize / 2);
     let (cy, cx) = ((vlo + vhi) as f32 / 2.0, (hlo + hhi) as f32 / 2.0);
@@ -687,12 +700,30 @@ mod tests {
     // --- footprint ---
 
     #[test]
-    fn footprint_size_1_is_the_center_cell_for_both_shapes() {
+    fn footprint_size_1_is_the_center_cell_for_every_shape() {
         let mut out = Vec::new();
-        for shape in [BrushShape::Square, BrushShape::Circle] {
+        for shape in [BrushShape::Raw, BrushShape::Square, BrushShape::Circle] {
             footprint((5, 5), 1, shape, &mut out);
             assert_eq!(out, vec![(5, 5)]);
         }
+    }
+
+    #[test]
+    fn footprint_raw_is_size_by_size_with_no_width_expansion() {
+        // Size 3 -> exactly a 3x3 box, unlike Square's 3x6.
+        let mut out = Vec::new();
+        footprint((5, 5), 3, BrushShape::Raw, &mut out);
+        assert_eq!(out.len(), 9);
+        for x in 4..=6u16 {
+            for y in 4..=6u16 {
+                assert!(out.contains(&(x, y)), "expected ({x},{y}) in the 3x3 box");
+            }
+        }
+    }
+
+    #[test]
+    fn default_brush_shape_is_raw() {
+        assert_eq!(BrushShape::default(), BrushShape::Raw);
     }
 
     #[test]

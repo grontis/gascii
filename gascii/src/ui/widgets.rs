@@ -17,21 +17,21 @@ use crate::app::ToolKind;
 use crate::fonts;
 
 /// Toolbox cell height; icons are 17px inside it.
-pub const TOOL_CELL: f32 = 42.0;
+pub const TOOL_CELL: f32 = 44.0;
 const ICON: f32 = 17.0;
 /// Palette glyph swatch.
-pub const SWATCH: f32 = 26.0;
+pub const SWATCH: f32 = 28.0;
 /// FG/BG colour wells.
-const WELL: f32 = 24.0;
+const WELL: f32 = 26.0;
 /// How far the FG well overlaps the BG well.
 const WELL_OVERLAP: f32 = 4.0;
-const CHECKBOX: f32 = 12.0;
-const STEPPER_H: f32 = 24.0;
-const STEPPER_BTN_W: f32 = 22.0;
-const STEPPER_VALUE_W: f32 = 30.0;
+const CHECKBOX: f32 = 14.0;
+const STEPPER_H: f32 = 26.0;
+const STEPPER_BTN_W: f32 = 24.0;
+const STEPPER_VALUE_W: f32 = 34.0;
 const SEG_PAD: Vec2 = Vec2::new(11.0, 5.0);
-/// The mono `L`/`R` corner badges — the only text drawn below 10px.
-const BADGE_PX: f32 = 8.0;
+/// The mono `L`/`R` corner badges — the only text drawn below `fonts::size::CAPTION`.
+const BADGE_PX: f32 = fonts::size::BADGE;
 
 fn tokens(ui: &Ui) -> Tokens {
     theme::current(ui.ctx())
@@ -60,12 +60,13 @@ fn hard_shadow(painter: &Painter, rect: Rect, offset: f32, color: Color32) {
 fn cell(painter: &Painter, rect: Rect, t: &Tokens, selected: bool, hovered: bool) -> Color32 {
     let (fill, fg) = if selected {
         (t.bg_inverse, t.fg_inverse)
+    } else if hovered {
+        (t.bg_hover, t.fg_text)
     } else {
         (Color32::TRANSPARENT, t.fg_text)
     };
     painter.rect_filled(rect, 0.0, fill);
     if !selected && hovered {
-        // Hover darkens the border rather than filling — a fill would read as selection.
         border(painter, rect, t.border_strong);
     }
     fg
@@ -84,7 +85,7 @@ pub fn segmented<T: PartialEq + Copy>(
 ) -> bool {
     let t = tokens(ui);
     let edge = if soft { t.border_soft } else { t.border_strong };
-    let font = fonts::ui_medium_id(12.0);
+    let font = fonts::ui_medium_id(fonts::size::CONTROL);
 
     let sizes: Vec<Vec2> = options.iter().map(|(_, label)| measure(ui, label, &font)).collect();
     let widths: Vec<f32> = sizes.iter().map(|s| s.x + SEG_PAD.x * 2.0).collect();
@@ -137,7 +138,7 @@ pub fn stepper(ui: &mut Ui, value: &mut u16, min: u16, max: u16) -> bool {
     for (r, label, delta) in [(minus, "–", -1i32), (plus, "+", 1)] {
         let resp = ui.interact(r, group.id.with(label), Sense::click());
         let fg = cell(&painter, r, &t, false, resp.hovered());
-        painter.text(r.center(), Align2::CENTER_CENTER, label, fonts::ui_medium_id(12.0), fg);
+        painter.text(r.center(), Align2::CENTER_CENTER, label, fonts::ui_medium_id(fonts::size::CONTROL), fg);
         if resp.clicked() {
             *value = (*value as i32 + delta).clamp(min as i32, max as i32) as u16;
         }
@@ -148,7 +149,7 @@ pub fn stepper(ui: &mut Ui, value: &mut u16, min: u16, max: u16) -> bool {
         val.center(),
         Align2::CENTER_CENTER,
         value.to_string(),
-        fonts::mono_id(12.0),
+        fonts::mono_id(fonts::size::CONTROL),
         t.fg_text,
     );
     if val_resp.hovered() {
@@ -179,10 +180,11 @@ pub fn stepper(ui: &mut Ui, value: &mut u16, min: u16, max: u16) -> bool {
     *value != before
 }
 
-/// A 12px square checkbox; checked inverts and shows a tick.
+/// A 14px square checkbox; checked inverts and shows a tick, unchecked-and-hovered gets the hover
+/// wash.
 pub fn checkbox(ui: &mut Ui, checked: &mut bool, label: &str) -> bool {
     let t = tokens(ui);
-    let font = fonts::ui_medium_id(12.0);
+    let font = fonts::ui_medium_id(fonts::size::CONTROL);
     let text = measure(ui, label, &font);
     let size = Vec2::new(CHECKBOX + 5.0 + text.x, CHECKBOX.max(text.y));
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
@@ -192,12 +194,17 @@ pub fn checkbox(ui: &mut Ui, checked: &mut bool, label: &str) -> bool {
         Pos2::new(rect.min.x, rect.center().y - CHECKBOX / 2.0),
         Vec2::splat(CHECKBOX),
     );
-    painter.rect_filled(box_rect, 0.0, if *checked { t.bg_inverse } else { Color32::TRANSPARENT });
-    // Always a strong border, hovered or not — at 12px there is no room for a hover treatment that
-    // reads as anything but noise.
+    let fill = if *checked {
+        t.bg_inverse
+    } else if resp.hovered() {
+        t.bg_hover
+    } else {
+        Color32::TRANSPARENT
+    };
+    painter.rect_filled(box_rect, 0.0, fill);
     border(&painter, box_rect, t.border_strong);
     if *checked {
-        painter.text(box_rect.center(), Align2::CENTER_CENTER, "✓", fonts::mono_id(9.0), t.fg_inverse);
+        painter.text(box_rect.center(), Align2::CENTER_CENTER, "✓", fonts::mono_id(fonts::size::CAPTION), t.fg_inverse);
     }
     painter.text(
         Pos2::new(box_rect.max.x + 5.0, rect.center().y),
@@ -237,9 +244,12 @@ pub fn tool_cell(ui: &mut Ui, kind: ToolKind, bound: Bound, size: Vec2) -> Respo
         painter.rect_filled(rect, 0.0, t.bg_inverse);
         t.fg_inverse
     } else {
-        // Idle sits on the panel; hover gets a soft fill — the one control where a hover fill is
-        // used, since a border would fight the grid's own lines.
-        painter.rect_filled(rect, 0.0, if resp.hovered() { t.border_soft } else { t.bg_panel });
+        // Idle sits on the panel; hover adds the shared wash on top of it — a border alone would
+        // fight the grid's own lines.
+        painter.rect_filled(rect, 0.0, t.bg_panel);
+        if resp.hovered() {
+            painter.rect_filled(rect, 0.0, t.bg_hover);
+        }
         t.fg_text
     };
 
@@ -264,13 +274,21 @@ pub fn tool_cell(ui: &mut Ui, kind: ToolKind, bound: Bound, size: Vec2) -> Respo
     resp
 }
 
-/// A 26px palette glyph swatch. Idle has a soft border, hover a strong one, selected inverts.
+/// A 28px palette glyph swatch. Idle has a soft border; hover gains the shared wash plus a strong
+/// border; selected inverts.
 pub fn glyph_swatch(ui: &mut Ui, ch: char, selected: bool) -> Response {
     let t = tokens(ui);
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(SWATCH), Sense::click());
     let painter = ui.painter().clone();
 
-    painter.rect_filled(rect, 0.0, if selected { t.bg_inverse } else { Color32::TRANSPARENT });
+    let fill = if selected {
+        t.bg_inverse
+    } else if resp.hovered() {
+        t.bg_hover
+    } else {
+        Color32::TRANSPARENT
+    };
+    painter.rect_filled(rect, 0.0, fill);
     let edge = if selected {
         t.bg_inverse
     } else if resp.hovered() {
@@ -285,7 +303,7 @@ pub fn glyph_swatch(ui: &mut Ui, ch: char, selected: bool) -> Response {
         rect.center(),
         Align2::CENTER_CENTER,
         ch,
-        fonts::canvas_font_id(13.0),
+        fonts::canvas_font_id(fonts::size::GLYPH),
         if selected { t.fg_inverse } else { t.fg_text },
     );
     resp
@@ -325,7 +343,7 @@ pub fn color_wells(ui: &mut Ui, fg: Color32, bg: Color32) -> WellsResponse {
 /// it to the row's trailing edge.
 pub fn swap_button(ui: &mut Ui) -> bool {
     let t = tokens(ui);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
     let painter = ui.painter().clone();
     let fg = cell(&painter, rect, &t, false, resp.hovered());
     if !resp.hovered() {
@@ -333,18 +351,15 @@ pub fn swap_button(ui: &mut Ui) -> bool {
     }
     // `⇄` exists in neither Instrument Sans nor Fragment Mono; the Iosevka backstop on the tail of
     // the chrome font chains is what resolves it.
-    painter.text(rect.center(), Align2::CENTER_CENTER, "⇄", fonts::mono_id(12.0), fg);
+    painter.text(rect.center(), Align2::CENTER_CENTER, "⇄", fonts::mono_id(fonts::size::CONTROL), fg);
     resp.on_hover_text("Swap FG/BG (X)").clicked()
 }
 
-/// A button: 1px border, transparent fill. `primary` inverts and gains a 2px hard offset shadow.
-///
-/// No callers yet — dialogs are the consumers, and none is custom-painted so far. Part of the
-/// control kit regardless: the shape is settled and belongs with its siblings.
-#[allow(dead_code)]
+/// A button: 1px border, transparent fill (hover washes it, same as every other control). `primary`
+/// inverts and gains a 2px hard offset shadow.
 pub fn button(ui: &mut Ui, label: &str, primary: bool) -> Response {
     let t = tokens(ui);
-    let font = fonts::ui_medium_id(12.0);
+    let font = fonts::ui_medium_id(fonts::size::CONTROL);
     let text = measure(ui, label, &font);
     // 6px vertical, 16px horizontal padding.
     let size = Vec2::new(text.x + 32.0, text.y + 12.0);
@@ -364,9 +379,9 @@ pub fn button(ui: &mut Ui, label: &str, primary: bool) -> Response {
 /// border the cluster uses so it sits back against the panel.
 pub fn mini_button(ui: &mut Ui, label: &str, soft: bool) -> bool {
     let t = tokens(ui);
-    let font = fonts::mono_id(11.0);
+    let font = fonts::mono_id(fonts::size::LABEL);
     let text = measure(ui, label, &font);
-    let size = Vec2::new(text.x + 16.0, 18.0);
+    let size = Vec2::new(text.x + 16.0, 20.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter().clone();
     let fg = cell(&painter, rect, &t, false, resp.hovered());
@@ -386,12 +401,12 @@ pub fn pinstripe(painter: &Painter, rect: Rect, color: Color32) {
     }
 }
 
-/// A section micro-label: mono 10px, uppercase, letter-spaced — `RECENT`, `WRITE`.
+/// A section micro-label: mono, uppercase, letter-spaced — `RECENT`, `WRITE`.
 pub fn micro_label(ui: &mut Ui, text: &str) {
     let t = tokens(ui);
     // egui has no letter-spacing, so it is faked by interleaving thin spaces.
     let spaced: String = text.chars().flat_map(|c| [c, '\u{2009}']).collect();
     ui.label(
-        egui::RichText::new(spaced).font(fonts::mono_id(10.0)).color(t.fg_secondary),
+        egui::RichText::new(spaced).font(fonts::mono_id(fonts::size::MICRO)).color(t.fg_secondary),
     );
 }

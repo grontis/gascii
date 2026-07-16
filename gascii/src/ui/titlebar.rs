@@ -15,9 +15,9 @@ use super::widgets;
 use crate::app::GasciiApp;
 use crate::fonts;
 
-pub const HEIGHT: f32 = 30.0;
+pub const HEIGHT: f32 = 32.0;
 /// Caption box side.
-const BOX: f32 = 14.0;
+const BOX: f32 = 16.0;
 /// How far in from the window edge still counts as a resize grip.
 const RESIZE_GRIP: f32 = 5.0;
 /// Pinstripe band height.
@@ -38,7 +38,7 @@ pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
     }
 
     let title = app.window_title();
-    let font = fonts::ui_semibold_id(13.0);
+    let font = fonts::ui_semibold_id(fonts::size::BODY);
     let text_w = ui
         .painter()
         .layout_no_wrap(title.clone(), font.clone(), t.fg_text)
@@ -75,11 +75,19 @@ pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
     for (label, action) in [("×", Caption::Close), ("□", Caption::Max), ("–", Caption::Min)] {
         let r = Rect::from_min_size(Pos2::new(x, bar.center().y - BOX / 2.0), Vec2::splat(BOX));
         let resp = ui.interact(r, ui.id().with(label), Sense::click());
-        let fill = if resp.hovered() { t.bg_inverse } else { egui::Color32::TRANSPARENT };
-        let fg = if resp.hovered() { t.fg_inverse } else { t.fg_text };
+        // Pressed inverts (the shared selection rule); hover otherwise gets the ordinary wash, not
+        // full inversion — a caption box is not itself a toggled state.
+        let pressed = resp.is_pointer_button_down_on();
+        let (fill, fg) = if pressed {
+            (t.bg_inverse, t.fg_inverse)
+        } else if resp.hovered() {
+            (t.bg_hover, t.fg_text)
+        } else {
+            (egui::Color32::TRANSPARENT, t.fg_text)
+        };
         painter.rect_filled(r, 0.0, fill);
         painter.rect_stroke(r, 0.0, Stroke::new(1.0, t.border_strong), StrokeKind::Inside);
-        painter.text(r.center(), Align2::CENTER_CENTER, label, fonts::mono_id(9.0), fg);
+        painter.text(r.center(), Align2::CENTER_CENTER, label, fonts::mono_id(fonts::size::CAPTION), fg);
         if resp.clicked() {
             match action {
                 // Routed through the ordinary close request, so the unsaved-changes veto still runs.

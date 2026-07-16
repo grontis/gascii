@@ -4,6 +4,7 @@
 //! widgets — see [`widgets`] — so [`theme::Tokens`] is read directly far more often than
 //! `Visuals` is.
 
+pub mod dialog;
 pub mod icons;
 pub mod options_bar;
 pub mod sidebar;

@@ -93,11 +93,23 @@ pub struct DocExtent {
     pub height: u16,
 }
 
+/// A document's own opaque black — the default background for a document that predates this
+/// field, and the New dialog's starting well value.
+fn default_background() -> Rgba {
+    Rgba(0, 0, 0, 255)
+}
+
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Document {
     pub width: u16,
     pub height: u16,
     pub layers: Vec<Layer>,
+    /// The document's own background, set once at creation (New dialog only — not an editable
+    /// property afterward, so it never appears as an `Edit` variant or touches history). Additive:
+    /// `#[serde(default)]` so a pre-existing `.gascii` file without this field loads as opaque
+    /// black, matching the app's prior hardcoded canvas surface.
+    #[serde(default = "default_background")]
+    pub background: Rgba,
 }
 impl Document {
     pub const DEFAULT_WIDTH: u16 = 80;
@@ -120,6 +132,7 @@ impl Document {
             width,
             height,
             layers: vec![Layer::blank(width, height)],
+            background: default_background(),
         }
     }
     /// Default new document: 80×25.

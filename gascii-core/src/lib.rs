@@ -16,7 +16,7 @@ pub use brush::{
 };
 pub use clipboard::CellPatch;
 pub use edit::{CellEdit, DocSnapshot, Edit, History};
-pub use resize::{resize_document, ResizeError};
+pub use resize::{resize_document, AxisAnchor, ResizeAnchor, ResizeError};
 pub use io::export_png::{validate_png_dimensions, PngExportError, MAX_PNG_PIXELS};
 pub use io::export_text::export_text;
 pub use io::gascii_json::{load_str, save_string, LoadError, CURRENT_VERSION};

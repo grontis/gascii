@@ -6,9 +6,15 @@
 
 use gascii_core::{
     builtin_ramps, load_str, resize_document, save_string, BrushShape, Buildup, Cell, CellPatch, DensityBrush,
-    DensityMode, Document, Edit, Fixed, History, Pencil, PlaneMask, ResizeError, Rgba,
+    DensityMode, Document, Edit, Fixed, History, Pencil, PlaneMask, ResizeAnchor, ResizeError, Rgba,
     SelectionTool, TextTool, Tool, ToolCtx, ToolEvent, ToolResponse,
 };
+
+/// Every integration test here exercises the resize *pipeline*, not the anchor math itself (that's
+/// `resize.rs`'s own unit-test matrix) — so they all resize top-left anchored.
+fn start() -> ResizeAnchor {
+    ResizeAnchor::default()
+}
 
 fn ctx(density: DensityMode, ramp: &str, mask: PlaneMask, glyph: char, fg: Rgba, bg: Rgba) -> ToolCtx {
     ToolCtx { layer: 0, glyph, fg, bg, mask, density, ramp: ramp.chars().collect(), size: 1, shape: BrushShape::Square }
@@ -58,7 +64,7 @@ fn resize_after_flushing_a_pending_text_burst_bakes_the_burst_in_before_growing_
     assert_eq!(doc.cell(0, 0, 0).unwrap().ch, 'H');
     assert_eq!(doc.cell(0, 1, 0).unwrap().ch, 'i');
 
-    let edit = resize_document(&doc, 10, 10).unwrap().unwrap();
+    let edit = resize_document(&doc, 10, 10, start()).unwrap().unwrap();
     history.apply(&mut doc, edit);
     assert_eq!(doc.width, 10);
     assert_eq!(doc.height, 10);
@@ -94,7 +100,7 @@ fn resize_after_flushing_a_floating_selection_drop_operates_on_the_post_drop_doc
     assert_eq!(doc.cell(0, 3, 3), Some(&content));
     assert_eq!(doc.cell(0, 5, 5), Some(&content));
 
-    let edit = resize_document(&doc, 6, 6).unwrap().unwrap();
+    let edit = resize_document(&doc, 6, 6, start()).unwrap().unwrap();
     history.apply(&mut doc, edit);
     assert_eq!((doc.width, doc.height), (6, 6));
     // If resize had operated on a stale pre-drop snapshot, (2,2) would be 'Q' again here instead
@@ -116,7 +122,7 @@ fn resize_then_save_then_load_round_trip_preserves_the_new_extent_and_content() 
 
     // Mixed grow (height) and shrink (width) in one resize, same as `resize.rs`'s own unit test,
     // but here carried all the way through a save/load round trip.
-    let edit = resize_document(&doc, 3, 8).unwrap().unwrap();
+    let edit = resize_document(&doc, 3, 8, start()).unwrap().unwrap();
     history.apply(&mut doc, edit);
     assert_eq!((doc.width, doc.height), (3, 8));
 
@@ -134,7 +140,7 @@ fn resize_then_undo_then_redo_then_save_round_trips_the_redone_post_resize_state
     doc.set_cell(0, 1, 1, cell('m'));
     let mut history = History::new();
 
-    let edit = resize_document(&doc, 9, 9).unwrap().unwrap();
+    let edit = resize_document(&doc, 9, 9, start()).unwrap().unwrap();
     history.apply(&mut doc, edit);
     let after_grow = doc.clone();
 
@@ -156,7 +162,7 @@ fn resize_one_past_the_cap_is_cleanly_rejected_while_exactly_at_the_cap_applies_
     let mut history = History::new();
 
     assert_eq!(
-        resize_document(&doc, Document::MAX_WIDTH + 1, Document::MAX_HEIGHT),
+        resize_document(&doc, Document::MAX_WIDTH + 1, Document::MAX_HEIGHT, start()),
         Err(ResizeError::TooLarge {
             width: Document::MAX_WIDTH + 1,
             height: Document::MAX_HEIGHT,
@@ -166,7 +172,7 @@ fn resize_one_past_the_cap_is_cleanly_rejected_while_exactly_at_the_cap_applies_
     );
     assert!(!history.can_undo(), "a rejected resize request must never reach History");
 
-    let edit = resize_document(&doc, Document::MAX_WIDTH, Document::MAX_HEIGHT).unwrap().unwrap();
+    let edit = resize_document(&doc, Document::MAX_WIDTH, Document::MAX_HEIGHT, start()).unwrap().unwrap();
     history.apply(&mut doc, edit);
     assert_eq!((doc.width, doc.height), (Document::MAX_WIDTH, Document::MAX_HEIGHT));
     assert!(history.can_undo());
@@ -189,12 +195,12 @@ fn shrinking_to_1x1_then_growing_back_preserves_only_the_top_left_anchor_cell_no
     let original = doc.clone();
     let mut history = History::new();
 
-    let shrink = resize_document(&doc, 1, 1).unwrap().unwrap();
+    let shrink = resize_document(&doc, 1, 1, start()).unwrap().unwrap();
     history.apply(&mut doc, shrink);
     assert_eq!((doc.width, doc.height), (1, 1));
     assert_eq!(doc.cell(0, 0, 0), Some(&cell('a')));
 
-    let grow = resize_document(&doc, 5, 5).unwrap().unwrap();
+    let grow = resize_document(&doc, 5, 5, start()).unwrap().unwrap();
     history.apply(&mut doc, grow);
     assert_eq!((doc.width, doc.height), (5, 5));
     assert_eq!(doc.cell(0, 0, 0), Some(&cell('a')), "the top-left anchor cell survives both operations");
@@ -220,7 +226,7 @@ fn a_same_size_resize_attempt_mid_session_produces_no_history_entry_and_a_single
     stroke(&mut pencil, &mut history, &mut doc, &tctx, &[(0, 0)]);
     let after_pencil = doc.clone();
 
-    assert_eq!(resize_document(&doc, 6, 6).unwrap(), None, "same-size resize is a no-op with no Edit produced");
+    assert_eq!(resize_document(&doc, 6, 6, start()).unwrap(), None, "same-size resize is a no-op with no Edit produced");
     assert_eq!(doc, after_pencil, "a same-size resize attempt (never applied, since there was no Edit) must not alter the document");
 
     assert!(history.undo(&mut doc));
@@ -367,7 +373,7 @@ fn one_action_one_undo_entry_across_pencil_brush_and_resize_interleaved_walks_un
     snapshots.push(doc.clone());
 
     // 3. Resize grow (Edit::Resize).
-    let edit = resize_document(&doc, 10, 10).unwrap().unwrap();
+    let edit = resize_document(&doc, 10, 10, start()).unwrap().unwrap();
     history.apply(&mut doc, edit);
     snapshots.push(doc.clone());
 
@@ -377,7 +383,7 @@ fn one_action_one_undo_entry_across_pencil_brush_and_resize_interleaved_walks_un
     snapshots.push(doc.clone());
 
     // 5. Resize shrink back down (Edit::Resize), clipping away the just-drawn (8,8)/(9,9) cells.
-    let edit = resize_document(&doc, 7, 7).unwrap().unwrap();
+    let edit = resize_document(&doc, 7, 7, start()).unwrap().unwrap();
     history.apply(&mut doc, edit);
     snapshots.push(doc.clone());
 
@@ -415,7 +421,7 @@ fn paste_after_a_resize_still_clips_correctly_against_the_new_post_resize_bounds
     // correctly with the new post-resize extent, not some stale cached one.
     let mut doc = Document::new(10, 10);
     let mut history = History::new();
-    let edit = resize_document(&doc, 4, 4).unwrap().unwrap();
+    let edit = resize_document(&doc, 4, 4, start()).unwrap().unwrap();
     history.apply(&mut doc, edit);
 
     let tctx = fixed_ctx(PlaneMask::ALL, '#', Rgba::WHITE, Rgba::TRANSPARENT);

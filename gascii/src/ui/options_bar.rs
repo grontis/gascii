@@ -8,7 +8,7 @@ use crate::app::{sized_slot, Binding, GasciiApp, ToolKind};
 use crate::fonts;
 use gascii_core::{BrushShape, Buildup, DensityMode, Fixed, MAX_TOOL_SIZE};
 
-pub const HEIGHT: f32 = 40.0;
+pub const HEIGHT: f32 = 44.0;
 
 /// The mono hint at the bar's trailing edge. One line per tool, describing what the *other* inputs
 /// do — the things not already visible as controls.
@@ -54,7 +54,7 @@ pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
         // Trailing hint, right-aligned.
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
-                egui::RichText::new(hint(kind)).font(fonts::mono_id(11.0)).color(t.fg_secondary),
+                egui::RichText::new(hint(kind)).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary),
             );
         });
     });
@@ -68,7 +68,7 @@ fn divider(ui: &mut Ui) {
 
 fn label(ui: &mut Ui, text: &str) {
     let t = theme::current(ui.ctx());
-    ui.label(egui::RichText::new(text).font(fonts::ui_medium_id(12.0)).color(t.fg_secondary));
+    ui.label(egui::RichText::new(text).font(fonts::ui_medium_id(fonts::size::CONTROL)).color(t.fg_secondary));
 }
 
 /// The options for one binding's tool. Only the focused binding's show — that is what "contextual"
@@ -84,7 +84,11 @@ fn tool_options(ui: &mut Ui, app: &mut GasciiApp, b: Binding, kind: ToolKind) {
 
         label(ui, "Shape");
         let mut shape = app.slots[b.ix()].stamps[slot].shape;
-        let shapes = [(BrushShape::Square, "Square"), (BrushShape::Circle, "Circle")];
+        let shapes = [
+            (BrushShape::Raw, "Raw"),
+            (BrushShape::Square, "Square"),
+            (BrushShape::Circle, "Circle"),
+        ];
         if widgets::segmented(ui, &mut shape, &shapes, false) {
             app.slots[b.ix()].stamps[slot].shape = shape;
         }
@@ -123,7 +127,7 @@ fn brush_options(ui: &mut Ui, app: &mut GasciiApp) {
             DensityMode::Buildup(_) => 1.0,
         };
         ui.add_space(6.0);
-        // Narrow: the bar is 40px tall and already carries Size, Shape and Ramp.
+        // Narrow: the bar already carries Size, Shape and Ramp.
         let slider = ui.add_sized(
             Vec2::new(80.0, 20.0),
             egui::Slider::new(&mut level, 0.0..=1.0).show_value(false),
@@ -134,7 +138,7 @@ fn brush_options(ui: &mut Ui, app: &mut GasciiApp) {
         let t = theme::current(ui.ctx());
         ui.label(
             egui::RichText::new(format!("{:.0}%", level * 100.0))
-                .font(fonts::mono_id(11.0))
+                .font(fonts::mono_id(fonts::size::LABEL))
                 .color(t.fg_secondary),
         );
     }

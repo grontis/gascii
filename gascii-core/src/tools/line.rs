@@ -123,7 +123,7 @@ mod tests {
             density: crate::brush::DensityMode::Fixed(crate::brush::Fixed(1.0)),
             ramp: Vec::new(),
             size: 1,
-            shape: crate::tools::BrushShape::Square,
+            shape: crate::tools::BrushShape::default(),
         }
     }
 
@@ -212,6 +212,7 @@ mod tests {
         }
         let mut tctx = ctx(PlaneMask::ALL, '#');
         tctx.size = 3;
+        tctx.shape = crate::tools::BrushShape::Square;
         let mut line = drag(&doc, &tctx, (2, 3), (8, 3));
         let resp = line.update(ToolEvent::Release, &tctx, &doc);
         let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {

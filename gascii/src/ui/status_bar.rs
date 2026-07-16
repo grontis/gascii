@@ -1,4 +1,4 @@
-//! The 28px status bar: `cell 12,4 · sel 13×2 · [− 200% + Fit] · doc 80×25`. All mono 11px.
+//! The 30px status bar: `cell 12,4 · sel 13×2 · [− 200% + Fit] · doc 80×25`. All mono, `size::LABEL`.
 
 use eframe::egui::{self, Ui};
 
@@ -6,14 +6,13 @@ use super::theme;
 use super::widgets;
 use crate::app::GasciiApp;
 use crate::fonts;
-use crate::viewport::ZOOM_SCALES;
 
-pub const HEIGHT: f32 = 28.0;
+pub const HEIGHT: f32 = 30.0;
 
 fn mono(ui: &mut Ui, text: String, secondary: bool) {
     let t = theme::current(ui.ctx());
     let color = if secondary { t.fg_secondary } else { t.fg_text };
-    ui.label(egui::RichText::new(text).font(fonts::mono_id(11.0)).color(color));
+    ui.label(egui::RichText::new(text).font(fonts::mono_id(fonts::size::LABEL)).color(color));
 }
 
 pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
@@ -39,7 +38,7 @@ pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
     // error the user misses.
     if let Some(err) = app.last_error.clone() {
         let t = theme::current(ui.ctx());
-        ui.label(egui::RichText::new(err).font(fonts::mono_id(11.0)).color(t.fg_error));
+        ui.label(egui::RichText::new(err).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_error));
     }
 
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -56,18 +55,10 @@ fn zoom_cluster(ui: &mut Ui, app: &mut GasciiApp) {
         app.pending_fit = true;
     }
     if widgets::mini_button(ui, "+", true) {
-        step_zoom(app, 1);
+        app.step_zoom(1);
     }
     mono(ui, format!("{:.0}%", app.viewport.scale() * 100.0), false);
     if widgets::mini_button(ui, "–", true) {
-        step_zoom(app, -1);
+        app.step_zoom(-1);
     }
-}
-
-/// Zoom by one step about the viewport's centre. Unlike `zoom_at`, there is no cursor to anchor to —
-/// the buttons are in the status bar — so the pan is left alone and the document grows from its
-/// top-left. `Fit` is the way back to centred.
-fn step_zoom(app: &mut GasciiApp, dir: i32) {
-    let next = (app.viewport.zoom_step as i32 + dir).clamp(0, ZOOM_SCALES.len() as i32 - 1);
-    app.viewport.zoom_step = next as usize;
 }

@@ -3,6 +3,7 @@ mod canvas;
 mod font_coverage;
 mod fonts;
 mod png_export;
+mod prefs;
 mod ui;
 mod viewport;
 
@@ -14,7 +15,7 @@ fn main() -> eframe::Result {
         // worth looking at.
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([880.0, 560.0])
+            .with_min_inner_size([920.0, 600.0])
             // The app draws its own title bar, so the OS one is off. That also removes winit's
             // resize borders and drag region — `ui::titlebar` reimplements both.
             .with_decorations(false)

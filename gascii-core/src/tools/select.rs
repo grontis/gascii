@@ -287,7 +287,7 @@ mod tests {
             density: crate::brush::DensityMode::Fixed(crate::brush::Fixed(1.0)),
             ramp: Vec::new(),
             size: 1,
-            shape: crate::tools::BrushShape::Square,
+            shape: crate::tools::BrushShape::default(),
         }
     }
 

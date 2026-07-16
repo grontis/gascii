@@ -146,7 +146,7 @@ mod tests {
             density,
             ramp: ramp.chars().collect(),
             size: 1,
-            shape: crate::tools::BrushShape::Square,
+            shape: crate::tools::BrushShape::default(),
         }
     }
 
@@ -261,6 +261,7 @@ mod tests {
         let mut doc = Document::new(20, 20);
         let mut tctx = ctx(DensityMode::Buildup(Buildup), "abcd");
         tctx.size = 3;
+        tctx.shape = crate::tools::BrushShape::Square;
         let mut brush = DensityBrush::new();
         brush.update(ToolEvent::Press { x: 2, y: 2 }, &tctx, &doc);
         for x in 3..=8u16 {

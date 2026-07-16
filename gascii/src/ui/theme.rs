@@ -1,17 +1,29 @@
 //! The design system's color tokens and their mapping onto egui's `Visuals`.
 //!
-//! Two rules shape everything here:
+//! Every interactable in the chrome follows one four-state contract:
 //!
-//! - **Inversion is selection.** A selected control swaps fg/bg (`bg_inverse`/`fg_inverse`). No
-//!   accent-colored fills anywhere in the chrome.
-//! - **The accent belongs to the canvas.** [`CANVAS_ACCENT`] and [`CANVAS_SURFACE`] are deliberately
-//!   not part of [`Tokens`]: the document is not chrome, and its surface does not follow the chrome
-//!   theme. They are the same in light and dark.
+//! - **Idle**: transparent fill, per-widget border.
+//! - **Hover**: `bg_hover` wash, `border_strong` outline. Never a border-only darken — a hover
+//!   that only moves the border is easy to miss; the wash makes "this responds to you" legible
+//!   without reading as selection.
+//! - **Pressed & selected**: inversion (`bg_inverse`/`fg_inverse`). No accent-colored fills
+//!   anywhere in the chrome.
+//! - **Disabled**: `fg_secondary` text, `border_soft`, no hover reaction at all.
+//!
+//! This is expressed in exactly two places: [`Tokens::visuals`] (stock widgets, menus, dialog
+//! internals) and [`widgets::cell`](super::widgets) (the whole custom kit). Any new widget should
+//! read one of those two rather than inventing its own state colors.
+//!
+//! **The accent belongs to the canvas.** [`CANVAS_ACCENT`] and [`CANVAS_SURFACE`] are deliberately
+//! not part of [`Tokens`]: the document is not chrome, and its surface does not follow the chrome
+//! theme. They are the same in light and dark.
 
 use eframe::egui::{self, Color32, CornerRadius, Shadow, Stroke, Theme, Visuals};
 
-/// The document's own background. A document property, not a theme color — identical in both
-/// themes. (`gascii-core` has no document background field yet, so this is the app-side stand-in.)
+/// The New dialog's starting background-well value, matching `Document::new`'s own default
+/// (opaque black). A document's actual background lives on the `Document` itself
+/// (`gascii_core::Document::background`) and is set once at creation — this constant is only the
+/// dialog's initial swatch, not read anywhere a live document's background matters.
 pub const CANVAS_SURFACE: Color32 = Color32::from_rgb(0x00, 0x00, 0x00);
 
 /// Canvas overlays only: marquee, cell cursor, size tags. The single non-monochrome color in the
@@ -53,6 +65,9 @@ pub struct Tokens {
     pub border_strong: Color32,
     /// Separators and idle swatch borders.
     pub border_soft: Color32,
+    /// Hover wash: a translucent tint over whatever surface a hovered control sits on. The one
+    /// fill state below inversion — never opaque, or it would read as selection.
+    pub bg_hover: Color32,
     /// The fill of a selected state.
     pub bg_inverse: Color32,
     /// Text/icons drawn on `bg_inverse`.
@@ -78,6 +93,7 @@ impl Tokens {
         fg_secondary: Color32::from_rgb(0x71, 0x6C, 0x63),
         border_strong: Color32::from_rgb(0x1C, 0x1B, 0x19),
         border_soft: Color32::from_rgb(0xC9, 0xC5, 0xBD),
+        bg_hover: translucent(0x1C, 0x1B, 0x19, 0x17),
         bg_inverse: Color32::from_rgb(0x1C, 0x1B, 0x19),
         fg_inverse: Color32::from_rgb(0xF6, 0xF5, 0xF2),
         window_edge: Color32::from_rgb(0x1C, 0x1B, 0x19),
@@ -94,6 +110,7 @@ impl Tokens {
         fg_secondary: Color32::from_rgb(0x98, 0x93, 0x8A),
         border_strong: Color32::from_rgb(0x5A, 0x57, 0x50),
         border_soft: Color32::from_rgb(0x45, 0x43, 0x40),
+        bg_hover: translucent(0xE6, 0xE3, 0xDE, 0x1F),
         bg_inverse: Color32::from_rgb(0xE6, 0xE3, 0xDE),
         fg_inverse: Color32::from_rgb(0x1C, 0x1B, 0x19),
         window_edge: Color32::from_rgb(0x06, 0x06, 0x06),
@@ -168,8 +185,8 @@ impl Tokens {
         v.widgets.inactive.bg_stroke = Stroke::new(1.0, self.border_soft);
         v.widgets.inactive.fg_stroke = Stroke::new(1.0, self.fg_text);
 
-        v.widgets.hovered.bg_fill = Color32::TRANSPARENT;
-        v.widgets.hovered.weak_bg_fill = Color32::TRANSPARENT;
+        v.widgets.hovered.bg_fill = self.bg_hover;
+        v.widgets.hovered.weak_bg_fill = self.bg_hover;
         v.widgets.hovered.bg_stroke = Stroke::new(1.0, self.border_strong);
         v.widgets.hovered.fg_stroke = Stroke::new(1.0, self.fg_text);
 
@@ -179,8 +196,9 @@ impl Tokens {
         v.widgets.active.bg_stroke = Stroke::new(1.0, self.border_strong);
         v.widgets.active.fg_stroke = Stroke::new(1.0, self.fg_inverse);
 
-        v.widgets.open.bg_fill = Color32::TRANSPARENT;
-        v.widgets.open.weak_bg_fill = Color32::TRANSPARENT;
+        // An open menu button reads as engaged, the same wash a hover gets.
+        v.widgets.open.bg_fill = self.bg_hover;
+        v.widgets.open.weak_bg_fill = self.bg_hover;
         v.widgets.open.bg_stroke = Stroke::new(1.0, self.border_strong);
         v.widgets.open.fg_stroke = Stroke::new(1.0, self.fg_text);
 
@@ -221,6 +239,22 @@ mod tests {
                     "{name} {what} has a channel above its alpha — RGB was not premultiplied"
                 );
             }
+        }
+    }
+
+    /// The hover wash must actually be visible (nonzero alpha) and stay translucent (below
+    /// selection's opacity) in both themes, and — like the other translucent tokens — its RGB must
+    /// not exceed its own premultiplied alpha.
+    #[test]
+    fn hover_wash_is_visible_and_translucent() {
+        for (name, t) in [("light", Tokens::LIGHT), ("dark", Tokens::DARK)] {
+            let a = t.bg_hover.a();
+            assert!(a > 0, "{name}: hover wash is fully transparent, invisible");
+            assert!(a < 96, "{name}: hover wash is too opaque, would read as selection");
+            assert!(
+                t.bg_hover.r() <= a && t.bg_hover.g() <= a && t.bg_hover.b() <= a,
+                "{name}: hover wash has a channel above its alpha — RGB was not premultiplied"
+            );
         }
     }
 
@@ -340,6 +374,7 @@ mod tests {
                 v.faint_bg_color,
                 v.widgets.active.bg_fill,
                 v.widgets.hovered.bg_stroke.color,
+                v.widgets.hovered.bg_fill,
             ];
             assert!(
                 !used.contains(&CANVAS_ACCENT),

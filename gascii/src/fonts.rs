@@ -16,6 +16,28 @@ pub const UI_SEMIBOLD: &str = "ui-semibold";
 /// off-screen `fontdue` rasterizer — one embedded font asset, one source of truth.
 pub(crate) const CANVAS_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/IosevkaFixed-Regular.ttf");
 
+/// The named type ramp: every UI font size in the app resolves to one of these constants. No
+/// numeric literal may appear in a font-id call outside this module (the canvas's zoom-derived
+/// `font_px` is the one exception — it isn't a fixed UI size at all).
+pub mod size {
+    /// Menus, primary controls.
+    pub const BODY: f32 = 15.0;
+    /// Buttons, segments, steppers, checkbox/field labels.
+    pub const CONTROL: f32 = 14.0;
+    /// Field labels, status/hint mono, hex readouts.
+    pub const LABEL: f32 = 13.0;
+    /// `RECENT`/`WRITE` micro-labels.
+    pub const MICRO: f32 = 12.0;
+    /// Caption-box glyphs, checkbox tick.
+    pub const CAPTION: f32 = 11.0;
+    /// Marquee size tag.
+    pub const TAG: f32 = 12.0;
+    /// L/R tool badges — the only text drawn below `CAPTION`.
+    pub const BADGE: f32 = 10.0;
+    /// Palette swatch glyph, canvas font.
+    pub const GLYPH: f32 = 15.0;
+}
+
 const UI_REGULAR_BYTES: &[u8] = include_bytes!("../assets/fonts/InstrumentSans-Regular.ttf");
 const UI_MEDIUM_BYTES: &[u8] = include_bytes!("../assets/fonts/InstrumentSans-Medium.ttf");
 const UI_SEMIBOLD_BYTES: &[u8] = include_bytes!("../assets/fonts/InstrumentSans-SemiBold.ttf");
@@ -91,14 +113,14 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.all_styles_mut(|style| {
         style.text_styles = [
             // Menus and controls.
-            (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
+            (TextStyle::Body, FontId::new(size::BODY, FontFamily::Proportional)),
             // Buttons, segments, strong labels.
-            (TextStyle::Button, FontId::new(12.0, FontFamily::Proportional)),
+            (TextStyle::Button, FontId::new(size::CONTROL, FontFamily::Proportional)),
             // Field labels.
-            (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
+            (TextStyle::Small, FontId::new(size::LABEL, FontFamily::Proportional)),
             // Status bar and other measurements.
-            (TextStyle::Monospace, FontId::new(11.0, FontFamily::Monospace)),
-            (TextStyle::Heading, FontId::new(13.0, ui_semibold_family())),
+            (TextStyle::Monospace, FontId::new(size::LABEL, FontFamily::Monospace)),
+            (TextStyle::Heading, FontId::new(size::BODY, ui_semibold_family())),
         ]
         .into();
     });
@@ -121,7 +143,6 @@ pub fn ui_semibold_id(px: f32) -> FontId {
 }
 
 /// Fragment Mono — anything that is content or measurement.
-#[allow(dead_code)]
 pub fn mono_id(px: f32) -> FontId {
     FontId::new(px, FontFamily::Monospace)
 }

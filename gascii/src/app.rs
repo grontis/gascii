@@ -3,19 +3,21 @@ use std::time::Instant;
 
 use eframe::egui;
 use gascii_core::{
-    builtin_pages, builtin_ramps, export_text, load_str, resize_document,
-    save_string, BrushShape, CellPatch, DensityBrush, DensityMode, Document,
-    Eraser, Fixed, FloodFill, History, Line, Page, Pencil, PlaneMask, Ramp, Rectangle, ResizeError,
-    Rgba, SelectionTool, TextTool, Tool, ToolEvent, ToolResponse, WidthReject, MAX_TOOL_SIZE,
+    builtin_pages, builtin_ramps, composite, export_text, load_str, resize_document,
+    save_string, AxisAnchor, BrushShape, CellPatch, DensityBrush, DensityMode, Document,
+    Eraser, Fixed, FloodFill, History, Line, Page, Pencil, PlaneMask, Ramp, Rectangle, ResizeAnchor,
+    ResizeError, Rgba, SelectionTool, TextTool, Tool, ToolEvent, ToolResponse, WidthReject, MAX_TOOL_SIZE,
 };
 
 use crate::canvas::{self, CanvasRenderer, NaiveRenderer};
 use crate::fonts;
 use crate::png_export;
+use crate::prefs;
+use crate::ui::dialog::{self, DialogAction};
 use crate::viewport::Viewport;
 
-/// PNG export cell-scale presets offered to the user, in pixels per cell.
-const PNG_SCALE_PRESETS: [u32; 5] = [8, 16, 24, 32, 48];
+/// PNG cell-px per export scale preset: `16 * {1, 2, 4}`.
+const EXPORT_CELL_PX_BASE: u32 = 16;
 
 /// Whether a pasted `Event::Paste` text is still the app's own copy: the OS clipboard is "ours"
 /// exactly when `internal`'s own flattening still matches what came back on paste. Pulled out of
@@ -23,6 +25,17 @@ const PNG_SCALE_PRESETS: [u32; 5] = [8, 16, 24, 32, 48];
 /// without constructing a full `GasciiApp`.
 fn is_own_clipboard_text(text: &str, internal: Option<&CellPatch>) -> bool {
     internal.is_some_and(|p| p.to_text() == text)
+}
+
+/// The Export dialog's "Trim trailing spaces" *unchecked* path: every row stays padded to
+/// `doc.width` glyphs, unlike `export_text`'s trailing-whitespace trim (which stays the default,
+/// matching the format's pre-existing behavior).
+fn export_text_untrimmed(doc: &Document) -> String {
+    composite(doc)
+        .iter()
+        .map(|row| row.iter().map(|c| c.ch).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Whether the document has changed since the last save/load: true whenever the undo stack's
@@ -41,7 +54,7 @@ pub(crate) const RECENT_GLYPHS: usize = 6;
 /// Pure, so the ordering rule is testable without a `GasciiApp`: re-using a glyph already in the
 /// list must move it to the front rather than add a second copy, or the row fills with duplicates
 /// and stops being six *distinct* recent glyphs.
-fn push_recent(recent: &mut Vec<char>, ch: char) {
+pub(crate) fn push_recent(recent: &mut Vec<char>, ch: char) {
     recent.retain(|&c| c != ch);
     recent.insert(0, ch);
     recent.truncate(RECENT_GLYPHS);
@@ -171,7 +184,7 @@ pub(crate) struct StampSettings {
 
 impl Default for StampSettings {
     fn default() -> Self {
-        StampSettings { size: 1, shape: BrushShape::Square }
+        StampSettings { size: 1, shape: BrushShape::default() }
     }
 }
 
@@ -360,20 +373,41 @@ pub struct GasciiApp {
     pub(crate) active_ramp: usize,
     /// The brush's active intensity source (Fixed level or Buildup).
     pub(crate) density_mode: DensityMode,
+    /// The chosen theme preference (persisted). Applied to the `egui::Context` once at startup
+    /// (`GasciiApp::new`) and again on every change from the View ▸ Theme menu — never read back
+    /// from the `Context` itself, so `Prefs::from_app`/`App::save` need no `Context` at all.
+    pub(crate) theme_pref: egui::ThemePreference,
+    /// Whether the canvas cell-grid overlay is drawn. Persisted, off by default.
+    pub(crate) show_grid: bool,
     resize_dialog_open: bool,
     resize_w: u16,
     resize_h: u16,
-    png_dialog_open: bool,
-    png_cell_px: u32,
+    /// The 3x3 anchor the Resize dialog is currently set to. Remembered for the session (not
+    /// persisted across restarts) — each resize starts from whatever the last one used.
+    pub(crate) resize_anchor: ResizeAnchor,
+    new_dialog_open: bool,
+    new_w: u16,
+    new_h: u16,
+    new_bg: Rgba,
+    export_dialog_open: bool,
+    pub(crate) export: ExportSettings,
+    export_preview: Option<egui::TextureHandle>,
+    /// The settings the current `export_preview` texture was generated from — regenerated only
+    /// when this stops matching `self.export`, or on dialog open (`None` after close).
+    export_preview_key: Option<ExportSettings>,
     current_path: Option<PathBuf>,
+    /// Up to 8 most-recently-opened/saved paths, most recent first. A failed re-open drops its
+    /// entry rather than leaving a dead path in the list.
+    pub(crate) recent_files: Vec<PathBuf>,
     pub(crate) last_error: Option<String>,
     /// The undo-stack edit id (`History::top_edit_id`) at the moment of the last successful save
     /// or load — `None` matches a fresh `History`'s own sentinel. `is_dirty` is a pure comparison
     /// against `self.history.top_edit_id()`; nothing else needs to know about this field.
     saved_marker: Option<u64>,
-    /// The close-confirm dialog (Save / Don't Save / Cancel) is showing. `pub(crate)` because
-    /// `canvas.rs`'s modality guard reads it directly (see `canvas::show`).
-    pub(crate) close_dialog_open: bool,
+    /// Which unsaved-changes confirmation is pending, if any — closing the app, or replacing the
+    /// document via File ▸ New…. `pub(crate)` because `canvas.rs`'s modality guard reads it
+    /// through `modal_open()`.
+    pub(crate) confirm: Option<PendingConfirm>,
     /// Single-use: lets the very next `close_requested` frame through unconditionally, then resets
     /// itself. Set by `close_now` so "Save" and "Don't Save" can re-request a real close without
     /// re-triggering the veto they just cleared.
@@ -384,11 +418,51 @@ pub struct GasciiApp {
     first_frame: bool,
 }
 
+/// Which unsaved-changes confirmation is in flight. Both share the same Save/Don't Save/Cancel
+/// dialog body; only what happens after Save/Don't-Save resolves differs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PendingConfirm {
+    CloseApp,
+    NewDocument,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ExportFormat {
+    Text,
+    Png,
+}
+
+/// The Export dialog's remembered settings — persisted per-app (not per-document; `eframe::Storage`
+/// has no per-document slot to hang this off without touching the file format).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct ExportSettings {
+    pub format: ExportFormat,
+    /// Cell scale multiplier: 1, 2, or 4 (`cell_px = EXPORT_CELL_PX_BASE * scale`).
+    pub scale: u8,
+    pub transparent: bool,
+    pub trim: bool,
+}
+
+impl Default for ExportSettings {
+    fn default() -> Self {
+        ExportSettings { format: ExportFormat::Text, scale: 1, transparent: true, trim: true }
+    }
+}
+
+impl ExportSettings {
+    pub(crate) fn cell_px(&self) -> u32 {
+        EXPORT_CELL_PX_BASE * self.scale as u32
+    }
+}
+
 impl GasciiApp {
     pub fn new(cc: &eframe::CreationContext<'_>, started: Instant) -> Self {
         fonts::install_fonts(&cc.egui_ctx);
         crate::ui::theme::install(&cc.egui_ctx);
-        Self::with_state(started)
+        let mut app = Self::with_state(started);
+        prefs::load(cc.storage, &mut app);
+        cc.egui_ctx.set_theme(app.theme_pref);
+        app
     }
 
     /// A `GasciiApp` with no egui context attached. The context is needed only to register fonts and
@@ -427,20 +501,38 @@ impl GasciiApp {
             ramps: builtin_ramps(),
             active_ramp: 0,
             density_mode: DensityMode::Fixed(Fixed(1.0)),
+            theme_pref: egui::ThemePreference::System,
+            show_grid: false,
             resize_dialog_open: false,
             resize_w: Document::DEFAULT_WIDTH,
             resize_h: Document::DEFAULT_HEIGHT,
-            png_dialog_open: false,
-            png_cell_px: PNG_SCALE_PRESETS[1], // 16px/cell default
+            resize_anchor: ResizeAnchor::default(),
+            new_dialog_open: false,
+            new_w: Document::DEFAULT_WIDTH,
+            new_h: Document::DEFAULT_HEIGHT,
+            new_bg: Rgba(0, 0, 0, 255),
+            export_dialog_open: false,
+            export: ExportSettings::default(),
+            export_preview: None,
+            export_preview_key: None,
             current_path: None,
+            recent_files: Vec::new(),
             last_error: None,
             saved_marker: None,
-            close_dialog_open: false,
+            confirm: None,
             force_close: false,
             shown_title: String::new(),
             started,
             first_frame: true,
         }
+    }
+
+    /// True while any modal dialog is showing. `canvas.rs` polls raw pointer/keyboard state rather
+    /// than using egui's occlusion system, so a modal's backdrop alone does not block it — every
+    /// modal flag must be named here, and every raw-input-polling site in `canvas.rs`/`handle_keys`
+    /// must gate on this rather than any single dialog's own flag.
+    pub(crate) fn modal_open(&self) -> bool {
+        self.confirm.is_some() || self.resize_dialog_open || self.export_dialog_open || self.new_dialog_open
     }
 
     /// Whether any pointer gesture — primary stroke or right-click stroke — currently owns the
@@ -772,16 +864,23 @@ impl GasciiApp {
     fn handle_keys(&mut self, ui: &mut egui::Ui) {
         let owner_kind = self.keyboard_owner().map(|b| self.slot(b).kind);
         let focused = ui.memory(|m| m.focused().is_some()) || suppresses_tool_shortcuts(owner_kind);
-        let (redo_shift, undo, redo_y, save, copy) = ui.input_mut(|i| {
+        let (redo_shift, undo, redo_y, save, copy_all, copy, export_dialog, fit) = ui.input_mut(|i| {
             // Cmd/Ctrl+Shift+Z must be consumed before the plain Cmd/Ctrl+Z pattern, since
             // `matches_logically` ignores extra Shift/Alt — checking undo first would swallow
-            // the redo shortcut's Z key press.
+            // the redo shortcut's Z key press. Same reasoning for Ctrl+Shift+C vs plain Ctrl+C.
             let redo_shift = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z);
             let undo = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
             let redo_y = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y);
             let save = i.consume_key(egui::Modifiers::COMMAND, egui::Key::S);
+            let copy_all = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::C);
             let copy = i.consume_key(egui::Modifiers::COMMAND, egui::Key::C);
-            (redo_shift, undo, redo_y, save, copy)
+            let export_dialog = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::E);
+            // Ctrl+0 is a distinct modifier pattern from the Brush's plain `0` (no modifiers) —
+            // `matches_logically` requires ctrl/command to be entirely absent for a `NONE`
+            // pattern, so the two can never collide regardless of which is consumed first; this
+            // is simply where every global chord is consumed.
+            let fit = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num0);
+            (redo_shift, undo, redo_y, save, copy_all, copy, export_dialog, fit)
         });
 
         // Undo/redo mid-pointer-gesture would mutate the document under the stroke's pinned
@@ -797,6 +896,12 @@ impl GasciiApp {
         if save {
             self.save_file();
         }
+        if export_dialog {
+            self.open_export_dialog();
+        }
+        if fit {
+            self.pending_fit = true;
+        }
         // The tool shortcuts come from the TOOLS table, so a tool and its key can never drift
         // apart. A shortcut always sets the L binding; right-clicking a toolbox cell is the only
         // way to set R.
@@ -811,8 +916,27 @@ impl GasciiApp {
                 self.set_tool(Binding::L, kind);
             }
         }
-        if copy {
+        if copy_all {
+            self.flush_all();
+            ui.ctx().copy_text(export_text(&self.doc));
+        } else if copy {
             self.copy_selection(ui.ctx());
+        }
+        // `+`/`=`/`-`, no modifiers: the same zoom step the status bar's buttons and the View menu
+        // use. Guarded like the tool-select keys so typing into a focused field never zooms.
+        if !focused {
+            let (zoom_in, zoom_out) = ui.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Plus)
+                        || i.consume_key(egui::Modifiers::NONE, egui::Key::Equals),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Minus),
+                )
+            });
+            if zoom_in {
+                self.step_zoom(1);
+            } else if zoom_out {
+                self.step_zoom(-1);
+            }
         }
         // Ramp/intensity are app-global shared state, so the digit keys apply whenever EITHER
         // binding is holding the Brush.
@@ -871,9 +995,24 @@ impl GasciiApp {
     }
 
 
+    /// Records `path` at the front of the recent-files list, de-duplicated and capped at 8.
+    pub(crate) fn note_recent_file(&mut self, path: &std::path::Path) {
+        self.recent_files.retain(|p| p != path);
+        self.recent_files.insert(0, path.to_path_buf());
+        self.recent_files.truncate(8);
+    }
+
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
+                if ui.button("New…").clicked() {
+                    self.flush_all();
+                    if self.is_dirty() {
+                        self.confirm = Some(PendingConfirm::NewDocument);
+                    } else {
+                        self.open_new_dialog();
+                    }
+                }
                 if ui.button("Open…").clicked() {
                     self.open_file();
                 }
@@ -885,17 +1024,28 @@ impl GasciiApp {
                     self.save_file_as();
                 }
                 ui.separator();
-                if ui.button("Export Text…").clicked() {
-                    self.export_text_file();
+                if ui.add(egui::Button::new("Export…").shortcut_text("Ctrl+Shift+E")).clicked() {
+                    self.open_export_dialog();
                 }
-                if ui.button("Export PNG…").clicked() {
-                    // Not the authoritative flush — harmless dialog-open convenience only. The
-                    // dialog is non-modal, so more edits can happen while it's open;
-                    // `export_png_file` (fired by the dialog's own "Export…" button) re-flushes
-                    // immediately before reading `self.doc`, which is the flush that matters.
-                    self.flush_all();
-                    self.png_dialog_open = true;
-                }
+                ui.separator();
+                ui.menu_button("Recent Files", |ui| {
+                    if self.recent_files.is_empty() {
+                        ui.weak("No recent files");
+                    }
+                    let mut pick = None;
+                    for path in &self.recent_files {
+                        let label = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.display().to_string());
+                        if ui.button(label).clicked() {
+                            pick = Some(path.clone());
+                        }
+                    }
+                    if let Some(path) = pick {
+                        self.open_path(&path);
+                    }
+                });
             });
             ui.menu_button("Edit", |ui| {
                 // Disabled mid-gesture for the same reason handle_keys ignores Ctrl+Z/Y then:
@@ -919,13 +1069,18 @@ impl GasciiApp {
                 if ui.add_enabled(can_copy, copy).clicked() {
                     self.copy_selection(ui.ctx());
                 }
-                if ui.button("Copy All as Text").clicked() {
+                let copy_all = egui::Button::new("Copy All as Text").shortcut_text("Ctrl+Shift+C");
+                if ui.add(copy_all).clicked() {
                     // Flush first: a pending text burst or floating selection lives only in
                     // `self.slots[0].tool`'s overlay until committed into `self.doc` — copying without
                     // flushing would silently drop just-typed or just-moved content from the
                     // whole-document clipboard contents.
                     self.flush_all();
                     ui.ctx().copy_text(export_text(&self.doc));
+                }
+                let paste = egui::Button::new("Paste").shortcut_text("Ctrl+V");
+                if ui.add(paste).clicked() {
+                    self.paste_from_os_clipboard();
                 }
                 ui.separator();
                 if ui.button("Resize Canvas…").clicked() {
@@ -935,122 +1090,366 @@ impl GasciiApp {
                     self.flush_all();
                     self.resize_w = self.doc.width;
                     self.resize_h = self.doc.height;
+                    // An unrelated error from a prior action (e.g. a dead Recent Files entry)
+                    // must not read as if this fresh dialog already failed.
+                    self.last_error = None;
                     self.resize_dialog_open = true;
                 }
             });
             ui.menu_button("View", |ui| {
-                if ui.button("Fit to Window").clicked() {
+                if ui.add(egui::Button::new("Zoom In").shortcut_text("+")).clicked() {
+                    self.step_zoom(1);
+                }
+                if ui.add(egui::Button::new("Zoom Out").shortcut_text("−")).clicked() {
+                    self.step_zoom(-1);
+                }
+                if ui.add(egui::Button::new("Fit").shortcut_text("Ctrl+0")).clicked() {
                     self.pending_fit = true;
                 }
+                ui.separator();
+                ui.checkbox(&mut self.show_grid, "Grid");
+                ui.separator();
+                ui.menu_button("Theme", |ui| {
+                    let mut pref = self.theme_pref;
+                    ui.radio_value(&mut pref, egui::ThemePreference::Light, "Light");
+                    ui.radio_value(&mut pref, egui::ThemePreference::Dark, "Dark");
+                    ui.radio_value(&mut pref, egui::ThemePreference::System, "System");
+                    if pref != self.theme_pref {
+                        self.theme_pref = pref;
+                        ui.ctx().set_theme(pref);
+                    }
+                });
             });
         });
     }
 
-    /// Bounded W/H entry, top-left anchored (grow pads Blank, shrink crops bottom/right); Apply
-    /// pushes exactly one undo entry via `resize_document`, Cancel closes without touching the
-    /// document.
+    /// Reads the OS clipboard on demand (Edit ▸ Paste) via `arboard`. A real Ctrl+V keypress
+    /// pastes through `egui::Event::Paste` instead (`canvas.rs`) — this menu item exists because a
+    /// menu click is not itself a key event egui surfaces the clipboard on.
+    fn paste_from_os_clipboard(&mut self) {
+        match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+            Ok(text) => self.paste_text(&text),
+            Err(e) => self.last_error = Some(format!("paste: clipboard read failed: {e}")),
+        }
+    }
+
+    /// Zooms by one step, keeping the viewport's own centring (there is no pointer to anchor to
+    /// from a menu item, a keyboard chord, or the status bar's buttons — all three call this).
+    pub(crate) fn step_zoom(&mut self, dir: i32) {
+        let next = (self.viewport.zoom_step as i32 + dir)
+            .clamp(0, crate::viewport::ZOOM_SCALES.len() as i32 - 1);
+        self.viewport.zoom_step = next as usize;
+    }
+
+    fn open_export_dialog(&mut self) {
+        // Not the authoritative flush — harmless dialog-open convenience only. The dialog reads
+        // `self.doc` again (via the preview and the final "Export…" click), which is what matters.
+        self.flush_all();
+        self.export_preview = None;
+        self.export_preview_key = None;
+        // An unrelated prior error must not read as if this fresh dialog already failed.
+        self.last_error = None;
+        self.export_dialog_open = true;
+    }
+
+    /// New Document dialog: width/height steppers, a preset segment, and a background well.
+    fn new_dialog(&mut self, ctx: &egui::Context) {
+        if !self.new_dialog_open {
+            return;
+        }
+        #[derive(Clone, Copy, PartialEq)]
+        enum Preset {
+            Small,
+            Large,
+            Custom,
+        }
+        let resp = dialog::modal(ctx, "new_document", "New Document", |ui| {
+            let mut preset = if (self.new_w, self.new_h) == (80, 25) {
+                Preset::Small
+            } else if (self.new_w, self.new_h) == (120, 40) {
+                Preset::Large
+            } else {
+                Preset::Custom
+            };
+            let opts = [(Preset::Small, "80×25"), (Preset::Large, "120×40"), (Preset::Custom, "Custom")];
+            if crate::ui::widgets::segmented(ui, &mut preset, &opts, false) {
+                match preset {
+                    Preset::Small => (self.new_w, self.new_h) = (80, 25),
+                    Preset::Large => (self.new_w, self.new_h) = (120, 40),
+                    Preset::Custom => {}
+                }
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label("Width");
+                crate::ui::widgets::stepper(ui, &mut self.new_w, 1, Document::MAX_WIDTH);
+                ui.add_space(12.0);
+                ui.label("Height");
+                crate::ui::widgets::stepper(ui, &mut self.new_h, 1, Document::MAX_HEIGHT);
+            });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label("Background");
+                let mut arr = [self.new_bg.0, self.new_bg.1, self.new_bg.2, self.new_bg.3];
+                if ui.color_edit_button_srgba_unmultiplied(&mut arr).changed() {
+                    self.new_bg = Rgba(arr[0], arr[1], arr[2], arr[3]);
+                }
+            });
+            ui.add_space(12.0);
+            dialog::buttons(ui, "Cancel", "Create")
+        });
+        match resp.inner {
+            DialogAction::Confirm => self.create_new_document(),
+            DialogAction::Cancel => self.new_dialog_open = false,
+            DialogAction::None => {
+                if resp.dismissed {
+                    self.new_dialog_open = false;
+                }
+            }
+        }
+    }
+
+    /// Resize dialog, rebuilt on the shared modal framework: W/H steppers, a 9-way anchor grid,
+    /// and the same `resize_document` confirm path as before (now anchor-aware).
     fn resize_dialog(&mut self, ctx: &egui::Context) {
         if !self.resize_dialog_open {
             return;
         }
-        let mut open = self.resize_dialog_open;
-        egui::Window::new("Resize").open(&mut open).show(ctx, |ui| {
+        let resp = dialog::modal(ctx, "resize_canvas", "Resize Canvas", |ui| {
+            ui.label(format!("current: {}×{}", self.doc.width, self.doc.height));
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label("Width");
-                ui.add(egui::DragValue::new(&mut self.resize_w).range(1..=Document::MAX_WIDTH));
-            });
-            ui.horizontal(|ui| {
+                crate::ui::widgets::stepper(ui, &mut self.resize_w, 1, Document::MAX_WIDTH);
+                ui.add_space(12.0);
                 ui.label("Height");
-                ui.add(egui::DragValue::new(&mut self.resize_h).range(1..=Document::MAX_HEIGHT));
+                crate::ui::widgets::stepper(ui, &mut self.resize_h, 1, Document::MAX_HEIGHT);
             });
-            ui.horizontal(|ui| {
-                if ui.button("Apply").clicked() {
-                    // Resize reads/replaces self.doc directly — flush any pending burst/float
-                    // into the pre-resize document first, same trigger-table discipline as
-                    // Save/Export/Copy.
-                    self.flush_all();
-                    match resize_document(&self.doc, self.resize_w, self.resize_h) {
-                        Ok(Some(edit)) => {
-                            self.apply_edit(edit, None);
-                            self.last_error = None;
-                            self.resize_dialog_open = false;
-                        }
-                        Ok(None) => self.resize_dialog_open = false, // same extent: silent close
-                        Err(ResizeError::ZeroExtent) => {
-                            self.last_error = Some("resize: width and height must be at least 1".to_string());
-                        }
-                        Err(ResizeError::TooLarge { max_width, max_height, .. }) => {
-                            self.last_error =
-                                Some(format!("resize: exceeds the {max_width}x{max_height} maximum"));
-                        }
+            ui.add_space(8.0);
+            anchor_grid(ui, &mut self.resize_anchor);
+            let t = crate::ui::theme::current(ui.ctx());
+            ui.label(
+                egui::RichText::new("Existing art keeps this position; new cells fill with background.")
+                    .font(fonts::mono_id(fonts::size::LABEL))
+                    .color(t.fg_secondary),
+            );
+            if let Some(err) = &self.last_error {
+                ui.label(egui::RichText::new(err.clone()).color(t.fg_error));
+            }
+            ui.add_space(12.0);
+            dialog::buttons(ui, "Cancel", "Resize")
+        });
+        match resp.inner {
+            DialogAction::Confirm => {
+                // Resize reads/replaces self.doc directly — flush any pending burst/float
+                // into the pre-resize document first, same trigger-table discipline as
+                // Save/Export/Copy.
+                self.flush_all();
+                match resize_document(&self.doc, self.resize_w, self.resize_h, self.resize_anchor) {
+                    Ok(Some(edit)) => {
+                        self.apply_edit(edit, None);
+                        self.last_error = None;
+                        self.resize_dialog_open = false;
+                    }
+                    Ok(None) => self.resize_dialog_open = false, // same extent: silent close
+                    Err(ResizeError::ZeroExtent) => {
+                        self.last_error = Some("resize: width and height must be at least 1".to_string());
+                    }
+                    Err(ResizeError::TooLarge { max_width, max_height, .. }) => {
+                        self.last_error =
+                            Some(format!("resize: exceeds the {max_width}x{max_height} maximum"));
                     }
                 }
-                if ui.button("Cancel").clicked() {
+            }
+            DialogAction::Cancel => self.resize_dialog_open = false,
+            DialogAction::None => {
+                if resp.dismissed {
                     self.resize_dialog_open = false;
                 }
-            });
-        });
-        self.resize_dialog_open &= open;
+            }
+        }
     }
 
-    /// A cell-scale preset picker; on confirm, opens a native save dialog and writes the
-    /// rasterized PNG bytes.
-    fn png_export_dialog(&mut self, ctx: &egui::Context) {
-        if !self.png_dialog_open {
+    /// Rebuilds `self.export_preview` from the current document + export settings, if it isn't
+    /// already current. Dropped (not just left stale) whenever the dialog is closed, so the
+    /// texture's GPU memory isn't held open between uses.
+    fn refresh_export_preview(&mut self, ctx: &egui::Context) {
+        if self.export.format != ExportFormat::Png {
+            self.export_preview = None;
+            self.export_preview_key = None;
             return;
         }
-        let mut open = self.png_dialog_open;
-        let mut do_export = false;
-        egui::Window::new("Export PNG").open(&mut open).show(ctx, |ui| {
-            ui.label("Pixels per cell:");
-            ui.horizontal(|ui| {
-                for &scale in &PNG_SCALE_PRESETS {
-                    ui.selectable_value(&mut self.png_cell_px, scale, format!("{scale}px"));
+        if self.export_preview_key == Some(self.export) {
+            return;
+        }
+        let opaque_bg = (!self.export.transparent).then_some(self.doc.background);
+        // A small, fixed preview scale — independent of the export's own cell_px, which can be up
+        // to 4x the base and would make an oversized in-dialog thumbnail.
+        if let Ok((w, h, pixels)) = png_export::rasterize_rgba8(&self.doc, 4, opaque_bg) {
+            let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &pixels);
+            self.export_preview =
+                Some(ctx.load_texture("export_preview", image, egui::TextureOptions::NEAREST));
+        }
+        self.export_preview_key = Some(self.export);
+    }
+
+    /// Unified Export dialog: Text/PNG format, PNG scale + transparency, Text trim, a live
+    /// preview, and a pixel/char readout.
+    fn export_dialog(&mut self, ctx: &egui::Context) {
+        if !self.export_dialog_open {
+            return;
+        }
+        self.refresh_export_preview(ctx);
+        let doc = &self.doc;
+        let preview = self.export_preview.clone();
+        let resp = dialog::modal(ctx, "export", "Export", |ui| {
+            let formats = [(ExportFormat::Text, "Text (.txt)"), (ExportFormat::Png, "PNG")];
+            crate::ui::widgets::segmented(ui, &mut self.export.format, &formats, false);
+            ui.add_space(8.0);
+
+            match self.export.format {
+                ExportFormat::Png => {
+                    ui.horizontal(|ui| {
+                        ui.label("Scale");
+                        let scales = [(1u8, "1×"), (2, "2×"), (4, "4×")];
+                        crate::ui::widgets::segmented(ui, &mut self.export.scale, &scales, false);
+                    });
+                    ui.add_space(6.0);
+                    crate::ui::widgets::checkbox(ui, &mut self.export.transparent, "Transparent background");
                 }
-            });
-            ui.horizontal(|ui| {
-                if ui.button("Export…").clicked() {
-                    do_export = true;
+                ExportFormat::Text => {
+                    crate::ui::widgets::checkbox(ui, &mut self.export.trim, "Trim trailing spaces");
                 }
-                if ui.button("Cancel").clicked() {
-                    self.png_dialog_open = false;
+            }
+            ui.add_space(10.0);
+
+            let (preview_rect, _) =
+                ui.allocate_exact_size(egui::Vec2::new(ui.available_width(), 120.0), egui::Sense::hover());
+            let t = crate::ui::theme::current(ui.ctx());
+            ui.painter().rect_filled(preview_rect, 0.0, t.bg_chrome);
+            ui.painter().rect_stroke(preview_rect, 0.0, egui::Stroke::new(1.0, t.border_soft), egui::StrokeKind::Inside);
+            match self.export.format {
+                ExportFormat::Png => {
+                    if let Some(tex) = &preview {
+                        let size = tex.size_vec2();
+                        let fit = (size * (preview_rect.size() / size).min_elem()).min(size);
+                        let img_rect = egui::Rect::from_center_size(preview_rect.center(), fit);
+                        ui.painter().image(
+                            tex.id(),
+                            img_rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    }
                 }
-            });
+                ExportFormat::Text => {
+                    let text = export_text(doc);
+                    let preview_text: String = text.lines().take(6).collect::<Vec<_>>().join("\n");
+                    ui.painter().text(
+                        preview_rect.left_top() + egui::Vec2::new(6.0, 4.0),
+                        egui::Align2::LEFT_TOP,
+                        preview_text,
+                        crate::fonts::canvas_font_id(fonts::size::CAPTION),
+                        t.fg_text,
+                    );
+                }
+            }
+
+            ui.add_space(6.0);
+            let readout = match self.export.format {
+                ExportFormat::Png => {
+                    let px = self.export.cell_px();
+                    format!(
+                        "{}×{} px · {}× cell scale",
+                        doc.width as u32 * px,
+                        doc.height as u32 * px,
+                        self.export.scale
+                    )
+                }
+                ExportFormat::Text => format!("{}×{} chars", doc.width, doc.height),
+            };
+            ui.label(egui::RichText::new(readout).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary));
+
+            if let Some(err) = &self.last_error {
+                ui.label(egui::RichText::new(err.clone()).color(t.fg_error));
+            }
+
+            ui.add_space(12.0);
+            dialog::buttons(ui, "Cancel", "Export…")
         });
-        self.png_dialog_open &= open;
-        if do_export {
-            self.export_png_file();
-            self.png_dialog_open = false;
+        match resp.inner {
+            DialogAction::Confirm => self.run_export(),
+            DialogAction::Cancel => self.close_export_dialog(),
+            DialogAction::None => {
+                if resp.dismissed {
+                    self.close_export_dialog();
+                }
+            }
         }
     }
 
-    /// Rasterizes and writes the current document to a user-picked `.png` file at
-    /// `self.png_cell_px` pixels per cell. Reads `self.doc` directly, so it flushes any pending
-    /// burst/float first — the dialog is a non-modal `egui::Window`, so the canvas stays
-    /// interactive while it's open and a Text/Selection edit can still be in flight at the moment
-    /// "Export…" is actually clicked, not just when the dialog was opened.
-    fn export_png_file(&mut self) {
+    fn close_export_dialog(&mut self) {
+        self.export_dialog_open = false;
+        self.export_preview = None;
+        self.export_preview_key = None;
+    }
+
+    /// Flushes, opens a native save dialog filtered by the current format, and writes the result.
+    /// Reads `self.doc` directly, so it re-flushes even though the dialog-open path already did —
+    /// the dialog stays open across frames and its own "Export…" click is the read that matters.
+    fn run_export(&mut self) {
         self.flush_all();
-        let Some(path) = rfd::FileDialog::new().add_filter("PNG", &["png"]).save_file() else {
-            return;
-        };
-        match png_export::export_png(&self.doc, self.png_cell_px) {
-            Ok(bytes) => match std::fs::write(&path, bytes) {
-                Ok(()) => self.last_error = None,
-                Err(e) => self.last_error = Some(format!("failed to write {}: {e}", path.display())),
-            },
-            Err(e) => self.last_error = Some(format!("PNG export failed: {e}")),
+        match self.export.format {
+            ExportFormat::Text => {
+                let Some(path) = rfd::FileDialog::new().add_filter("Text", &["txt"]).save_file() else {
+                    return;
+                };
+                let text = if self.export.trim {
+                    export_text(&self.doc)
+                } else {
+                    export_text_untrimmed(&self.doc)
+                };
+                match std::fs::write(&path, text) {
+                    Ok(()) => {
+                        self.last_error = None;
+                        self.close_export_dialog();
+                    }
+                    Err(e) => self.last_error = Some(format!("failed to export {}: {e}", path.display())),
+                }
+            }
+            ExportFormat::Png => {
+                let Some(path) = rfd::FileDialog::new().add_filter("PNG", &["png"]).save_file() else {
+                    return;
+                };
+                let opaque_bg = (!self.export.transparent).then_some(self.doc.background);
+                match png_export::export_png(&self.doc, self.export.cell_px(), opaque_bg) {
+                    Ok(bytes) => match std::fs::write(&path, bytes) {
+                        Ok(()) => {
+                            self.last_error = None;
+                            self.close_export_dialog();
+                        }
+                        Err(e) => self.last_error = Some(format!("failed to write {}: {e}", path.display())),
+                    },
+                    Err(e) => self.last_error = Some(format!("PNG export failed: {e}")),
+                }
+            }
         }
     }
 
-    /// Reads and parses a `.gascii` file picked via a native dialog. A freshly loaded document
-    /// starts with an empty undo history — there is no `before` state for its cells prior to the
-    /// load.
+    /// Reads and parses a `.gascii` file picked via a native dialog.
     fn open_file(&mut self) {
         let Some(path) = rfd::FileDialog::new().add_filter("GASCII", &["gascii"]).pick_file() else {
             return;
         };
-        match std::fs::read_to_string(&path) {
+        self.open_path(&path);
+    }
+
+    /// Reads and parses a `.gascii` file at `path` (the native-dialog and Recent-Files entry
+    /// points both funnel through here). A freshly loaded document starts with an empty undo
+    /// history — there is no `before` state for its cells prior to the load. A failed open drops
+    /// `path` from `recent_files` rather than leaving a dead entry behind.
+    fn open_path(&mut self, path: &std::path::Path) {
+        match std::fs::read_to_string(path) {
             Ok(contents) => match load_str(&contents) {
                 Ok(doc) => {
                     // Cancel, not flush: the old `self.doc` that any pending work — a burst, a
@@ -1065,12 +1464,19 @@ impl GasciiApp {
                     // Read from the fresh History rather than hardcoding None, so this stays
                     // correct if History::new()'s starting state ever changes.
                     self.saved_marker = self.history.top_edit_id();
-                    self.current_path = Some(path);
+                    self.current_path = Some(path.to_path_buf());
                     self.last_error = None;
+                    self.note_recent_file(path);
                 }
-                Err(e) => self.last_error = Some(format!("failed to load {}: {e}", path.display())),
+                Err(e) => {
+                    self.last_error = Some(format!("failed to load {}: {e}", path.display()));
+                    self.recent_files.retain(|p| p != path);
+                }
             },
-            Err(e) => self.last_error = Some(format!("failed to read {}: {e}", path.display())),
+            Err(e) => {
+                self.last_error = Some(format!("failed to read {}: {e}", path.display()));
+                self.recent_files.retain(|p| p != path);
+            }
         }
     }
 
@@ -1102,23 +1508,9 @@ impl GasciiApp {
                 self.current_path = Some(path.to_path_buf());
                 self.last_error = None;
                 self.saved_marker = self.history.top_edit_id();
+                self.note_recent_file(path);
             }
             Err(e) => self.last_error = Some(format!("failed to save {}: {e}", path.display())),
-        }
-    }
-
-    /// Exports composited plain text to a file. Does not touch `current_path` — that's reserved
-    /// for the native `.gascii` file.
-    fn export_text_file(&mut self) {
-        // Flush first — see `save_file`'s comment; export reads `self.doc` the same way save does.
-        self.flush_all();
-        let Some(path) = rfd::FileDialog::new().add_filter("Text", &["txt"]).save_file() else {
-            return;
-        };
-        if let Err(e) = std::fs::write(&path, export_text(&self.doc)) {
-            self.last_error = Some(format!("failed to export {}: {e}", path.display()));
-        } else {
-            self.last_error = None;
         }
     }
 
@@ -1138,7 +1530,7 @@ impl GasciiApp {
         self.flush_all();
         if self.is_dirty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.close_dialog_open = true;
+            self.confirm = Some(PendingConfirm::CloseApp);
         }
         // Else: clean — don't cancel, eframe closes the window at the end of this frame.
     }
@@ -1148,39 +1540,78 @@ impl GasciiApp {
     /// veto this dialog just cleared.
     fn close_now(&mut self, ctx: &egui::Context) {
         self.force_close = true;
-        self.close_dialog_open = false;
+        self.confirm = None;
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
-    /// The Save/Don't Save/Cancel modal shown while `close_dialog_open`. `canvas.rs` and
-    /// `handle_keys` are both gated off while this is open — see their own guards — since this
-    /// dialog is the only place a decision here (discarding unsaved work) is irreversible.
-    fn close_confirm_dialog(&mut self, ctx: &egui::Context) {
-        if !self.close_dialog_open {
-            return;
-        }
-        let resp = egui::Modal::new(egui::Id::new("close_confirm")).show(ctx, |ui| {
+    /// Resets New-dialog state to defaults and opens it. Shared by File ▸ New…'s clean path and the
+    /// confirm dialog's `NewDocument` resolution.
+    fn open_new_dialog(&mut self) {
+        self.new_w = Document::DEFAULT_WIDTH;
+        self.new_h = Document::DEFAULT_HEIGHT;
+        self.new_bg = Rgba(0, 0, 0, 255);
+        self.new_dialog_open = true;
+    }
+
+    /// Creates a fresh document from the New dialog's current settings, discarding the old one
+    /// (the confirm flow above is what makes that safe to do unconditionally here).
+    fn create_new_document(&mut self) {
+        self.reset_cross_frame_tool();
+        self.doc = Document::new(self.new_w, self.new_h);
+        self.doc.background = self.new_bg;
+        self.history = History::new();
+        self.saved_marker = self.history.top_edit_id();
+        self.current_path = None;
+        self.pending_fit = true;
+        self.new_dialog_open = false;
+    }
+
+    /// The Save/Don't Save/Cancel modal shown while `self.confirm` is set. `canvas.rs` and
+    /// `handle_keys` are both gated off while any modal is open (`modal_open()`) — this is the only
+    /// place a decision here (discarding unsaved work) is irreversible.
+    fn confirm_dialog(&mut self, ctx: &egui::Context) {
+        let Some(target) = self.confirm else { return };
+        let resp = dialog::modal(ctx, "confirm_unsaved", "Unsaved Changes", |ui| {
             ui.label("This document has unsaved changes.");
+            ui.add_space(12.0);
+            let mut dont_save = false;
+            let mut decided = DialogAction::None;
             ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
-                    self.save_file();
-                    // `save_file` leaves last_error/saved_marker untouched on cancel or failure —
-                    // is_dirty() staying true after the call *is* the "didn't actually save"
-                    // signal, no separate success/failure plumbing needed.
-                    if !self.is_dirty() {
-                        self.close_now(ctx);
+                if crate::ui::widgets::button(ui, "Don't Save", false).clicked() {
+                    dont_save = true;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    decided = dialog::buttons(ui, "Cancel", "Save");
+                });
+            });
+            (dont_save, decided)
+        });
+
+        let (dont_save, decided) = resp.inner;
+        if dont_save {
+            match target {
+                PendingConfirm::CloseApp => self.close_now(ctx),
+                PendingConfirm::NewDocument => {
+                    self.confirm = None;
+                    self.open_new_dialog(); // the current doc's fate is settled; now pick the new one's W/H/bg
+                }
+            }
+        } else if decided == DialogAction::Confirm {
+            self.save_file();
+            // `save_file` leaves last_error/saved_marker untouched on cancel or failure —
+            // is_dirty() staying true after the call *is* the "didn't actually save" signal, no
+            // separate success/failure plumbing needed.
+            if !self.is_dirty() {
+                match target {
+                    PendingConfirm::CloseApp => self.close_now(ctx),
+                    PendingConfirm::NewDocument => {
+                        self.confirm = None;
+                        self.open_new_dialog();
                     }
                 }
-                if ui.button("Don't Save").clicked() {
-                    self.close_now(ctx);
-                }
-                if ui.button("Cancel").clicked() {
-                    self.close_dialog_open = false;
-                }
-            });
-        });
-        if resp.should_close() {
-            self.close_dialog_open = false; // backdrop click / Escape == Cancel
+            }
+        } else if decided == DialogAction::Cancel || resp.dismissed {
+            self.confirm = None;
         }
     }
 
@@ -1218,6 +1649,44 @@ fn write_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> 
     Ok(())
 }
 
+/// The Resize dialog's 3x3 anchor picker: nine 24px cells laid out like mini tool-cells (selected
+/// inverts), each bound to one `(AxisAnchor, AxisAnchor)` combination. Glyphs read as a compass —
+/// arrows toward the edge/corner the anchor pins, a dot at dead center.
+fn anchor_grid(ui: &mut egui::Ui, anchor: &mut ResizeAnchor) {
+    use eframe::egui::{Align2, Rect, Sense, Vec2};
+    const CELL: f32 = 24.0;
+    let axes = [AxisAnchor::Start, AxisAnchor::Center, AxisAnchor::End];
+    let glyphs = [["↖", "↑", "↗"], ["←", "·", "→"], ["↙", "↓", "↘"]];
+    let t = crate::ui::theme::current(ui.ctx());
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(CELL * 3.0), Sense::hover());
+    let painter = ui.painter().clone();
+    for (row, &v) in axes.iter().enumerate() {
+        for (col, &h) in axes.iter().enumerate() {
+            let cell_rect = Rect::from_min_size(
+                rect.min + Vec2::new(col as f32 * CELL, row as f32 * CELL),
+                Vec2::splat(CELL),
+            );
+            let selected = anchor.h == h && anchor.v == v;
+            let resp = ui.interact(cell_rect, ui.id().with(("anchor", row, col)), Sense::click());
+            let (fill, fg) = if selected {
+                (t.bg_inverse, t.fg_inverse)
+            } else if resp.hovered() {
+                (t.bg_hover, t.fg_text)
+            } else {
+                (eframe::egui::Color32::TRANSPARENT, t.fg_text)
+            };
+            painter.rect_filled(cell_rect, 0.0, fill);
+            painter.rect_stroke(cell_rect, 0.0, eframe::egui::Stroke::new(1.0, t.border_soft), eframe::egui::StrokeKind::Inside);
+            painter.text(cell_rect.center(), Align2::CENTER_CENTER, glyphs[row][col], fonts::mono_id(fonts::size::CONTROL), fg);
+            if resp.clicked() {
+                anchor.h = h;
+                anchor.v = v;
+            }
+        }
+    }
+    painter.rect_stroke(rect, 0.0, eframe::egui::Stroke::new(1.0, t.border_strong), eframe::egui::StrokeKind::Inside);
+}
+
 impl eframe::App for GasciiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if self.first_frame {
@@ -1226,7 +1695,7 @@ impl eframe::App for GasciiApp {
         }
         let ctx = ui.ctx().clone();
         self.handle_close_request(&ctx);
-        if !self.close_dialog_open {
+        if !self.modal_open() {
             self.handle_keys(ui);
         }
 
@@ -1256,7 +1725,7 @@ impl eframe::App for GasciiApp {
             .show(ui, |ui| crate::ui::titlebar::show(ui, self));
         egui::Panel::top("menubar")
             .frame(egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::symmetric(8, 0)))
-            .exact_size(26.0)
+            .exact_size(28.0)
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| self.menu_bar(ui));
             });
@@ -1275,8 +1744,9 @@ impl eframe::App for GasciiApp {
             });
         egui::Panel::left("sidebar")
             .frame(egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::same(12)))
-            .exact_size(crate::ui::sidebar::WIDTH)
-            .resizable(false)
+            .default_size(crate::ui::sidebar::DEFAULT_WIDTH)
+            .size_range(crate::ui::sidebar::MIN_WIDTH..=crate::ui::sidebar::MAX_WIDTH)
+            .resizable(true)
             .show(ui, |ui| crate::ui::sidebar::show(ui, self));
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(t.bg_desk))
@@ -1284,13 +1754,18 @@ impl eframe::App for GasciiApp {
                 canvas::show(ui, self, pointer_on_resize_grip);
             });
 
+        self.new_dialog(&ctx);
         self.resize_dialog(&ctx);
-        self.png_export_dialog(&ctx);
-        self.close_confirm_dialog(&ctx);
+        self.export_dialog(&ctx);
+        self.confirm_dialog(&ctx);
 
         // Last, on the foreground layer: with the OS frame gone, nothing else draws the window's
         // own outline.
         crate::ui::titlebar::paint_window_edge(&ctx);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        prefs::save(storage, self);
     }
 }
 
@@ -2016,5 +2491,136 @@ mod tests {
         let l2 = crate::canvas::tool_ctx(&app, Binding::L);
         app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 1, y: 1 }, &l2, &app.doc);
         assert!(app.slots[Binding::L.ix()].tool.caret().is_some(), "the new Text instance is interactive");
+    }
+
+    /// `note_recent_file` mirrors `push_recent`'s contract: most-recent-first, de-duplicated,
+    /// capped — re-opening an already-listed path must move it to the front, not add a duplicate.
+    #[test]
+    fn note_recent_file_is_most_recent_first_deduplicated_and_capped_at_eight() {
+        let mut app = GasciiApp::headless();
+        for i in 0..10 {
+            app.note_recent_file(&PathBuf::from(format!("{i}.gascii")));
+        }
+        assert_eq!(app.recent_files.len(), 8, "capped at 8 entries");
+        assert_eq!(app.recent_files[0], PathBuf::from("9.gascii"), "most recent is first");
+        assert_eq!(app.recent_files[7], PathBuf::from("2.gascii"), "oldest surviving entry");
+
+        let reopened = PathBuf::from("5.gascii");
+        app.note_recent_file(&reopened); // already present, mid-list
+        assert_eq!(app.recent_files[0], reopened, "re-opening moves it to the front");
+        assert_eq!(
+            app.recent_files.iter().filter(|p| **p == reopened).count(),
+            1,
+            "must not duplicate an already-listed path"
+        );
+        assert_eq!(app.recent_files.len(), 8, "re-adding an existing entry does not grow the list");
+    }
+
+    /// A failed re-open (`open_path` reading a path that no longer exists) must drop that entry
+    /// from `recent_files` rather than leaving a dead path the user can never successfully open.
+    #[test]
+    fn a_failed_reopen_drops_the_path_from_recent_files() {
+        let mut app = GasciiApp::headless();
+        let missing = std::env::temp_dir().join("gascii_definitely_missing_file.gascii");
+        app.note_recent_file(&missing);
+        assert!(app.recent_files.contains(&missing));
+
+        app.open_path(&missing);
+
+        assert!(!app.recent_files.contains(&missing), "a failed open must drop the dead entry");
+        assert!(app.last_error.is_some());
+    }
+
+    /// The Export dialog's cell-px mapping: `16 * {1, 2, 4}` (D9), pinned so a future change to
+    /// the base or the offered scales is a deliberate, visible edit here.
+    #[test]
+    fn export_cell_px_maps_scale_to_16x_32x_64x() {
+        for (scale, expected) in [(1u8, 16u32), (2, 32), (4, 64)] {
+            let settings = ExportSettings { scale, ..ExportSettings::default() };
+            assert_eq!(settings.cell_px(), expected);
+        }
+    }
+
+    /// `step_zoom` clamps at both ends of `ZOOM_SCALES` rather than panicking or wrapping —
+    /// exercised via the same method the View menu, the keyboard chords, and the status bar's
+    /// buttons all now share.
+    #[test]
+    fn step_zoom_clamps_at_both_ends_of_the_scale_list() {
+        let mut app = GasciiApp::headless();
+        app.viewport.zoom_step = 0;
+        app.step_zoom(-1);
+        assert_eq!(app.viewport.zoom_step, 0, "must not go below the smallest step");
+
+        app.viewport.zoom_step = crate::viewport::ZOOM_SCALES.len() - 1;
+        app.step_zoom(1);
+        assert_eq!(app.viewport.zoom_step, crate::viewport::ZOOM_SCALES.len() - 1, "must not exceed the largest step");
+    }
+
+    /// `modal_open()` is the one gate `canvas.rs`'s raw-input polling relies on — it must report
+    /// true for every dialog flag independently, and false only when none are set.
+    #[test]
+    fn modal_open_is_true_while_any_dialog_flag_is_set() {
+        let mut app = GasciiApp::headless();
+        assert!(!app.modal_open());
+
+        app.confirm = Some(PendingConfirm::CloseApp);
+        assert!(app.modal_open());
+        app.confirm = None;
+
+        app.resize_dialog_open = true;
+        assert!(app.modal_open());
+        app.resize_dialog_open = false;
+
+        app.export_dialog_open = true;
+        assert!(app.modal_open());
+        app.export_dialog_open = false;
+
+        app.new_dialog_open = true;
+        assert!(app.modal_open());
+        app.new_dialog_open = false;
+
+        assert!(!app.modal_open());
+    }
+
+    /// The Export dialog's "Trim trailing spaces" checkbox toggles between two different text
+    /// export functions (`export_text`, trimmed; `export_text_untrimmed`, padded) — this pins that
+    /// the two genuinely diverge on a document with both a full-width row and a row with real
+    /// trailing whitespace, so a future refactor that accidentally routes both dialog paths through
+    /// the same function is caught here rather than only visually in the export preview.
+    #[test]
+    fn export_trim_checkbox_toggles_between_trimmed_and_full_width_padded_rows() {
+        let mut doc = Document::new(5, 2);
+        // Row 0: full-width content, no trailing blanks -- trim must be a no-op here.
+        for x in 0..5u16 {
+            doc.set_cell(0, x, 0, cell('#'));
+        }
+        // Row 1: content only in the first two columns, rest genuinely blank -- trim removes the
+        // trailing three columns; untrimmed keeps the row padded to the full document width.
+        doc.set_cell(0, 0, 1, cell('a'));
+        doc.set_cell(0, 1, 1, cell('b'));
+
+        let trimmed = export_text(&doc);
+        let untrimmed = export_text_untrimmed(&doc);
+
+        assert_eq!(trimmed, "#####\nab", "trim must drop row 1's trailing blanks but leave the full row untouched");
+        assert_eq!(untrimmed, "#####\nab   ", "untrimmed must pad row 1 to the full document width");
+        assert_ne!(trimmed, untrimmed, "the two export paths must genuinely diverge for this document");
+    }
+
+    /// The New dialog's background color well (`new_bg`) must land on the freshly created
+    /// document's `background` field, not just sit as inert dialog state -- the one place this
+    /// wiring is exercised outside a full GUI run.
+    #[test]
+    fn create_new_document_carries_the_dialog_background_onto_the_fresh_document() {
+        let mut app = GasciiApp::headless();
+        app.new_w = 12;
+        app.new_h = 6;
+        app.new_bg = Rgba(1, 2, 3, 255);
+        app.create_new_document();
+
+        assert_eq!((app.doc.width, app.doc.height), (12, 6));
+        assert_eq!(app.doc.background, Rgba(1, 2, 3, 255));
+        assert!(!app.new_dialog_open, "creating the document must close the dialog");
+        assert!(!app.history.can_undo(), "a fresh document starts with empty history");
     }
 }

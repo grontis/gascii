@@ -10,12 +10,22 @@ use crate::palette::{validate_width, WidthReject};
 
 pub const CURRENT_VERSION: u32 = 1;
 
+/// Matches `Document`'s own default so a pre-existing file without this field loads identically to
+/// how the app already rendered it (a hardcoded opaque black canvas surface).
+fn default_background() -> Rgba {
+    Rgba(0, 0, 0, 255)
+}
+
 #[derive(Serialize, Deserialize)]
 struct FileEnvelope {
     version: u32,
     width: u16,
     height: u16,
     layers: Vec<FileLayer>,
+    /// Additive: absent in every file saved before this field existed, so `#[serde(default)]`
+    /// keeps those files loading unchanged rather than becoming a rejected/unsupported version.
+    #[serde(default = "default_background")]
+    background: Rgba,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -98,6 +108,7 @@ pub fn save_string(doc: &Document) -> String {
         width: doc.width,
         height: doc.height,
         layers,
+        background: doc.background,
     };
     serde_json::to_string(&envelope).expect("Document -> FileEnvelope is always serializable")
 }
@@ -143,6 +154,7 @@ pub fn load_str(s: &str) -> Result<Document, LoadError> {
         doc.layers.push(Layer::blank(envelope.width, envelope.height));
         decode_layer_into(&mut doc, idx, file_layer)?;
     }
+    doc.background = envelope.background;
     Ok(doc)
 }
 
@@ -330,6 +342,26 @@ mod tests {
             }
             other => panic!("expected UnsupportedVersion, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_non_black_background_round_trips() {
+        let mut doc = Document::new(2, 2);
+        doc.background = Rgba(10, 20, 30, 255);
+        let back = load_str(&save_string(&doc)).unwrap();
+        assert_eq!(back.background, Rgba(10, 20, 30, 255));
+    }
+
+    /// A file saved before `background` existed (no such key at all) must load as opaque black —
+    /// the same value the app hardcoded as its canvas surface before this field existed.
+    #[test]
+    fn a_legacy_file_with_no_background_field_loads_as_opaque_black() {
+        let doc = Document::new(2, 2);
+        let mut value: serde_json::Value = serde_json::from_str(&save_string(&doc)).unwrap();
+        value.as_object_mut().unwrap().remove("background");
+        let json = serde_json::to_string(&value).unwrap();
+        let back = load_str(&json).unwrap();
+        assert_eq!(back.background, Rgba(0, 0, 0, 255));
     }
 
     #[test]

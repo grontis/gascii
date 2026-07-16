@@ -12,9 +12,9 @@ fn color32(c: Rgba) -> Color32 {
     Color32::from_rgba_unmultiplied(c.0, c.1, c.2, c.3)
 }
 
-/// Background the doc canvas paints onto before compositing transparent Blank cells. A document
-/// property, not a chrome colour — it does not follow the theme.
-const DOC_BG: Color32 = crate::ui::theme::CANVAS_SURFACE;
+/// The size tag's own text color, chosen for legibility against the accent fill it sits on — not
+/// the live document's background (see `doc.background` in `NaiveRenderer::paint` for that).
+const TAG_FG: Color32 = crate::ui::theme::CANVAS_SURFACE;
 
 /// The accent, used only on canvas overlays.
 const ACCENT: Color32 = crate::ui::theme::CANVAS_ACCENT;
@@ -69,12 +69,13 @@ impl CanvasRenderer for NaiveRenderer {
         selection: Option<SelectionView>,
     ) {
         let (x0, y0, x1, y1) = visible;
+        let doc_bg = color32(doc.background);
 
         let doc_rect = Rect::from_min_size(
             origin + vp.pan,
             Vec2::new(doc.width as f32 * cell.x, doc.height as f32 * cell.y),
         );
-        painter.rect_filled(doc_rect, 0.0, DOC_BG);
+        painter.rect_filled(doc_rect, 0.0, doc_bg);
 
         let font_id = canvas_font_id(vp.font_px());
         for y in y0..y1 {
@@ -103,7 +104,7 @@ impl CanvasRenderer for NaiveRenderer {
         // and before the pending overlay, so it reads as erased under the float even though the
         // document itself was never mutated.
         if let Some(src) = selection.and_then(|s| s.lifted_source) {
-            painter.rect_filled(cell_rect_to_screen(src, vp, cell, origin), 0.0, DOC_BG);
+            painter.rect_filled(cell_rect_to_screen(src, vp, cell, origin), 0.0, doc_bg);
         }
 
         for p in pending {
@@ -117,7 +118,7 @@ impl CanvasRenderer for NaiveRenderer {
             // pending cell (ch ' ', transparent bg) would otherwise leave whatever's already
             // painted there (the underlying doc glyph, or the vacated-source fill above) showing
             // through, contradicting what the drop actually produces.
-            painter.rect_filled(rect, 0.0, DOC_BG);
+            painter.rect_filled(rect, 0.0, doc_bg);
             if p.cell.bg.3 > 0 {
                 painter.rect_filled(rect, 0.0, color32(p.cell.bg));
             }
@@ -170,13 +171,13 @@ impl CanvasRenderer for NaiveRenderer {
 /// outside the top-right corner so it never covers the cells being selected.
 fn size_tag(painter: &Painter, rect: Rect, marquee: CellRect) {
     let text = format!("{}×{}", marquee.width(), marquee.height());
-    let font = crate::fonts::mono_id(10.0);
-    let galley = painter.layout_no_wrap(text, font, DOC_BG);
+    let font = crate::fonts::mono_id(crate::fonts::size::TAG);
+    let galley = painter.layout_no_wrap(text, font, TAG_FG);
     let pad = Vec2::new(5.0, 1.0);
     let size = galley.size() + pad * 2.0;
     let tag = Rect::from_min_size(Pos2::new(rect.max.x - size.x, rect.min.y - size.y), size);
     painter.rect_filled(tag, 0.0, ACCENT);
-    painter.galley(tag.min + pad, galley, DOC_BG);
+    painter.galley(tag.min + pad, galley, TAG_FG);
 }
 
 fn arrow_direction(key: egui::Key) -> Option<Direction> {
@@ -312,13 +313,12 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
     let mut cell = app.viewport.cell_size(&ctx);
     let doc_extent = app.doc.extent();
 
-    // The close-confirm dialog is the only modal surface in this app, but this function polls raw
-    // pointer/keyboard state (`ui.input(|i| i.pointer...)`) rather than using egui's occlusion
-    // system, so `egui::Modal`'s backdrop does not itself block canvas interaction. Every
-    // pointer/keyboard-consuming branch below (through focus-loss detection) is therefore gated
-    // explicitly on the dialog flag. Rendering below this block stays unconditional — the canvas
-    // keeps showing its last frame, frozen, underneath the dialog.
-    if !app.close_dialog_open {
+    // This function polls raw pointer/keyboard state (`ui.input(|i| i.pointer...)`) rather than
+    // using egui's occlusion system, so no modal's backdrop blocks canvas interaction on its own —
+    // any modal flag must gate this section explicitly, which is exactly what `modal_open()` is
+    // for. Rendering below this block stays unconditional — the canvas keeps showing its last
+    // frame, frozen, underneath whichever dialog is open.
+    if !app.modal_open() {
         // Precedence 1: zoom. Allowed any time, including mid-stroke — pending cells are
         // cell-addressed and stay valid; the cursor-anchored zoom keeps the pointer's cell fixed.
         let (scroll_y, ctrl) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.ctrl));
@@ -574,19 +574,27 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
     }
     let caret_cell = caret.filter(|_| cursor_blink_on(ui));
 
-    // Hover marker: the cells the active tool's next click/stroke would land on, footprint-
-    // expanded for sized tools using the ACTIVE tool's own stamp (a right-click stroke's
-    // footprint differs, but hover can't know which button is coming — the left-click tool is
-    // the honest default). Hidden while any gesture owns the canvas: mid-stroke, the pending
-    // overlay is already the real preview.
+    // Preview target: the binding whose next stamp the outline should show. Mid-stroke that's the
+    // gesturing binding itself — the outline then shows where the *next* stamp lands, which is
+    // complementary to the pending overlay (what's already stamped), not redundant with it. Idle,
+    // it falls back to L, the honest default when hover can't know which button is coming next.
+    let preview_b = app.stroke_owner.unwrap_or(Binding::L);
+    let preview_kind = app.slot(preview_b).kind;
+    // Unclamped mapping, unlike the drag path's own clamped `screen_to_cell_clamped`: the preview
+    // should vanish once the pointer leaves the document, not stick to its edge.
+    let preview_center = if app.stroke_in_progress() {
+        response
+            .interact_pointer_pos()
+            .and_then(|p| app.viewport.screen_to_cell(p, cell, origin, doc_extent))
+    } else {
+        app.hovered_cell
+    };
+
     let mut hover_cells: Vec<(u16, u16)> = Vec::new();
-    if let Some((hx, hy)) = app.hovered_cell {
-        if !app.stroke_in_progress()
-            && !app.space_pan_active
-            && crate::app::tool_shows_hover(app.slot(Binding::L).kind)
-        {
-            if crate::app::tool_is_sized(app.slot(Binding::L).kind) {
-                let stamp = app.slot(Binding::L).stamp();
+    if let Some((hx, hy)) = preview_center {
+        if !app.space_pan_active && crate::app::tool_shows_hover(preview_kind) {
+            if crate::app::tool_is_sized(preview_kind) {
+                let stamp = app.slot(preview_b).stamp();
                 gascii_core::footprint((hx, hy), stamp.size, stamp.shape, &mut hover_cells);
                 hover_cells.retain(|&(x, y)| app.doc.in_bounds(x, y));
             } else {
@@ -648,5 +656,68 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
         selection,
     );
 
+    if app.show_grid {
+        paint_grid(&painter, &app.viewport, cell, origin, doc_rect, visible, doc_extent);
+    }
+
     painter.rect_stroke(doc_rect, 0.0, Stroke::new(1.0, t.window_edge), StrokeKind::Outside);
+
+    // The tool-icon cursor: replaces the OS cursor over the canvas for every stamp-shaped tool.
+    // Text/Selection keep stock cursors (their gestures aren't stamp-shaped); space-pan gets the
+    // grab hand. Must not paint while a modal is open — a painted cursor would advertise
+    // interactivity the modal gate has already shut off.
+    if !app.modal_open() && !pointer_on_resize_grip && response.contains_pointer() {
+        let space_held = ui.input(|i| i.key_down(egui::Key::Space));
+        if space_held || app.space_pan_active {
+            ctx.set_cursor_icon(if app.space_pan_active {
+                egui::CursorIcon::Grabbing
+            } else {
+                egui::CursorIcon::Grab
+            });
+        } else {
+            match preview_kind {
+                ToolKind::Text => ctx.set_cursor_icon(egui::CursorIcon::Text),
+                ToolKind::Selection => ctx.set_cursor_icon(egui::CursorIcon::Crosshair),
+                _ => {
+                    ctx.set_cursor_icon(egui::CursorIcon::None);
+                    if let Some(pos) = ctx.pointer_latest_pos() {
+                        paint_tool_cursor(&painter, preview_kind, pos);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A cell-grid overlay: 1px lines on interior cell boundaries (the outer edge is already the doc
+/// border), clipped to the document's own screen rect. 4% white over the document surface — faint
+/// enough to read as structure, not as ink.
+fn paint_grid(
+    painter: &Painter,
+    vp: &Viewport,
+    cell: Vec2,
+    origin: Pos2,
+    doc_rect: Rect,
+    visible: (u16, u16, u16, u16),
+    extent: gascii_core::DocExtent,
+) {
+    let color = Color32::WHITE.gamma_multiply(0.04);
+    let (x0, y0, x1, y1) = visible;
+    for x in x0.max(1)..x1.min(extent.width) {
+        let sx = vp.cell_to_screen(x, 0, cell, origin).x;
+        painter.vline(sx, doc_rect.y_range(), Stroke::new(1.0, color));
+    }
+    for y in y0.max(1)..y1.min(extent.height) {
+        let sy = vp.cell_to_screen(0, y, cell, origin).y;
+        painter.hline(doc_rect.x_range(), sy, Stroke::new(1.0, color));
+    }
+}
+
+/// Paints `kind`'s tool icon centered on `pos`: white over a 1px black hard-offset copy, legible
+/// against both the black document surface and any light-themed desk around it.
+fn paint_tool_cursor(painter: &Painter, kind: ToolKind, pos: Pos2) {
+    const ICON_SIZE: f32 = 17.0;
+    let rect = Rect::from_center_size(pos, Vec2::splat(ICON_SIZE));
+    crate::ui::icons::paint(painter, kind, rect.translate(Vec2::splat(1.0)), Color32::BLACK);
+    crate::ui::icons::paint(painter, kind, rect, Color32::WHITE);
 }

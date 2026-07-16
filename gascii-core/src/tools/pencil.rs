@@ -64,7 +64,7 @@ mod tests {
             density: crate::brush::DensityMode::Fixed(crate::brush::Fixed(1.0)),
             ramp: Vec::new(),
             size: 1,
-            shape: crate::tools::BrushShape::Square,
+            shape: crate::tools::BrushShape::default(),
         }
     }
 
@@ -204,6 +204,7 @@ mod tests {
         let mut pencil = Pencil::new();
         let mut tctx = ctx(PlaneMask::ALL);
         tctx.size = 3;
+        tctx.shape = crate::tools::BrushShape::Square;
         pencil.update(ToolEvent::Press { x: 5, y: 5 }, &tctx, &doc);
         let resp = pencil.update(ToolEvent::Release, &tctx, &doc);
 
@@ -219,6 +220,7 @@ mod tests {
         let mut pencil = Pencil::new();
         let mut tctx = ctx(PlaneMask::ALL);
         tctx.size = 3;
+        tctx.shape = crate::tools::BrushShape::Square;
         pencil.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &doc);
         let resp = pencil.update(ToolEvent::Release, &tctx, &doc);
 

@@ -2,7 +2,7 @@ use eframe::egui::{self, Pos2, Rect, Vec2};
 
 use gascii_core::DocExtent;
 
-pub const ZOOM_SCALES: [f32; 7] = [0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
+pub const ZOOM_SCALES: [f32; 6] = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0];
 
 pub struct Viewport {
     pub zoom_step: usize,  // index into ZOOM_SCALES
@@ -19,7 +19,7 @@ pub struct Viewport {
 impl Default for Viewport {
     fn default() -> Self {
         Viewport {
-            zoom_step: 2, // ZOOM_SCALES[2] == 1.0
+            zoom_step: 1, // ZOOM_SCALES[1] == 1.0
             pan: Vec2::ZERO,
             base_font_px: 16.0,
             cached_cell: None,
@@ -502,12 +502,13 @@ mod tests {
         // and below the origin (otherwise `screen_to_cell` correctly returns `None`).
         let mut vp = Viewport::default();
         vp.pan += Vec2::new(23.0, -17.0);
+        let old_step = vp.zoom_step;
 
         let cursor = Pos2::new(45.0, 65.0);
         let before = vp.screen_to_cell(cursor, cell(), origin(), big_doc()).unwrap();
 
         vp.zoom_at(cursor, 1, cell(), origin());
-        let ratio = ZOOM_SCALES[vp.zoom_step] / ZOOM_SCALES[2];
+        let ratio = ZOOM_SCALES[vp.zoom_step] / ZOOM_SCALES[old_step];
         let new_cell = Vec2::new(cell().x * ratio, cell().y * ratio);
         let after = vp.screen_to_cell(cursor, new_cell, origin(), big_doc()).unwrap();
 

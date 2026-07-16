@@ -7,17 +7,23 @@ use super::theme;
 use crate::app::{Binding, GasciiApp, ToolKind, TOOLS};
 use crate::fonts;
 
-/// The panel is fixed at this and not resizable; its 12px padding is set by the `Frame` at the
-/// call site, so the content width here is 184.
-pub const WIDTH: f32 = 208.0;
+/// The panel's default width; it is resizable (see `app.rs`'s `Panel::left` builder), so this is
+/// no longer the only width the sidebar's own content math has to hold up at — `swatch_row`'s
+/// per-row count is derived from the available width instead of a fixed 6-per-row cap.
+pub const DEFAULT_WIDTH: f32 = 216.0;
+pub const MIN_WIDTH: f32 = 190.0;
+pub const MAX_WIDTH: f32 = 320.0;
 const TOOL_COLS: usize = 3;
-const SWATCH_COLS: usize = 6;
+/// Floor on how few swatches a row ever shows, even at `MIN_WIDTH`.
+const SWATCH_COLS_MIN: usize = 4;
+/// Ceiling on the RECENT row regardless of available width — it only ever holds `RECENT_GLYPHS`.
+const SWATCH_COLS_MAX: usize = 6;
 const SWATCH_GAP: f32 = 3.0;
 
-/// Height of the colours + WRITE block pinned to the foot of the panel: the 44px well cluster, the
+/// Height of the colours + WRITE block pinned to the foot of the panel: the well cluster, the
 /// rule and its gaps, the WRITE micro-label, and the toggle row. Only used to decide how far down
 /// to push it, so being a few px out costs nothing but the gap above it.
-const BOTTOM_BLOCK: f32 = 44.0 + 4.0 + 1.0 + 4.0 + 14.0 + 8.0 + 18.0;
+const BOTTOM_BLOCK: f32 = 48.0 + 4.0 + 1.0 + 4.0 + fonts::size::MICRO + 8.0 + 20.0;
 
 /// Short display names for the palette Pages. `Page::name` stays as the domain term — this is
 /// display only, and deliberately does not reach into `gascii-core` to rename anything.
@@ -144,12 +150,20 @@ fn palette(ui: &mut Ui, app: &mut GasciiApp) {
         });
 }
 
-/// A wrapped grid of glyph swatches, six per row.
+/// How many swatches fit per row at the given available width, floored at `SWATCH_COLS_MIN` and
+/// capped at `SWATCH_COLS_MAX` — the sidebar is resizable, so this can no longer be a fixed six.
+fn swatch_cols(avail: f32) -> usize {
+    let cols = ((avail + SWATCH_GAP) / (widgets::SWATCH + SWATCH_GAP)).floor() as i32;
+    cols.clamp(SWATCH_COLS_MIN as i32, SWATCH_COLS_MAX as i32) as usize
+}
+
+/// A wrapped grid of glyph swatches, reflowing to the sidebar's current width.
 fn swatch_row(ui: &mut Ui, app: &mut GasciiApp, glyphs: &[char]) {
     let mut picked: Option<char> = None;
+    let cols = swatch_cols(ui.available_width());
     ui.spacing_mut().item_spacing = Vec2::splat(SWATCH_GAP);
     ui.horizontal_wrapped(|ui| {
-        ui.set_max_width(widgets::SWATCH * SWATCH_COLS as f32 + SWATCH_GAP * (SWATCH_COLS - 1) as f32);
+        ui.set_max_width(widgets::SWATCH * cols as f32 + SWATCH_GAP * (cols - 1) as f32);
         for &ch in glyphs {
             if widgets::glyph_swatch(ui, ch, app.active_glyph == ch).clicked() {
                 picked = Some(ch);
@@ -222,8 +236,8 @@ fn colors(ui: &mut Ui, app: &mut GasciiApp) {
             for (tag, c) in [("FG", app.active_fg), ("BG", app.active_bg)] {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.label(egui::RichText::new(tag).font(fonts::mono_id(11.0)).color(t.fg_secondary));
-                    ui.label(egui::RichText::new(hex(c)).font(fonts::ui_medium_id(11.0)).color(t.fg_text));
+                    ui.label(egui::RichText::new(tag).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary));
+                    ui.label(egui::RichText::new(hex(c)).font(fonts::ui_medium_id(fonts::size::LABEL)).color(t.fg_text));
                 });
             }
         });
@@ -242,4 +256,59 @@ fn write_toggles(ui: &mut Ui, app: &mut GasciiApp) {
         widgets::checkbox(ui, &mut app.mask.glyph, "Glyph");
         widgets::checkbox(ui, &mut app.mask.bg, "Background");
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `swatch_cols` is the pure math behind the sidebar's resizable-width reflow (`WS6a`'s own
+    /// "checked by formula, not rendered" note) — this exercises it directly rather than only by
+    /// code inspection, across the panel's actual `size_range` (190..=320, `app.rs`'s
+    /// `.size_range(190.0..=320.0)`) minus plausible content margins, plus the two clamp
+    /// boundaries and adversarial (zero/negative) inputs a future margin-accounting change could
+    /// still hand it.
+    #[test]
+    fn swatch_cols_stays_within_min_and_max_across_the_sidebars_real_width_range() {
+        // A generous margin allowance either side of the panel's raw 190..=320 range — the actual
+        // available content width is narrower than the panel width (padding/margins), but must
+        // never be negative in practice.
+        for avail in [0.0, 50.0, 121.0 /* just below the min-clamp boundary */, 150.0, 170.0, 200.0, 260.0, 320.0, 1000.0] {
+            let cols = swatch_cols(avail);
+            assert!(
+                (SWATCH_COLS_MIN..=SWATCH_COLS_MAX).contains(&cols),
+                "avail={avail}: cols={cols} outside [{SWATCH_COLS_MIN},{SWATCH_COLS_MAX}]"
+            );
+        }
+    }
+
+    #[test]
+    fn swatch_cols_clamps_to_the_minimum_at_a_very_narrow_width() {
+        assert_eq!(swatch_cols(0.0), SWATCH_COLS_MIN);
+    }
+
+    #[test]
+    fn swatch_cols_clamps_to_the_maximum_at_a_very_wide_width() {
+        assert_eq!(swatch_cols(1000.0), SWATCH_COLS_MAX);
+    }
+
+    /// A negative available width (a defensive/adversarial input this pure function has no reason
+    /// to assume can't happen, e.g. from a future margin-subtraction bug) must clamp to the
+    /// minimum rather than underflowing the `usize` cast or panicking.
+    #[test]
+    fn swatch_cols_does_not_panic_or_underflow_on_a_negative_width() {
+        assert_eq!(swatch_cols(-500.0), SWATCH_COLS_MIN);
+    }
+
+    /// Pins the exact column count at the sidebar's default width (216, `DEFAULT_WIDTH`) minus a
+    /// representative content margin, so a future change to `SWATCH`/`SWATCH_GAP`/the panel's
+    /// default that silently drops the row below or above 6 columns is caught here, not just by
+    /// eyeballing the default layout.
+    #[test]
+    fn swatch_cols_at_the_default_sidebar_width_fits_six_per_row() {
+        // DEFAULT_WIDTH (216) minus a representative panel margin (~16px, matching the app's own
+        // sidebar content-frame inset) still comfortably fits the full 6-column cap.
+        let content_width = DEFAULT_WIDTH - 16.0;
+        assert_eq!(swatch_cols(content_width), SWATCH_COLS_MAX);
+    }
 }

@@ -10,6 +10,9 @@ eframe = { workspace = true }
 rfd = { workspace = true }
 fontdue = { workspace = true }
 image = { workspace = true }
+arboard = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 ttf-parser = "0.25" # test-only glyph-coverage backstop for the bundled canvas font
