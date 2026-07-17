@@ -11,9 +11,8 @@ fn main() -> eframe::Result {
     let t0 = std::time::Instant::now();
     let launch_fullscreen = std::env::args().any(|a| a == "--fullscreen");
     let options = eframe::NativeOptions {
-        // eframe's default opens too small to fit the options bar's controls, which then wrap and
-        // clip. The minimum is the sidebar plus enough desk for the default 80×25 document to be
-        // worth looking at.
+        // eframe's default opens too small to be useful. The minimum is the sidebar plus enough
+        // desk for the default 80×25 document to be worth looking at.
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([920.0, 600.0])

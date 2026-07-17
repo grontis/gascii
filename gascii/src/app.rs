@@ -170,7 +170,7 @@ pub(crate) enum ToolKind {
     Brush,
 }
 
-/// Which mouse button drives a tool. Named for what the UI says — the options bar's segment and
+/// Which mouse button drives a tool. Named for what the UI says — the sidebar's option rows and
 /// the toolbox badges read "L" and "R" — rather than Left/Right.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Binding {
@@ -292,8 +292,8 @@ pub(crate) struct ToolDef {
 }
 
 /// The nine tools, and the single source of truth for their names, shortcuts, hints, and
-/// constructors. The toolbox, the shortcut handler, the options bar, and both bindings all read
-/// this one table, so a tool cannot be added to the UI and forgotten in the constructor.
+/// constructors. The toolbox, the shortcut handler, the sidebar's option rows, and both bindings
+/// all read this one table, so a tool cannot be added to the UI and forgotten in the constructor.
 pub(crate) const TOOLS: [ToolDef; 9] = [
     ToolDef {
         kind: ToolKind::Pencil,
@@ -393,8 +393,7 @@ pub struct GasciiApp {
     pub(crate) mask: PlaneMask,
     /// The two bindings, indexed by `Binding::ix`. Exactly one tool is bound to each at all times.
     pub(crate) slots: [ToolSlot; 2],
-    /// Which binding the options bar edits. A gesture on either button selects that button's
-    /// segment.
+    /// Which binding the `[`/`]` size keys adjust: the one last drawn with or last bound.
     pub(crate) options_focus: Binding,
     /// Which slot's tool the pointer is currently driving, if any. Stroke ownership is one
     /// question, so it is one field — which is what let the press/drag/release paths collapse to a
@@ -676,9 +675,9 @@ impl GasciiApp {
         self.end_session(b);
         self.slots[b.ix()].kind = kind;
         self.slots[b.ix()].tool = make_tool(kind);
-        // The options bar (and the [/] size keys behind it) follows the binding the user just
-        // acted on — the same rule a canvas gesture applies. Without this, picking a tool by
-        // shortcut or toolbox click leaves the bar editing the OTHER binding's stamp.
+        // The [/] size keys follow the binding the user just acted on — the same rule a canvas
+        // gesture applies. Without this, picking a tool by shortcut or toolbox click leaves the
+        // keys adjusting the OTHER binding's stamp.
         self.options_focus = b;
     }
 
@@ -1098,9 +1097,8 @@ impl GasciiApp {
         if self.bound_to(ToolKind::Brush).is_some() && !focused {
             self.handle_brush_intensity_keys(ui);
         }
-        // `[`/`]` adjust the stamp of whichever binding the options bar is showing. That segment is
-        // what makes the target unambiguous — and a gesture on either button selects it, so the keys
-        // follow the button you last drew with.
+        // `[`/`]` adjust the stamp of whichever binding was last used — a gesture on either button
+        // selects it, as does binding a tool, so the keys follow the button you last drew with.
         let focus = self.options_focus;
         if let Some(slot) = sized_slot(self.slot(focus).kind) {
             if !focused {
@@ -1958,10 +1956,6 @@ impl eframe::App for GasciiApp {
                 .show(ui, |ui| {
                     ui.horizontal_centered(|ui| self.menu_bar(ui));
                 });
-            egui::Panel::top("options")
-                .frame(egui::Frame::new().fill(t.bg_chrome).inner_margin(egui::Margin::symmetric(12, 0)))
-                .exact_size(crate::ui::options_bar::HEIGHT)
-                .show(ui, |ui| crate::ui::options_bar::show(ui, self));
             // The status bar is claimed BEFORE the sidebar, so it spans the full window width. Panels
             // take their slice in declaration order: sidebar-first would give the left panel the whole
             // remaining height and leave the status bar starting at x=208.

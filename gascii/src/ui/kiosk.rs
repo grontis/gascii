@@ -1,16 +1,15 @@
-//! Full Screen Mode's chrome: touch/stylus-first, replaces the titlebar/menubar/options bar/
-//! normal sidebar/normal status bar entirely while active. Built on the same painting primitives
-//! normal chrome uses (`widgets`, `sidebar::tool_grid`/`palette`) at larger geometry — the only
-//! genuinely new painter is `widgets::color_swatch` (the quick-color row has no normal-mode
-//! equivalent).
+//! Full Screen Mode's chrome: touch/stylus-first, replaces the titlebar/menubar/normal sidebar/
+//! normal status bar entirely while active. Built on the same painting primitives normal chrome
+//! uses (`widgets`, `sidebar::tool_grid`/`palette`) at larger geometry — the only genuinely new
+//! painter is `widgets::color_swatch` (the quick-color row has no normal-mode equivalent).
 
 use eframe::egui::{self, Align2, Pos2, Rect, Ui, UiBuilder, Vec2};
 
-use super::sidebar::{palette, tool_grid};
+use super::sidebar::{palette, ramp_label, rule, tool_grid, SHAPE_OPTIONS};
 use super::{theme, widgets};
 use crate::app::{sized_slot, tool_def, Binding, GasciiApp, ToolKind, TOOLS};
 use crate::fonts;
-use gascii_core::{BrushShape, Buildup, DensityMode, Fixed, MAX_TOOL_SIZE};
+use gascii_core::{Buildup, DensityMode, Fixed, MAX_TOOL_SIZE};
 
 pub const TOP_H: f32 = 44.0;
 pub const SIDEBAR_W: f32 = 340.0;
@@ -25,7 +24,7 @@ const PALETTE_SCROLL_MIN: f32 = 120.0;
 /// section, split into what scales with the touch geometry (the RECENT row, the colour block —
 /// `color_wells` paints an overlapped 2×`WELL` square, not a single `WELL`-tall row) and what
 /// doesn't (labels, tabs, spacing). The glyph scroll area gets whatever is left, clamped.
-const PALETTE_RESERVED_FIXED: f32 = 140.0;
+const PALETTE_RESERVED_FIXED: f32 = 152.0;
 const PALETTE_RESERVED_SCALED: f32 = 150.0;
 const SIZE_STEPPER_H: f32 = 36.0;
 const WELL: f32 = 36.0;
@@ -138,15 +137,16 @@ fn kiosk_tools() -> Vec<crate::app::ToolDef> {
 /// `scale_for`, and if even that doesn't fit the whole sidebar scrolls rather than clipping the
 /// colour block out of reach.
 pub fn sidebar(ui: &mut Ui, app: &mut GasciiApp) {
+    let t = theme::current(ui.ctx());
     let panel_h = ui.available_height();
     let k = scale_for(panel_h);
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.spacing_mut().item_spacing = Vec2::new(10.0, 12.0);
         let top = ui.cursor().min.y;
         tool_grid(ui, app, &kiosk_tools(), TOOL_COLS, TOOL_CELL_H * k);
-        ui.add_space(2.0);
+        rule(ui, t.border_soft);
         binding_options(ui, app, k);
-        ui.add_space(2.0);
+        rule(ui, t.border_soft);
         // available_height is unbounded inside the scroll area — size the glyph scroll against
         // the panel's real height minus what the grid and options actually consumed.
         let remaining = panel_h - (ui.cursor().min.y - top);
@@ -154,18 +154,22 @@ pub fn sidebar(ui: &mut Ui, app: &mut GasciiApp) {
         let scroll_h = (remaining - reserved).clamp(PALETTE_SCROLL_MIN * k, PALETTE_SCROLL_MAX);
         palette(ui, app, SWATCH * k, GLYPH_PX * k, scroll_h);
         ui.add_space(8.0);
+        rule(ui, t.border_soft);
         colors(ui, app, k);
     });
 }
 
-/// Per-binding tool options: `L <tool> [− n +]` with the shape segment beneath. There is no
-/// options bar in this mode and no L/R focus segment either — both bindings simply show at once.
-/// Unsized tools get a dash where the stepper would be, so the rows always double as an L/R
-/// legend. Brush's shared controls follow once, whichever binding holds it.
+/// Per-binding tool options: `L <tool> [− n +]` with the shape segment beneath, and — when that
+/// binding holds the Brush — the ramp/intensity/pressure block nested right under it rather than
+/// floating below both rows, divided from the next binding's block by a rule. The same structure
+/// the normal sidebar shows (see its own `binding_options` doc for the shared-state rationale),
+/// at touch geometry. Unsized tools get a dash where the stepper would be, so the rows always
+/// double as an L/R legend.
 fn binding_options(ui: &mut Ui, app: &mut GasciiApp, k: f32) {
     let t = theme::current(ui.ctx());
     widgets::micro_label(ui, "OPTIONS");
-    for &b in Binding::ALL.iter() {
+    let mut brush_shown = false;
+    for (i, &b) in Binding::ALL.iter().enumerate() {
         let kind = app.slot(b).kind;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -199,30 +203,30 @@ fn binding_options(ui: &mut Ui, app: &mut GasciiApp, k: f32) {
                 // Indented to sit under the tool name, clear of the L/R gutter.
                 ui.add_space(18.0);
                 let mut shape = app.slots[b.ix()].stamps[slot].shape;
-                let shapes = [
-                    (BrushShape::Raw, "No Shape"),
-                    (BrushShape::Square, "Square"),
-                    (BrushShape::Circle, "Circle"),
-                ];
-                if widgets::segmented(ui, &mut shape, &shapes, false) {
+                if widgets::segmented(ui, &mut shape, &SHAPE_OPTIONS, false) {
                     app.slots[b.ix()].stamps[slot].shape = shape;
                 }
             });
         }
-    }
-    if Binding::ALL.iter().any(|&b| app.slot(b).kind == ToolKind::Brush) {
-        ui.add_space(2.0);
-        brush_options(ui, app);
+        if kind == ToolKind::Brush && !brush_shown {
+            ui.add_space(2.0);
+            brush_options(ui, app);
+            brush_shown = true;
+        }
+        if i + 1 < Binding::ALL.len() {
+            ui.add_space(2.0);
+            rule(ui, t.border_soft);
+        }
     }
 }
 
-/// Ramp, intensity mode/level and the pressure toggle — the same app-global state the options bar
-/// edits, shown once regardless of which binding holds the Brush.
+/// Ramp, intensity mode/level and the pressure toggle — the same app-global state the normal
+/// sidebar's BRUSH block edits, shown once regardless of which binding holds the Brush.
 fn brush_options(ui: &mut Ui, app: &mut GasciiApp) {
     let t = theme::current(ui.ctx());
     widgets::micro_label(ui, "BRUSH");
     let mut ramp = app.active_ramp;
-    let names: Vec<(usize, &str)> = app.ramps.iter().enumerate().map(|(i, r)| (i, r.name)).collect();
+    let names: Vec<(usize, &str)> = app.ramps.iter().enumerate().map(|(i, r)| (i, ramp_label(r.name))).collect();
     if widgets::segmented(ui, &mut ramp, &names, false) {
         app.active_ramp = ramp;
     }
@@ -254,7 +258,7 @@ fn brush_options(ui: &mut Ui, app: &mut GasciiApp) {
             );
         }
     });
-    // Same gate as the options bar: only offered once a pressure signal has been seen.
+    // Same gate as the normal sidebar: only offered once a pressure signal has been seen.
     if app.stylus_detected {
         widgets::checkbox(ui, &mut app.brush_pressure, "Pressure");
     }
@@ -312,6 +316,7 @@ pub fn status_bar(ui: &mut Ui, app: &mut GasciiApp) {
 mod tests {
     use super::*;
     use crate::app::Binding;
+    use gascii_core::BrushShape;
 
     /// Full size on tall panels, proportional shrink below `COMFORT_H`, floored at `SCALE_MIN` so
     /// touch targets never collapse on very short screens.

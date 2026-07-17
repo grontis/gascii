@@ -272,7 +272,7 @@ pub(crate) fn tool_ctx(app: &GasciiApp, b: Binding) -> gascii_core::ToolCtx {
 /// Nothing here is button-specific — that is the whole point of two symmetric slots. The Eyedropper
 /// is the single remaining special case, because it is the one kind that isn't a `Tool`.
 pub(crate) fn begin_gesture(app: &mut GasciiApp, b: Binding, x: u16, y: u16) -> bool {
-    // Drawing with a button selects that button's segment in the options bar.
+    // Drawing with a button focuses that binding for the [/] size keys.
     app.options_focus = b;
 
     if app.slot(b).kind == ToolKind::Eyedropper {

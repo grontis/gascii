@@ -51,7 +51,7 @@ const fn translucent(r: u8, g: u8, b: u8, a: u8) -> Color32 {
 /// One theme's palette. Every chrome color in the app resolves to a field here.
 #[derive(Clone, Copy, Debug)]
 pub struct Tokens {
-    /// Window body, options bar.
+    /// Window body.
     pub bg_chrome: Color32,
     /// Title/menu/status bars, sidebar, dialogs.
     pub bg_panel: Color32,

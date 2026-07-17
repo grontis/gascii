@@ -1,17 +1,19 @@
-//! The 208px left sidebar: toolbox, palette, colours, write toggles.
+//! The left sidebar: toolbox, tool options, palette, colours, write toggles.
 
 use eframe::egui::{self, Sense, Stroke, Ui, Vec2};
 
 use super::widgets::{self, Bound};
 use super::theme;
-use crate::app::{Binding, GasciiApp, ToolDef, ToolKind, TOOLS};
+use crate::app::{sized_slot, tool_def, Binding, GasciiApp, ToolDef, ToolKind, TOOLS};
 use crate::fonts;
+use gascii_core::{BrushShape, Buildup, DensityMode, Fixed, MAX_TOOL_SIZE};
 
 /// The panel's default width; it is resizable (see `app.rs`'s `Panel::left` builder), so this is
 /// no longer the only width the sidebar's own content math has to hold up at — `swatch_row`'s
 /// per-row count is derived from the available width instead of a fixed 6-per-row cap.
 pub const DEFAULT_WIDTH: f32 = 216.0;
-pub const MIN_WIDTH: f32 = 190.0;
+/// Floor set by the widest fixed row: the shape segment (~185px) plus the panel's 12px margins.
+pub const MIN_WIDTH: f32 = 212.0;
 pub const MAX_WIDTH: f32 = 320.0;
 const TOOL_COLS: usize = 3;
 /// Floor on how few swatches a row ever shows, even at `MIN_WIDTH`.
@@ -19,11 +21,16 @@ const SWATCH_COLS_MIN: usize = 4;
 /// Ceiling on the RECENT row regardless of available width — it only ever holds `RECENT_GLYPHS`.
 const SWATCH_COLS_MAX: usize = 6;
 const SWATCH_GAP: f32 = 3.0;
+/// Height the palette renders above its own scroll area: the page tabs, the RECENT micro-label
+/// and swatch row, and their gaps. Reserved when sizing the glyph scroll.
+const PALETTE_RESERVED: f32 = 90.0;
+const PALETTE_SCROLL_MAX: f32 = 220.0;
+const PALETTE_SCROLL_MIN: f32 = 96.0;
 
-/// Height of the colours + WRITE block pinned to the foot of the panel: the well cluster, the
-/// rule and its gaps, the WRITE micro-label, and the toggle row. Only used to decide how far down
-/// to push it, so being a few px out costs nothing but the gap above it.
-const BOTTOM_BLOCK: f32 = 48.0 + 4.0 + 1.0 + 4.0 + fonts::size::MICRO + 8.0 + 20.0;
+/// Height of the colours + WRITE block pinned to the foot of the panel: the rule above it, the
+/// well cluster, the inner rule and its gaps, the WRITE micro-label, and the toggle row. Only
+/// used to decide how far down to push it, so being a few px out costs nothing but the gap above.
+const BOTTOM_BLOCK: f32 = 9.0 + 48.0 + 4.0 + 1.0 + 4.0 + fonts::size::MICRO + 8.0 + 20.0;
 
 /// Short display names for the palette Pages. `Page::name` stays as the domain term — this is
 /// display only, and deliberately does not reach into `gascii-core` to rename anything.
@@ -35,29 +42,60 @@ fn page_label(page_name: &str) -> &str {
     }
 }
 
+/// Short display names for the brush ramps, same rule as `page_label`.
+pub(crate) fn ramp_label(name: &str) -> &str {
+    match name {
+        "ASCII shading" => "ASCII",
+        "Block shades" => "Blocks",
+        other => other,
+    }
+}
+
+/// The stamp shape segment, shared with kiosk so both chrome modes name the shapes identically.
+pub(crate) const SHAPE_OPTIONS: [(BrushShape, &str); 3] = [
+    (BrushShape::Raw, "None"),
+    (BrushShape::Square, "Square"),
+    (BrushShape::Circle, "Circle"),
+];
+
 pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
     let t = theme::current(ui.ctx());
-    ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+    let panel_h = ui.available_height();
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+        let top = ui.cursor().min.y;
 
-    toolbox(ui, app);
-    ui.add_space(2.0);
-    palette(ui, app, widgets::SWATCH, fonts::size::GLYPH, 220.0);
+        toolbox(ui, app);
+        rule(ui, t.border_soft);
+        binding_options(ui, app);
+        rule(ui, t.border_soft);
 
-    // Colours and write toggles sit at the foot of the panel, pushed there with an explicit
-    // spacer rather than a `bottom_up` layout: bottom-up mis-measures the nested rows here and
-    // draws the rule straight through the colour wells.
-    let gap = (ui.available_height() - BOTTOM_BLOCK).max(8.0);
-    ui.add_space(gap);
-    colors(ui, app);
-    ui.add_space(4.0);
-    rule(ui, t.border_soft);
-    ui.add_space(4.0);
-    write_toggles(ui, app);
+        // The options block's height varies (shape rows, the brush block), so the glyph scroll
+        // gives up height first. `available_height` is unbounded inside the scroll area — size
+        // against the panel's real height minus what has actually been consumed.
+        let remaining = panel_h - (ui.cursor().min.y - top);
+        let scroll_h = (remaining - PALETTE_RESERVED - BOTTOM_BLOCK).clamp(PALETTE_SCROLL_MIN, PALETTE_SCROLL_MAX);
+        palette(ui, app, widgets::SWATCH, fonts::size::GLYPH, scroll_h);
+
+        // Colours and write toggles sit at the foot of the panel, pushed there with an explicit
+        // spacer rather than a `bottom_up` layout: bottom-up mis-measures the nested rows here and
+        // draws the rule straight through the colour wells. On panels too short for everything the
+        // spacer bottoms out and the whole sidebar scrolls instead of clipping the colour block.
+        let gap = (panel_h - (ui.cursor().min.y - top) - BOTTOM_BLOCK).max(8.0);
+        ui.add_space(gap);
+        rule(ui, t.border_soft);
+        ui.add_space(4.0);
+        colors(ui, app);
+        ui.add_space(4.0);
+        rule(ui, t.border_soft);
+        ui.add_space(4.0);
+        write_toggles(ui, app);
+    });
 }
 
 /// A full-width 1px separator. `ui.separator()` sizes itself from the surrounding layout and can
 /// collapse to a stub, so the line is allocated and painted explicitly.
-fn rule(ui: &mut Ui, color: egui::Color32) {
+pub(crate) fn rule(ui: &mut Ui, color: egui::Color32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
     ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, color));
 }
@@ -119,6 +157,112 @@ pub(crate) fn tool_grid(ui: &mut Ui, app: &mut GasciiApp, tools: &[ToolDef], col
 /// showing through, so the whole block reads as one object rather than nine buttons.
 fn toolbox(ui: &mut Ui, app: &mut GasciiApp) {
     tool_grid(ui, app, &TOOLS, TOOL_COLS, widgets::TOOL_CELL);
+}
+
+/// Per-binding tool options: `L <tool> [− n +]` with the shape segment beneath, and — when that
+/// binding holds the Brush — the ramp/intensity/pressure block nested right under it, rather than
+/// floating below both rows. A rule divides each binding's block from the next, so L's and R's
+/// options read as two distinct sections instead of one undifferentiated list. Brush's controls
+/// are app-global state shared by both bindings (see `brush_options`'s own doc), so in the rare
+/// case both L and R hold Brush the block is shown once, nested under L. Both bindings' rows show
+/// at once — there is no focus segment; the `[`/`]` keys follow `options_focus` instead. Unsized
+/// tools get a dash where the stepper would be, so the rows always double as an L/R legend.
+/// `kiosk::binding_options` is this same block at touch geometry.
+fn binding_options(ui: &mut Ui, app: &mut GasciiApp) {
+    let t = theme::current(ui.ctx());
+    widgets::micro_label(ui, "OPTIONS");
+    ui.spacing_mut().item_spacing.y = 6.0;
+    let mut brush_shown = false;
+    for (i, &b) in Binding::ALL.iter().enumerate() {
+        let kind = app.slot(b).kind;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.label(
+                egui::RichText::new(if b == Binding::L { "L" } else { "R" })
+                    .font(fonts::mono_id(fonts::size::LABEL))
+                    .color(t.fg_secondary),
+            );
+            ui.label(
+                egui::RichText::new(tool_def(kind).name)
+                    .font(fonts::ui_medium_id(fonts::size::CONTROL))
+                    .color(t.fg_text),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(slot) = sized_slot(kind) {
+                    let mut size = app.slots[b.ix()].stamps[slot].size;
+                    if widgets::stepper(ui, &mut size, 1, MAX_TOOL_SIZE, widgets::STEPPER_H) {
+                        app.slots[b.ix()].stamps[slot].size = size;
+                    }
+                } else {
+                    ui.label(
+                        egui::RichText::new("–")
+                            .font(fonts::mono_id(fonts::size::LABEL))
+                            .color(t.fg_secondary),
+                    );
+                }
+            });
+        });
+        if let Some(slot) = sized_slot(kind) {
+            let mut shape = app.slots[b.ix()].stamps[slot].shape;
+            if widgets::segmented(ui, &mut shape, &SHAPE_OPTIONS, false) {
+                app.slots[b.ix()].stamps[slot].shape = shape;
+            }
+        }
+        if kind == ToolKind::Brush && !brush_shown {
+            ui.add_space(2.0);
+            brush_options(ui, app);
+            brush_shown = true;
+        }
+        if i + 1 < Binding::ALL.len() {
+            ui.add_space(2.0);
+            rule(ui, t.border_soft);
+        }
+    }
+}
+
+/// Ramp, intensity mode/level and the pressure toggle — app-global state both bindings' brushes
+/// share, shown once whichever binding holds the Brush.
+fn brush_options(ui: &mut Ui, app: &mut GasciiApp) {
+    let t = theme::current(ui.ctx());
+    widgets::micro_label(ui, "BRUSH");
+    let mut ramp = app.active_ramp;
+    let names: Vec<(usize, &str)> = app.ramps.iter().enumerate().map(|(i, r)| (i, ramp_label(r.name))).collect();
+    if widgets::segmented(ui, &mut ramp, &names, false) {
+        app.active_ramp = ramp;
+    }
+    let mut buildup = matches!(app.density_mode, DensityMode::Buildup(_));
+    let modes = [(false, "Fixed"), (true, "Buildup")];
+    let changed = widgets::segmented(ui, &mut buildup, &modes, false);
+    if buildup {
+        if changed {
+            app.density_mode = DensityMode::Buildup(Buildup);
+        }
+    } else {
+        let mut level = match app.density_mode {
+            DensityMode::Fixed(Fixed(l)) => l,
+            DensityMode::Buildup(_) => 1.0,
+        };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            let slider = ui.add_sized(
+                Vec2::new(100.0, 20.0),
+                egui::Slider::new(&mut level, 0.0..=1.0).show_value(false),
+            );
+            if slider.changed() || changed {
+                app.density_mode = DensityMode::Fixed(Fixed(level));
+            }
+            ui.label(
+                egui::RichText::new(format!("{:.0}%", level * 100.0))
+                    .font(fonts::mono_id(fonts::size::LABEL))
+                    .color(t.fg_secondary),
+            );
+        });
+    }
+    // Only shown once a stylus contact has actually been observed this session — no point
+    // offering a pressure toggle before there is any pressure signal to drive it.
+    if app.stylus_detected {
+        widgets::checkbox(ui, &mut app.brush_pressure, "Pressure");
+    }
 }
 
 pub(crate) fn palette(ui: &mut Ui, app: &mut GasciiApp, swatch: f32, glyph_px: f32, scroll_h: f32) {
@@ -266,10 +410,9 @@ mod tests {
 
     /// `swatch_cols` is the pure math behind the sidebar's resizable-width reflow (`WS6a`'s own
     /// "checked by formula, not rendered" note) — this exercises it directly rather than only by
-    /// code inspection, across the panel's actual `size_range` (190..=320, `app.rs`'s
-    /// `.size_range(190.0..=320.0)`) minus plausible content margins, plus the two clamp
-    /// boundaries and adversarial (zero/negative) inputs a future margin-accounting change could
-    /// still hand it.
+    /// code inspection, across the panel's actual `size_range` (`MIN_WIDTH..=MAX_WIDTH`) minus
+    /// plausible content margins, plus the two clamp boundaries and adversarial (zero/negative)
+    /// inputs a future margin-accounting change could still hand it.
     #[test]
     fn swatch_cols_stays_within_min_and_max_across_the_sidebars_real_width_range() {
         // A generous margin allowance either side of the panel's raw 190..=320 range — the actual
@@ -312,6 +455,34 @@ mod tests {
         // sidebar content-frame inset) still comfortably fits the full 6-column cap.
         let content_width = DEFAULT_WIDTH - 16.0;
         assert_eq!(swatch_cols(content_width, widgets::SWATCH), SWATCH_COLS_MAX);
+    }
+
+    /// The options block is the sidebar's widest fixed content (the shape segment doesn't reflow
+    /// the way swatch rows do), and `MIN_WIDTH` exists to fit it — this renders the worst case
+    /// (a sized Brush on L showing shape + brush controls, a sized Line on R) at the minimum
+    /// panel's content width and pins that nothing allocates wider.
+    #[test]
+    fn options_block_fits_the_sidebars_minimum_content_width() {
+        let mut app = crate::app::GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Brush);
+        app.bind(Binding::R, ToolKind::Line);
+
+        let ctx = egui::Context::default();
+        fonts::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+
+        // The panel's 12px inner margin each side (`app.rs`'s sidebar frame).
+        let content_w = MIN_WIDTH - 24.0;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let rect = egui::Rect::from_min_size(ui.cursor().min, Vec2::new(content_w, 2000.0));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+            binding_options(&mut child, &mut app);
+            assert!(
+                child.min_rect().width() <= content_w,
+                "options block allocates {:.1}px, wider than the minimum sidebar's {content_w:.1}px content",
+                child.min_rect().width()
+            );
+        });
     }
 
     /// Pins kiosk's own combination: a fixed 340px sidebar (`kiosk::SIDEBAR_W`) with a 16px inner
