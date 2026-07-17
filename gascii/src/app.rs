@@ -1816,7 +1816,7 @@ impl GasciiApp {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "untitled.gascii".to_owned());
         let dirty = if self.is_dirty() { " •" } else { "" };
-        format!("GASCII <> {name}{dirty}")
+        format!("GASCII < {name}{dirty} >")
     }
 }
 
