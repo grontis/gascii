@@ -314,17 +314,17 @@ mod tests {
         assert_eq!(swatch_cols(content_width, widgets::SWATCH), SWATCH_COLS_MAX);
     }
 
-    /// Pins kiosk's own combination: a fixed 300px sidebar (`kiosk::SIDEBAR_W`) with a 16px inner
-    /// margin on each side (`kiosk::sidebar`'s panel frame) and 48px swatches (`kiosk::SWATCH`) —
-    /// the mock's own 5-per-row glyph grid. A future change to any of those three numbers that
-    /// silently drops kiosk below or above 5 columns is caught here, not just by eyeballing the
-    /// mock.
+    /// Pins kiosk's own combination: a fixed 340px sidebar (`kiosk::SIDEBAR_W`) with a 16px inner
+    /// margin on each side (`kiosk::sidebar`'s panel frame) and full-scale 48px swatches
+    /// (`kiosk::SWATCH`) — a 6-per-row glyph grid at the column cap. A future change to any of
+    /// those three numbers that silently drops kiosk below 6 columns is caught here, not just by
+    /// eyeballing the layout.
     #[test]
-    fn swatch_cols_at_the_kiosk_sidebar_width_fits_five_per_row() {
-        const KIOSK_SIDEBAR_W: f32 = 300.0;
+    fn swatch_cols_at_the_kiosk_sidebar_width_fits_six_per_row() {
+        const KIOSK_SIDEBAR_W: f32 = 340.0;
         const KIOSK_MARGIN: f32 = 16.0;
         const KIOSK_SWATCH: f32 = 48.0;
         let content_width = KIOSK_SIDEBAR_W - KIOSK_MARGIN * 2.0;
-        assert_eq!(swatch_cols(content_width, KIOSK_SWATCH), 5);
+        assert_eq!(swatch_cols(content_width, KIOSK_SWATCH), SWATCH_COLS_MAX);
     }
 }

@@ -13,21 +13,34 @@ use crate::fonts;
 use gascii_core::{BrushShape, Buildup, DensityMode, Fixed, MAX_TOOL_SIZE};
 
 pub const TOP_H: f32 = 44.0;
-pub const SIDEBAR_W: f32 = 300.0;
+pub const SIDEBAR_W: f32 = 340.0;
 pub const STATUS_H: f32 = 36.0;
-const TOOL_COLS: usize = 2;
-const TOOL_CELL_H: f32 = 74.0;
+const TOOL_COLS: usize = 4;
+const TOOL_CELL_H: f32 = 68.0;
 const SWATCH: f32 = 48.0;
 const GLYPH_PX: f32 = 26.0;
 const PALETTE_SCROLL_MAX: f32 = 300.0;
 const PALETTE_SCROLL_MIN: f32 = 120.0;
 /// Height the palette's own tabs/RECENT rows plus the colour block need below the options
-/// section — the glyph scroll area gets whatever is left, clamped.
-const PALETTE_RESERVED: f32 = 250.0;
+/// section, split into what scales with the touch geometry (the RECENT row, the colour block —
+/// `color_wells` paints an overlapped 2×`WELL` square, not a single `WELL`-tall row) and what
+/// doesn't (labels, tabs, spacing). The glyph scroll area gets whatever is left, clamped.
+const PALETTE_RESERVED_FIXED: f32 = 140.0;
+const PALETTE_RESERVED_SCALED: f32 = 150.0;
 const SIZE_STEPPER_H: f32 = 36.0;
 const WELL: f32 = 36.0;
 const SWAP_BUTTON: f32 = 36.0;
 const QUICK_COLOR_H: f32 = 32.0;
+/// Panel content height at which the full-size touch geometry fits with the glyph scroll at its
+/// minimum. Shorter panels shrink every touch-sized element together via `scale_for` instead of
+/// forcing the sidebar to scroll.
+const COMFORT_H: f32 = 880.0;
+/// Floor on the shrink so targets stay comfortably tappable.
+const SCALE_MIN: f32 = 0.7;
+
+fn scale_for(panel_h: f32) -> f32 {
+    (panel_h / COMFORT_H).clamp(SCALE_MIN, 1.0)
+}
 
 /// The curated quick-color row: a fixed swatch set rather than the full palette, for a fast-tap
 /// touch surface.
@@ -119,27 +132,37 @@ fn kiosk_tools() -> Vec<crate::app::ToolDef> {
     TOOLS.iter().copied().filter(|d| d.kind != ToolKind::Text).collect()
 }
 
-/// The sidebar: an 8-tool grid (Text excluded), both bindings' tool options, the glyph palette at
-/// touch-sized swatches, and colours. The options block's height varies (shape rows, the brush
-/// block), so the glyph scroll gives up height first and the colour block never falls off the
-/// panel.
+/// The sidebar: a 4×2 tool grid (Text excluded), both bindings' tool options, the glyph palette
+/// at touch-sized swatches, and colours. The options block's height varies (shape rows, the brush
+/// block), so the glyph scroll gives up height first; short panels shrink the touch geometry via
+/// `scale_for`, and if even that doesn't fit the whole sidebar scrolls rather than clipping the
+/// colour block out of reach.
 pub fn sidebar(ui: &mut Ui, app: &mut GasciiApp) {
-    ui.spacing_mut().item_spacing = Vec2::new(10.0, 12.0);
-    tool_grid(ui, app, &kiosk_tools(), TOOL_COLS, TOOL_CELL_H);
-    ui.add_space(2.0);
-    binding_options(ui, app);
-    ui.add_space(2.0);
-    let scroll_h = (ui.available_height() - PALETTE_RESERVED).clamp(PALETTE_SCROLL_MIN, PALETTE_SCROLL_MAX);
-    palette(ui, app, SWATCH, GLYPH_PX, scroll_h);
-    ui.add_space(8.0);
-    colors(ui, app);
+    let panel_h = ui.available_height();
+    let k = scale_for(panel_h);
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(10.0, 12.0);
+        let top = ui.cursor().min.y;
+        tool_grid(ui, app, &kiosk_tools(), TOOL_COLS, TOOL_CELL_H * k);
+        ui.add_space(2.0);
+        binding_options(ui, app, k);
+        ui.add_space(2.0);
+        // available_height is unbounded inside the scroll area — size the glyph scroll against
+        // the panel's real height minus what the grid and options actually consumed.
+        let remaining = panel_h - (ui.cursor().min.y - top);
+        let reserved = PALETTE_RESERVED_FIXED + PALETTE_RESERVED_SCALED * k;
+        let scroll_h = (remaining - reserved).clamp(PALETTE_SCROLL_MIN * k, PALETTE_SCROLL_MAX);
+        palette(ui, app, SWATCH * k, GLYPH_PX * k, scroll_h);
+        ui.add_space(8.0);
+        colors(ui, app, k);
+    });
 }
 
 /// Per-binding tool options: `L <tool> [− n +]` with the shape segment beneath. There is no
 /// options bar in this mode and no L/R focus segment either — both bindings simply show at once.
 /// Unsized tools get a dash where the stepper would be, so the rows always double as an L/R
 /// legend. Brush's shared controls follow once, whichever binding holds it.
-fn binding_options(ui: &mut Ui, app: &mut GasciiApp) {
+fn binding_options(ui: &mut Ui, app: &mut GasciiApp, k: f32) {
     let t = theme::current(ui.ctx());
     widgets::micro_label(ui, "OPTIONS");
     for &b in Binding::ALL.iter() {
@@ -159,7 +182,7 @@ fn binding_options(ui: &mut Ui, app: &mut GasciiApp) {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(slot) = sized_slot(kind) {
                     let mut size = app.slots[b.ix()].stamps[slot].size;
-                    if widgets::stepper(ui, &mut size, 1, MAX_TOOL_SIZE, SIZE_STEPPER_H) {
+                    if widgets::stepper(ui, &mut size, 1, MAX_TOOL_SIZE, SIZE_STEPPER_H * k) {
                         app.slots[b.ix()].stamps[slot].size = size;
                     }
                 } else {
@@ -237,29 +260,29 @@ fn brush_options(ui: &mut Ui, app: &mut GasciiApp) {
     }
 }
 
-fn colors(ui: &mut Ui, app: &mut GasciiApp) {
+fn colors(ui: &mut Ui, app: &mut GasciiApp, k: f32) {
     widgets::micro_label(ui, "COLOR");
     ui.horizontal(|ui| {
         // Display + swap only, no popup — kiosk's touch-first colour row hands precise picking
         // off to the quick-color swatches below instead.
-        widgets::color_wells(ui, widgets::rgba_to_color32(app.active_fg), widgets::rgba_to_color32(app.active_bg), WELL);
+        widgets::color_wells(ui, widgets::rgba_to_color32(app.active_fg), widgets::rgba_to_color32(app.active_bg), WELL * k);
         ui.add_space(14.0);
-        if widgets::swap_button(ui, SWAP_BUTTON) {
+        if widgets::swap_button(ui, SWAP_BUTTON * k) {
             app.swap_colors();
         }
     });
     ui.add_space(8.0);
-    quick_colors(ui, app);
+    quick_colors(ui, app, k);
 }
 
-fn quick_colors(ui: &mut Ui, app: &mut GasciiApp) {
+fn quick_colors(ui: &mut Ui, app: &mut GasciiApp, k: f32) {
     let t = theme::current(ui.ctx());
     ui.spacing_mut().item_spacing = Vec2::splat(5.0);
     ui.horizontal(|ui| {
         for &c in QUICK_COLORS.iter() {
             let color = widgets::rgba_to_color32(c);
             let selected = app.active_fg == c;
-            let resp = widgets::color_swatch(ui, color, t.border_soft, selected, QUICK_COLOR_H);
+            let resp = widgets::color_swatch(ui, color, t.border_soft, selected, QUICK_COLOR_H * k);
             if resp.clicked() {
                 app.active_fg = c;
             } else if resp.secondary_clicked() {
@@ -289,6 +312,16 @@ pub fn status_bar(ui: &mut Ui, app: &mut GasciiApp) {
 mod tests {
     use super::*;
     use crate::app::Binding;
+
+    /// Full size on tall panels, proportional shrink below `COMFORT_H`, floored at `SCALE_MIN` so
+    /// touch targets never collapse on very short screens.
+    #[test]
+    fn scale_for_is_full_size_on_tall_panels_proportional_below_and_floored() {
+        assert_eq!(scale_for(COMFORT_H), 1.0);
+        assert_eq!(scale_for(2000.0), 1.0);
+        assert!((scale_for(COMFORT_H * 0.85) - 0.85).abs() < 1e-4);
+        assert_eq!(scale_for(100.0), SCALE_MIN);
+    }
 
     /// Kiosk's sidebar has no cell for Text (no keyboard-driven session UI) — its tool list must
     /// never include it, and must otherwise stay in sync with `TOOLS`.
@@ -336,7 +369,7 @@ mod tests {
         let ctx = egui::Context::default();
         fonts::install_fonts(&ctx);
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            binding_options(ui, &mut app);
+            binding_options(ui, &mut app, 1.0);
         });
 
         assert_eq!(
@@ -364,7 +397,7 @@ mod tests {
         let ctx = egui::Context::default();
         fonts::install_fonts(&ctx);
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            binding_options(ui, &mut app);
+            binding_options(ui, &mut app, 1.0);
         });
 
         assert!(
