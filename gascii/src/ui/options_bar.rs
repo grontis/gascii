@@ -1,4 +1,4 @@
-//! The 40px contextual options bar: an L/R segment, that binding's options, and a hint.
+//! The 40px contextual options bar: an L/R segment and that binding's options.
 
 use eframe::egui::{self, Ui, Vec2};
 
@@ -10,24 +10,7 @@ use gascii_core::{BrushShape, Buildup, DensityMode, Fixed, MAX_TOOL_SIZE};
 
 pub const HEIGHT: f32 = 44.0;
 
-/// The mono hint at the bar's trailing edge. One line per tool, describing what the *other* inputs
-/// do — the things not already visible as controls.
-fn hint(kind: ToolKind) -> &'static str {
-    match kind {
-        ToolKind::Pencil => "shift = straight line",
-        ToolKind::Eraser => "erases to blank",
-        ToolKind::Eyedropper => "click a cell to sample glyph + colors",
-        ToolKind::Text => "click to place a cursor · esc commits",
-        ToolKind::Fill => "fills the connected region under the cursor",
-        ToolKind::Rectangle => "drag a box · joins box-drawing art",
-        ToolKind::Line => "drag a line · joins box-drawing art",
-        ToolKind::Selection => "drag to select · enter commits · esc cancels",
-        ToolKind::Brush => "1–9/0 set intensity",
-    }
-}
-
 pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
-    let t = theme::current(ui.ctx());
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(8.0, 0.0);
 
@@ -50,13 +33,6 @@ pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
         let b = app.options_focus;
         let kind = app.slot(b).kind;
         tool_options(ui, app, b, kind);
-
-        // Trailing hint, right-aligned.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                egui::RichText::new(hint(kind)).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary),
-            );
-        });
     });
 }
 
@@ -77,7 +53,7 @@ fn tool_options(ui: &mut Ui, app: &mut GasciiApp, b: Binding, kind: ToolKind) {
     if let Some(slot) = sized_slot(kind) {
         label(ui, "Size");
         let mut size = app.slots[b.ix()].stamps[slot].size;
-        if widgets::stepper(ui, &mut size, 1, MAX_TOOL_SIZE) {
+        if widgets::stepper(ui, &mut size, 1, MAX_TOOL_SIZE, widgets::STEPPER_H) {
             app.slots[b.ix()].stamps[slot].size = size;
         }
         ui.add_space(6.0);
@@ -85,7 +61,7 @@ fn tool_options(ui: &mut Ui, app: &mut GasciiApp, b: Binding, kind: ToolKind) {
         label(ui, "Shape");
         let mut shape = app.slots[b.ix()].stamps[slot].shape;
         let shapes = [
-            (BrushShape::Raw, "Raw"),
+            (BrushShape::Raw, "No Shape"),
             (BrushShape::Square, "Square"),
             (BrushShape::Circle, "Circle"),
         ];
@@ -141,5 +117,12 @@ fn brush_options(ui: &mut Ui, app: &mut GasciiApp) {
                 .font(fonts::mono_id(fonts::size::LABEL))
                 .color(t.fg_secondary),
         );
+    }
+
+    // Only shown once a stylus contact has actually been observed this session — no point
+    // offering a pressure toggle before there is any pressure signal to drive it.
+    if app.stylus_detected {
+        ui.add_space(6.0);
+        widgets::checkbox(ui, &mut app.brush_pressure, "Pressure");
     }
 }

@@ -6,6 +6,7 @@
 
 pub mod dialog;
 pub mod icons;
+pub mod kiosk;
 pub mod options_bar;
 pub mod sidebar;
 pub mod status_bar;

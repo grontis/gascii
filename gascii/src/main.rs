@@ -9,6 +9,7 @@ mod viewport;
 
 fn main() -> eframe::Result {
     let t0 = std::time::Instant::now();
+    let launch_fullscreen = std::env::args().any(|a| a == "--fullscreen");
     let options = eframe::NativeOptions {
         // eframe's default opens too small to fit the options bar's controls, which then wrap and
         // clip. The minimum is the sidebar plus enough desk for the default 80×25 document to be
@@ -26,6 +27,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "GASCII",
         options,
-        Box::new(move |cc| Ok(Box::new(app::GasciiApp::new(cc, t0)))),
+        Box::new(move |cc| Ok(Box::new(app::GasciiApp::new(cc, t0, launch_fullscreen)))),
     )
 }

@@ -157,8 +157,10 @@ fn cursor_for(dir: ResizeDirection) -> CursorIcon {
 /// Returns true while the pointer is over a grip, so the caller can suppress the canvas's own
 /// interaction for that frame.
 pub fn handle_resize(ctx: &Context) -> bool {
-    // A maximized window has no edges to drag.
-    if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
+    // A maximized or fullscreen window has no edges to drag.
+    if ctx.input(|i| i.viewport().maximized.unwrap_or(false))
+        || ctx.input(|i| i.viewport().fullscreen.unwrap_or(false))
+    {
         return false;
     }
     // `viewport_rect`, not `content_rect`: the grip belongs at the true window edge.

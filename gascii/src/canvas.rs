@@ -241,8 +241,18 @@ fn drive_stroke_tail(
 
 /// The `ToolCtx` for one binding. Everything but the footprint is app-global shared state; the
 /// size/shape come from that binding's own slot, so each button draws with its own stamp.
+///
+/// Size has one exception: while `b` is the live stroke owner, a pending stylus-pressure override
+/// (`pressure_stamp_size`) takes precedence over the slot's remembered `StampSettings.size`. This
+/// is a read-only substitution — the slot's stored size is never written by pressure, so the
+/// binding's configured/persisted size survives the stroke unchanged.
 pub(crate) fn tool_ctx(app: &GasciiApp, b: Binding) -> gascii_core::ToolCtx {
     let stamp = app.slot(b).stamp();
+    let size = if app.stroke_owner == Some(b) {
+        app.pressure_stamp_size.unwrap_or(stamp.size)
+    } else {
+        stamp.size
+    };
     gascii_core::ToolCtx {
         layer: 0,
         glyph: app.active_glyph,
@@ -251,7 +261,7 @@ pub(crate) fn tool_ctx(app: &GasciiApp, b: Binding) -> gascii_core::ToolCtx {
         mask: app.mask,
         density: app.density_mode,
         ramp: app.ramps[app.active_ramp].chars.clone(),
-        size: stamp.size,
+        size,
         shape: stamp.shape,
     }
 }
@@ -294,6 +304,10 @@ pub(crate) fn begin_gesture(app: &mut GasciiApp, b: Binding, x: u16, y: u16) -> 
         app.apply_edit(edit, Some(b));
     }
     app.stroke_owner = Some(b);
+    // A fresh stroke starts with no pressure override — this stroke hasn't reported any `force`
+    // yet, so it must draw at the slot's configured size until it does, not a leftover value from
+    // whatever stroke (or binding) last set one.
+    app.pressure_stamp_size = None;
     true
 }
 
@@ -302,10 +316,24 @@ pub(crate) fn begin_gesture(app: &mut GasciiApp, b: Binding, x: u16, y: u16) -> 
 /// grip cannot win any other way.
 pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool) {
     let ctx = ui.ctx().clone();
+    let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
     if app.pending_fit {
         app.viewport
             .fit_to_window(ui.available_size(), DESK_MARGIN, app.doc.extent(), &ctx);
         app.pending_fit = false;
+        app.kiosk_last_fit_size = Some(ui.available_size());
+    } else if is_fullscreen {
+        // Kiosk's zoom stays "auto": re-fit whenever the canvas area's own size changes (window
+        // resize, monitor change, sidebar geometry change), but not unconditionally every frame.
+        let avail = ui.available_size();
+        if app.kiosk_last_fit_size != Some(avail) {
+            app.viewport.fit_to_window(avail, DESK_MARGIN, app.doc.extent(), &ctx);
+            app.kiosk_last_fit_size = Some(avail);
+        }
+    } else {
+        // Outside fullscreen this is stale by construction; clearing it means re-entering kiosk
+        // later always re-fits at least once rather than trusting a leftover size match.
+        app.kiosk_last_fit_size = None;
     }
 
     let (response, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
@@ -327,6 +355,29 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
                 app.viewport
                     .zoom_at(cursor, scroll_y.signum() as i32, cell, origin);
             }
+        }
+
+        // Precedence 1b: two-finger pinch, independent of Ctrl+scroll. `zoom_delta` is a per-frame
+        // ratio (1.0 = no change), not a cumulative gesture magnitude, so it is multiplied into an
+        // accumulator that persists across frames; once the accumulator has drifted 15% from
+        // neutral, one discrete zoom step fires against the cell size's own six-step scale and the
+        // accumulator resets. Also pans by the gesture's own translation, so the fingers can
+        // recentre the view while pinching.
+        if let Some(multi) = ui.input(|i| i.multi_touch()) {
+            app.viewport.pan += multi.translation_delta;
+            app.pinch_zoom_accum *= multi.zoom_delta;
+            const PINCH_THRESHOLD: f32 = 0.15;
+            if app.pinch_zoom_accum > 1.0 + PINCH_THRESHOLD {
+                app.viewport.zoom_at(multi.center_pos, 1, cell, origin);
+                app.pinch_zoom_accum = 1.0;
+            } else if app.pinch_zoom_accum < 1.0 - PINCH_THRESHOLD {
+                app.viewport.zoom_at(multi.center_pos, -1, cell, origin);
+                app.pinch_zoom_accum = 1.0;
+            }
+        } else {
+            // No active gesture: reset rather than let a stale accumulator from a prior pinch
+            // trigger an unexpected zoom on the very first frame of the next one.
+            app.pinch_zoom_accum = 1.0;
         }
 
         // Precedence 2: pan. Middle-drag is always available (never conflicts with a primary
@@ -430,6 +481,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
             }
             if tail.ended {
                 app.stroke_owner = None;
+                app.pressure_stamp_size = None;
             }
         }
 
@@ -532,6 +584,30 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
             app.paste_text(&text);
         }
 
+        // Stylus pressure. `force` is `Some` only for an actual contact — never hover — so this
+        // naturally only fires mid-stroke, exactly when it should affect what's being stamped. The
+        // quantized size lands in `pressure_stamp_size`, a transient override `tool_ctx` consults
+        // for the gesturing binding only — it never writes the slot's own `StampSettings.size`, so
+        // the Size stepper's/`[`/`]`-configured value (what `prefs.rs` persists) survives the
+        // stroke untouched.
+        let latest_force: Option<f32> = ui.input(|i| {
+            i.events.iter().rev().find_map(|e| match e {
+                egui::Event::Touch { force: Some(f), .. } => Some(*f),
+                _ => None,
+            })
+        });
+        if let Some(force) = latest_force {
+            app.stylus_detected = true;
+            if app.brush_pressure {
+                if let Some(b) = app.stroke_owner {
+                    if app.slot(b).kind == ToolKind::Brush {
+                        let quantized = 1 + (force.clamp(0.0, 1.0) * 3.0).round() as u16; // 1..=4
+                        app.pressure_stamp_size = Some(quantized);
+                    }
+                }
+            }
+        }
+
         // Focus-loss detection: a burst mid-typing or a floating stamp must commit, not vanish, when
         // the OS window loses focus (a no-op for every other tool). Additionally, an in-progress
         // stroke has no synthetic mouse-up on an OS-level focus loss (e.g. alt-tabbing mid-drag) —
@@ -545,6 +621,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
             // clears pointer-gesture state, never uncommitted work.
             app.flush_all();
             if let Some(b) = app.stroke_owner.take() {
+                app.pressure_stamp_size = None;
                 let tctx = tool_ctx(app, b);
                 app.slots[b.ix()].tool.update(ToolEvent::Cancel, &tctx, &app.doc);
                 // The Cancel just cleared this binding's residue (caret, marquee); a keyboard
@@ -720,4 +797,132 @@ fn paint_tool_cursor(painter: &Painter, kind: ToolKind, pos: Pos2) {
     let rect = Rect::from_center_size(pos, Vec2::splat(ICON_SIZE));
     crate::ui::icons::paint(painter, kind, rect.translate(Vec2::splat(1.0)), Color32::BLACK);
     crate::ui::icons::paint(painter, kind, rect, Color32::WHITE);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::GasciiApp;
+
+    fn headless_ctx() -> egui::Context {
+        let ctx = egui::Context::default();
+        crate::fonts::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+        ctx
+    }
+
+    fn raw_input_with_screen(w: f32, h: f32, fullscreen: bool) -> egui::RawInput {
+        let mut raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h))),
+            ..Default::default()
+        };
+        raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().fullscreen = Some(fullscreen);
+        raw
+    }
+
+    /// K2's write-back gate, driven through the real `show`: a re-fit must happen when the canvas
+    /// area's own size actually changes, and must NOT happen on a steady-state frame at the same
+    /// size — proven by forcing `zoom_step` away from the fit value between two same-size frames
+    /// and confirming it survives untouched, then confirming a genuine resize DOES move it again.
+    #[test]
+    fn kiosk_auto_refit_only_recomputes_when_the_canvas_area_actually_changes_size() {
+        let mut app = GasciiApp::headless();
+        app.pending_fit = false; // isolate the auto-refit gate from the entry-transition snap
+
+        let ctx = headless_ctx();
+        let _ = ctx.run_ui(raw_input_with_screen(900.0, 700.0, true), |ui| show(ui, &mut app, false));
+        let fit_size_1 = app.kiosk_last_fit_size.expect("fit must have run on the first fullscreen frame");
+
+        // Nudge the zoom step away from whatever the fit picked — if auto-refit fired
+        // unconditionally every frame, the next `show` call at the SAME size would silently
+        // overwrite this back to the fit value.
+        app.viewport.zoom_step = 0;
+        let _ = ctx.run_ui(raw_input_with_screen(900.0, 700.0, true), |ui| show(ui, &mut app, false));
+        assert_eq!(
+            app.kiosk_last_fit_size,
+            Some(fit_size_1),
+            "an unchanged canvas area must not move the tracked fit size"
+        );
+        assert_eq!(
+            app.viewport.zoom_step, 0,
+            "no size change this frame: auto-refit must not have fired, so the forced override survives"
+        );
+
+        // A genuine resize DOES trigger a re-fit.
+        let _ = ctx.run_ui(raw_input_with_screen(400.0, 300.0, true), |ui| show(ui, &mut app, false));
+        let fit_size_2 = app.kiosk_last_fit_size.expect("fit must run again after a real resize");
+        assert_ne!(fit_size_2, fit_size_1, "a genuine size change must update the tracked fit size");
+    }
+
+    /// Drives the actual pressure scan (`canvas.rs`'s own event loop, not a hand-rolled shortcut)
+    /// through a synthetic `Event::Touch` for every quantization boundary the coder's formula
+    /// (`1 + (force.clamp(0.0, 1.0) * 3.0).round()`) implies, including an out-of-range force to
+    /// confirm the clamp. Neither the coder nor the code review had a test for this math at all.
+    #[test]
+    fn stylus_pressure_quantizes_force_into_a_1_to_4_stamp_size_and_marks_stylus_detected() {
+        let cases: [(f32, u16); 6] = [
+            (0.0, 1),
+            (0.16, 1),
+            (0.34, 2),
+            (0.6, 3),
+            (1.0, 4),
+            (1.5, 4), // out-of-range: clamped to 1.0 before quantizing
+        ];
+        for (force, expected) in cases {
+            let mut app = GasciiApp::headless();
+            app.bind(Binding::L, ToolKind::Brush);
+            app.brush_pressure = true;
+            begin_gesture(&mut app, Binding::L, 2, 2);
+
+            let ctx = headless_ctx();
+            let pos = Pos2::new(50.0, 50.0);
+            let mut raw = raw_input_with_screen(900.0, 700.0, false);
+            raw.events.push(egui::Event::PointerMoved(pos));
+            raw.events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            });
+            raw.events.push(egui::Event::Touch {
+                device_id: egui::TouchDeviceId(0),
+                id: egui::TouchId(0),
+                phase: egui::TouchPhase::Move,
+                pos,
+                force: Some(force),
+            });
+            let _ = ctx.run_ui(raw, |ui| show(ui, &mut app, false));
+
+            assert!(app.stylus_detected, "force={force}: any touch force must mark stylus_detected");
+            assert_eq!(
+                app.pressure_stamp_size,
+                Some(expected),
+                "force={force}: unexpected quantized stamp size"
+            );
+        }
+    }
+
+    /// The focus-loss cancel path (`canvas.rs`'s own focus-edge block) must clear the pressure
+    /// override alongside the stroke it belongs to — otherwise a stale override could leak into
+    /// whatever stroke happens next after focus returns.
+    #[test]
+    fn a_focus_loss_mid_pressure_modulated_stroke_clears_both_the_stroke_and_its_pressure_override() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Brush);
+        app.brush_pressure = true;
+        begin_gesture(&mut app, Binding::L, 0, 0);
+        app.pressure_stamp_size = Some(2); // as if a light-pressure dab already landed
+        app.was_focused = true;
+
+        let ctx = headless_ctx();
+        let mut raw = raw_input_with_screen(900.0, 700.0, false);
+        raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().focused = Some(false);
+        let _ = ctx.run_ui(raw, |ui| show(ui, &mut app, false));
+
+        assert_eq!(app.stroke_owner, None, "focus loss must cancel the in-progress stroke");
+        assert_eq!(
+            app.pressure_stamp_size, None,
+            "the pressure override must not survive a focus-loss cancel"
+        );
+    }
 }

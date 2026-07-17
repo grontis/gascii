@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use eframe::egui;
 use gascii_core::{
-    builtin_pages, builtin_ramps, composite, export_text, load_str, resize_document,
+    builtin_pages, builtin_ramps, clear_document, composite, export_text, load_str, resize_document,
     save_string, AxisAnchor, BrushShape, CellPatch, DensityBrush, DensityMode, Document,
     Eraser, Fixed, FloodFill, History, Line, Page, Pencil, PlaneMask, Ramp, Rectangle, ResizeAnchor,
     ResizeError, Rgba, SelectionTool, TextTool, Tool, ToolEvent, ToolResponse, WidthReject, MAX_TOOL_SIZE,
@@ -83,6 +83,28 @@ fn paste_target(l: ToolKind, r: ToolKind) -> Binding {
 /// makes the shortcuts dead weight for no correctness benefit.
 fn suppresses_tool_shortcuts(owner_kind: Option<ToolKind>) -> bool {
     matches!(owner_kind, Some(ToolKind::Text))
+}
+
+/// Whether Escape's job this frame is "exit fullscreen" rather than something with higher
+/// priority. `handle_keys` only runs while `!modal_open()` (its caller already guarantees that),
+/// so this only has two other claims on Escape to check: an active Text/Selection session (ends
+/// on its own Escape handling inside `canvas.rs`), and a live pointer stroke (exiting fullscreen
+/// mid-drag would yank the canvas out from under the pointer).
+fn should_handle_escape_for_fullscreen(keyboard_owner: Option<Binding>, stroke_in_progress: bool) -> bool {
+    keyboard_owner.is_none() && !stroke_in_progress
+}
+
+/// Whether `kind`'s single-letter shortcut should be reachable from the keyboard this frame.
+/// Kiosk's sidebar deliberately excludes Text from its tool grid (`kiosk.rs`'s module doc — "no
+/// keyboard-driven session UI"), so reaching it via `T` while fullscreen would silently rebind L
+/// to a tool with no cell in that grid and no other on-screen trace of what changed. Every other
+/// tool's shortcut stays reachable — their tools are visible in the kiosk grid and show L/R
+/// badges, so the shortcut's effect is diagnosable from the touch UI alone. A binding already on
+/// Text when fullscreen is entered is untouched by this — it only gates *switching onto* Text,
+/// never an existing Text binding's normal operation (its caret still shows, its session still
+/// works).
+fn tool_shortcut_reachable(kind: ToolKind, is_fullscreen: bool) -> bool {
+    !(is_fullscreen && kind == ToolKind::Text)
 }
 
 /// Whether this kind can hold a cross-frame Session (uncommitted work outliving a single stroke —
@@ -232,6 +254,11 @@ impl Tool for InertTool {
 }
 
 /// One tool: kind, display name, shortcut, hint, and constructor in a single row.
+///
+/// `Clone, Copy`: every field already is (`ToolKind`, `&'static str`, `egui::Key`, a bare `fn`
+/// pointer), so this is purely additive — it lets kiosk filter `TOOLS` into an owned `Vec<ToolDef>`
+/// without borrowing games.
+#[derive(Clone, Copy)]
 pub(crate) struct ToolDef {
     pub kind: ToolKind,
     pub name: &'static str,
@@ -259,11 +286,11 @@ pub(crate) const TOOLS: [ToolDef; 9] = [
         make: || Box::new(Eraser::new()),
     },
     ToolDef {
-        kind: ToolKind::Eyedropper,
-        name: "Eyedropper",
-        key: egui::Key::I,
-        tip: "Click a cell to pick up its text and background colors",
-        make: || Box::new(InertTool),
+        kind: ToolKind::Brush,
+        name: "Brush",
+        key: egui::Key::B,
+        tip: "Paint density ramps",
+        make: || Box::new(DensityBrush::new()),
     },
     ToolDef {
         kind: ToolKind::Text,
@@ -301,11 +328,11 @@ pub(crate) const TOOLS: [ToolDef; 9] = [
         make: || Box::new(SelectionTool::new()),
     },
     ToolDef {
-        kind: ToolKind::Brush,
-        name: "Brush",
-        key: egui::Key::B,
-        tip: "Paint density ramps",
-        make: || Box::new(DensityBrush::new()),
+        kind: ToolKind::Eyedropper,
+        name: "Eyedropper",
+        key: egui::Key::I,
+        tip: "Click a cell to pick up its text and background colors",
+        make: || Box::new(InertTool),
     },
 ];
 
@@ -326,6 +353,15 @@ pub struct GasciiApp {
     pub(crate) hovered_cell: Option<(u16, u16)>,
     pub(crate) renderer: Box<dyn CanvasRenderer>,
     pub(crate) pending_fit: bool,
+    /// The canvas area size `fit_to_window` last ran against while fullscreen — kiosk's "auto"
+    /// continuous fit (re-fits only when this stops matching `ui.available_size()`, rather than
+    /// unconditionally every frame). `None` outside fullscreen, so re-entering kiosk later always
+    /// re-fits at least once.
+    pub(crate) kiosk_last_fit_size: Option<egui::Vec2>,
+    /// Window state to force on the first frame, then `None`. eframe's own window persistence
+    /// restores the previous run's fullscreen state, but the app always launches windowed unless
+    /// `--fullscreen` was passed on the command line.
+    pub(crate) startup_fullscreen: Option<bool>,
     pub(crate) history: History,
     pub(crate) active_glyph: char,
     pub(crate) active_fg: Rgba,
@@ -340,6 +376,12 @@ pub struct GasciiApp {
     /// question, so it is one field — which is what let the press/drag/release paths collapse to a
     /// single parameterized call site. At most one stroke is live across both buttons.
     pub(crate) stroke_owner: Option<Binding>,
+    /// Live stylus-pressure size override for the current stroke, consulted only in `tool_ctx`
+    /// while `stroke_owner` matches. Never touches a slot's remembered `StampSettings.size` — the
+    /// stepper/`[`/`]`-configured size the Size stepper edits and `prefs.rs` persists stays intact
+    /// across a pressure-modulated stroke. Reset to `None` whenever a stroke begins or ends, so a
+    /// stale value never leaks onto a stroke that hasn't reported pressure yet.
+    pub(crate) pressure_stamp_size: Option<u16>,
     pub(crate) space_pan_active: bool,
     /// Which slot's tool receives keystrokes. There is one keyboard and both slots can be bound to
     /// keyboard-driven tools, so ownership is explicit state rather than something derived: it is
@@ -379,6 +421,17 @@ pub struct GasciiApp {
     pub(crate) theme_pref: egui::ThemePreference,
     /// Whether the canvas cell-grid overlay is drawn. Persisted, off by default.
     pub(crate) show_grid: bool,
+    /// True once this session has observed a pressure-bearing `Event::Touch` (a stylus contact).
+    /// Session-only, never persisted — gates the Pressure toggle's visibility in Brush's options.
+    pub(crate) stylus_detected: bool,
+    /// User opt-in: while true and Brush is stroking with a stylus, pressure drives stamp size.
+    pub(crate) brush_pressure: bool,
+    /// Accumulated multiplicative pinch-zoom delta since the last discrete zoom step fired.
+    /// `multi_touch()`'s `zoom_delta` is a per-frame ratio (1.0 = no change), not a cumulative
+    /// gesture magnitude, so this multiplies frame deltas together until they cross a threshold —
+    /// see the pinch-zoom handling in `canvas.rs` for why a per-frame trigger would be too twitchy
+    /// against the 6-step discrete `ZOOM_SCALES` model.
+    pub(crate) pinch_zoom_accum: f32,
     resize_dialog_open: bool,
     resize_w: u16,
     resize_h: u16,
@@ -456,13 +509,25 @@ impl ExportSettings {
 }
 
 impl GasciiApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, started: Instant) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, started: Instant, launch_fullscreen: bool) -> Self {
         fonts::install_fonts(&cc.egui_ctx);
         crate::ui::theme::install(&cc.egui_ctx);
         let mut app = Self::with_state(started);
         prefs::load(cc.storage, &mut app);
         cc.egui_ctx.set_theme(app.theme_pref);
+        app.startup_fullscreen = Some(launch_fullscreen);
         app
+    }
+
+    /// One-shot, first frame only: pins the launch window state regardless of what eframe's window
+    /// persistence restored.
+    pub(crate) fn apply_startup_window_state(&mut self, ctx: &egui::Context) {
+        if let Some(fs) = self.startup_fullscreen.take() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(fs));
+            if fs {
+                self.pending_fit = true;
+            }
+        }
     }
 
     /// A `GasciiApp` with no egui context attached. The context is needed only to register fonts and
@@ -483,6 +548,8 @@ impl GasciiApp {
             // Fit on the first frame: a document pinned to the top-left corner of the desk is not
             // "the star", and the viewport's default pan of zero puts it there.
             pending_fit: true,
+            kiosk_last_fit_size: None,
+            startup_fullscreen: None,
             history: History::new(),
             active_glyph: '#',
             active_fg: Rgba::WHITE,
@@ -491,6 +558,7 @@ impl GasciiApp {
             slots: [ToolSlot::new(ToolKind::Pencil), ToolSlot::new(ToolKind::Eraser)],
             options_focus: Binding::L,
             stroke_owner: None,
+            pressure_stamp_size: None,
             space_pan_active: false,
             keyboard_owner: None,
             was_focused: true,
@@ -503,6 +571,9 @@ impl GasciiApp {
             density_mode: DensityMode::Fixed(Fixed(1.0)),
             theme_pref: egui::ThemePreference::System,
             show_grid: false,
+            stylus_detected: false,
+            brush_pressure: false,
+            pinch_zoom_accum: 1.0,
             resize_dialog_open: false,
             resize_w: Document::DEFAULT_WIDTH,
             resize_h: Document::DEFAULT_HEIGHT,
@@ -726,11 +797,22 @@ impl GasciiApp {
         order_for(self.stroke_owner)
     }
 
+    /// Blanks the whole document as one undoable step. Flushes first — same trigger-table
+    /// discipline as Save/Export/Resize/Copy — so a live burst or float commits before Clear runs
+    /// rather than being silently discarded. No confirm dialog: Clear is undoable like every other
+    /// edit, so it doesn't need one.
+    pub(crate) fn clear_document(&mut self) {
+        self.flush_all();
+        if let Some(edit) = clear_document(&self.doc) {
+            self.apply_edit(edit, None);
+        }
+    }
+
     /// Commits any pending text burst or floating selection, then undoes the most recent edit.
     /// Flushing before undo is correct here: it turns "Undo mid-session" into "undo the very edit
     /// that was just committed" (the same edit the flush just committed), matching ordinary
     /// editor conventions.
-    fn request_undo(&mut self) {
+    pub(crate) fn request_undo(&mut self) {
         self.flush_all();
         self.history.undo(&mut self.doc);
     }
@@ -750,7 +832,7 @@ impl GasciiApp {
     /// for, that pinned value goes stale relative to `doc`'s new actual state; `self.slots[0].tool.resync`
     /// re-pins it. `SelectionTool` inherits the trait's default no-op `resync` — its drop reads
     /// `before` from the document at drop time, not lift time, so there is nothing to re-pin.
-    fn request_redo(&mut self) {
+    pub(crate) fn request_redo(&mut self) {
         if self.history.can_redo() {
             self.history.redo(&mut self.doc);
             // A redo mutates `self.doc` behind BOTH slots' backs, so both re-pin — there is no
@@ -864,6 +946,7 @@ impl GasciiApp {
     fn handle_keys(&mut self, ui: &mut egui::Ui) {
         let owner_kind = self.keyboard_owner().map(|b| self.slot(b).kind);
         let focused = ui.memory(|m| m.focused().is_some()) || suppresses_tool_shortcuts(owner_kind);
+        let is_fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
         let (redo_shift, undo, redo_y, save, copy_all, copy, export_dialog, fit) = ui.input_mut(|i| {
             // Cmd/Ctrl+Shift+Z must be consumed before the plain Cmd/Ctrl+Z pattern, since
             // `matches_logically` ignores extra Shift/Alt — checking undo first would swallow
@@ -904,16 +987,50 @@ impl GasciiApp {
         }
         // The tool shortcuts come from the TOOLS table, so a tool and its key can never drift
         // apart. A shortcut always sets the L binding; right-clicking a toolbox cell is the only
-        // way to set R.
+        // way to set R. Text is excluded from the lookup while fullscreen — see
+        // `tool_shortcut_reachable` — so its key event is left unconsumed rather than silently
+        // rebinding L to a tool that kiosk's own sidebar has no cell for.
         if !focused {
             let picked = ui.input_mut(|i| {
                 TOOLS
                     .iter()
-                    .find(|def| i.consume_key(egui::Modifiers::NONE, def.key))
+                    .find(|def| {
+                        tool_shortcut_reachable(def.kind, is_fullscreen)
+                            && i.consume_key(egui::Modifiers::NONE, def.key)
+                    })
                     .map(|def| def.kind)
             });
             if let Some(kind) = picked {
                 self.set_tool(Binding::L, kind);
+            }
+        }
+        // Escape's lowest-priority claim: exiting fullscreen. Only reachable when nothing with a
+        // higher claim on Escape is live (a Text/Selection session, a pointer stroke) — those are
+        // handled elsewhere (`canvas.rs`'s own Escape branches, which run on the same frame's raw
+        // events and are unaffected by this `consume_key` since it only fires when they wouldn't
+        // have claimed the key anyway).
+        if should_handle_escape_for_fullscreen(self.keyboard_owner(), self.stroke_in_progress()) {
+            let want_exit = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+            if want_exit && is_fullscreen {
+                let ctx = ui.ctx().clone();
+                self.toggle_fullscreen(&ctx);
+            }
+        }
+        // F11 is genuinely unconditional — no `focused` gate. Nothing else in the app binds it, no
+        // tool consumes it as content (a Text burst only ever sees `Event::Text`/`Char`), and
+        // `handle_keys` itself only runs while `!modal_open()`, which is the one gate F11 does
+        // need. Gating it on `focused` would silently swallow the toggle for the whole duration of
+        // any Text session (`suppresses_tool_shortcuts` holds `focused` true for as long as
+        // composing lasts), which is exactly the bug this is written to avoid.
+        let want_toggle = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F11));
+        if want_toggle {
+            let ctx = ui.ctx().clone();
+            self.toggle_fullscreen(&ctx);
+        }
+        if !focused {
+            let want_swap = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::X));
+            if want_swap {
+                self.swap_colors();
             }
         }
         if copy_all {
@@ -1119,6 +1236,17 @@ impl GasciiApp {
                         ui.ctx().set_theme(pref);
                     }
                 });
+                ui.separator();
+                // Kiosk chrome shows no menu bar at all, so the "Exit…" label is unreachable in
+                // practice while fullscreen — implemented anyway for symmetry/defensiveness and
+                // because the toggle's contract (label always names the action it performs) should
+                // hold regardless of which chrome happens to expose it.
+                let is_fs = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
+                let label = if is_fs { "Exit Full Screen Mode" } else { "Enter Full Screen Mode" };
+                if ui.add(egui::Button::new(label).shortcut_text("F11")).clicked() {
+                    let ctx = ui.ctx().clone();
+                    self.toggle_fullscreen(&ctx);
+                }
             });
         });
     }
@@ -1131,6 +1259,18 @@ impl GasciiApp {
             Ok(text) => self.paste_text(&text),
             Err(e) => self.last_error = Some(format!("paste: clipboard read failed: {e}")),
         }
+    }
+
+    /// Sends the fullscreen toggle and, only on the false→true transition, snaps zoom to Fit —
+    /// matching the design's "zoom snaps to Fit" annotation, which only applies on entry. Exiting
+    /// leaves whatever zoom kiosk's own auto-fit last settled on (harmless either way, since normal
+    /// mode's zoom is independent per-session state already).
+    pub(crate) fn toggle_fullscreen(&mut self, ctx: &egui::Context) {
+        let is_fs = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        if !is_fs {
+            self.pending_fit = true;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!is_fs));
     }
 
     /// Zooms by one step, keeping the viewport's own centring (there is no pointer to anchor to
@@ -1182,10 +1322,10 @@ impl GasciiApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label("Width");
-                crate::ui::widgets::stepper(ui, &mut self.new_w, 1, Document::MAX_WIDTH);
+                crate::ui::widgets::stepper(ui, &mut self.new_w, 1, Document::MAX_WIDTH, crate::ui::widgets::STEPPER_H);
                 ui.add_space(12.0);
                 ui.label("Height");
-                crate::ui::widgets::stepper(ui, &mut self.new_h, 1, Document::MAX_HEIGHT);
+                crate::ui::widgets::stepper(ui, &mut self.new_h, 1, Document::MAX_HEIGHT, crate::ui::widgets::STEPPER_H);
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -1220,10 +1360,10 @@ impl GasciiApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label("Width");
-                crate::ui::widgets::stepper(ui, &mut self.resize_w, 1, Document::MAX_WIDTH);
+                crate::ui::widgets::stepper(ui, &mut self.resize_w, 1, Document::MAX_WIDTH, crate::ui::widgets::STEPPER_H);
                 ui.add_space(12.0);
                 ui.label("Height");
-                crate::ui::widgets::stepper(ui, &mut self.resize_h, 1, Document::MAX_HEIGHT);
+                crate::ui::widgets::stepper(ui, &mut self.resize_h, 1, Document::MAX_HEIGHT, crate::ui::widgets::STEPPER_H);
             });
             ui.add_space(8.0);
             anchor_grid(ui, &mut self.resize_anchor);
@@ -1577,7 +1717,7 @@ impl GasciiApp {
             let mut dont_save = false;
             let mut decided = DialogAction::None;
             ui.horizontal(|ui| {
-                if crate::ui::widgets::button(ui, "Don't Save", false).clicked() {
+                if crate::ui::widgets::button(ui, "Don't Save", false, true).clicked() {
                     dont_save = true;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1625,7 +1765,7 @@ impl GasciiApp {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "untitled.gascii".to_owned());
         let dirty = if self.is_dirty() { " •" } else { "" };
-        format!("GASCII — {name}{dirty}")
+        format!("GASCII <> {name}{dirty}")
     }
 }
 
@@ -1694,6 +1834,7 @@ impl eframe::App for GasciiApp {
             self.first_frame = false;
         }
         let ctx = ui.ctx().clone();
+        self.apply_startup_window_state(&ctx);
         self.handle_close_request(&ctx);
         if !self.modal_open() {
             self.handle_keys(ui);
@@ -1707,52 +1848,87 @@ impl eframe::App for GasciiApp {
             self.shown_title = title;
         }
 
+        let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         let t = crate::ui::theme::current(&ctx);
         // The window edge's resize grips, before the panels: the grip is a 5px ring around the whole
         // window and must win over any widget sitting under it. The canvas reads raw pointer state
         // rather than egui interactions, so it must be told explicitly — a press on the grip would
         // otherwise both begin an OS resize and stamp a stroke on the document in the same click.
+        // A fullscreen window has no edges to drag, so `handle_resize` already no-ops there.
         let pointer_on_resize_grip = crate::ui::titlebar::handle_resize(&ctx);
 
-        egui::Panel::top("titlebar")
-            .frame(
-                egui::Frame::new()
-                    .fill(t.bg_panel)
-                    .inner_margin(egui::Margin::symmetric(0, 0))
-                    .stroke(egui::Stroke::NONE),
-            )
-            .exact_size(crate::ui::titlebar::HEIGHT)
-            .show(ui, |ui| crate::ui::titlebar::show(ui, self));
-        egui::Panel::top("menubar")
-            .frame(egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::symmetric(8, 0)))
-            .exact_size(28.0)
-            .show(ui, |ui| {
-                ui.horizontal_centered(|ui| self.menu_bar(ui));
-            });
-        egui::Panel::top("options")
-            .frame(egui::Frame::new().fill(t.bg_chrome).inner_margin(egui::Margin::symmetric(12, 0)))
-            .exact_size(crate::ui::options_bar::HEIGHT)
-            .show(ui, |ui| crate::ui::options_bar::show(ui, self));
-        // The status bar is claimed BEFORE the sidebar, so it spans the full window width. Panels
-        // take their slice in declaration order: sidebar-first would give the left panel the whole
-        // remaining height and leave the status bar starting at x=208.
-        egui::Panel::bottom("status")
-            .frame(egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::symmetric(12, 0)))
-            .exact_size(crate::ui::status_bar::HEIGHT)
-            .show(ui, |ui| {
-                ui.horizontal_centered(|ui| crate::ui::status_bar::show(ui, self));
-            });
-        egui::Panel::left("sidebar")
-            .frame(egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::same(12)))
-            .default_size(crate::ui::sidebar::DEFAULT_WIDTH)
-            .size_range(crate::ui::sidebar::MIN_WIDTH..=crate::ui::sidebar::MAX_WIDTH)
-            .resizable(true)
-            .show(ui, |ui| crate::ui::sidebar::show(ui, self));
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(t.bg_desk))
-            .show(ui, |ui| {
-                canvas::show(ui, self, pointer_on_resize_grip);
-            });
+        if is_fullscreen {
+            egui::Panel::top("kiosk_top")
+                .frame(
+                    egui::Frame::new()
+                        .fill(t.bg_panel)
+                        .inner_margin(egui::Margin::symmetric(0, 0))
+                        .stroke(egui::Stroke::new(1.0, t.window_edge)),
+                )
+                .exact_size(crate::ui::kiosk::TOP_H)
+                .show(ui, |ui| crate::ui::kiosk::top_bar(ui, self, &ctx));
+            egui::Panel::bottom("kiosk_status")
+                .frame(egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::symmetric(12, 0)))
+                .exact_size(crate::ui::kiosk::STATUS_H)
+                .show(ui, |ui| {
+                    ui.horizontal_centered(|ui| crate::ui::kiosk::status_bar(ui, self));
+                });
+            egui::Panel::left("kiosk_sidebar")
+                .frame(
+                    egui::Frame::new()
+                        .fill(t.bg_panel)
+                        .inner_margin(egui::Margin::same(16))
+                        .stroke(egui::Stroke::new(1.0, t.window_edge)),
+                )
+                .exact_size(crate::ui::kiosk::SIDEBAR_W)
+                .resizable(false)
+                .show(ui, |ui| crate::ui::kiosk::sidebar(ui, self));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(t.bg_desk))
+                .show(ui, |ui| {
+                    canvas::show(ui, self, pointer_on_resize_grip);
+                });
+        } else {
+            egui::Panel::top("titlebar")
+                .frame(
+                    egui::Frame::new()
+                        .fill(t.bg_panel)
+                        .inner_margin(egui::Margin::symmetric(0, 0))
+                        .stroke(egui::Stroke::NONE),
+                )
+                .exact_size(crate::ui::titlebar::HEIGHT)
+                .show(ui, |ui| crate::ui::titlebar::show(ui, self));
+            egui::Panel::top("menubar")
+                .frame(egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::symmetric(8, 0)))
+                .exact_size(28.0)
+                .show(ui, |ui| {
+                    ui.horizontal_centered(|ui| self.menu_bar(ui));
+                });
+            egui::Panel::top("options")
+                .frame(egui::Frame::new().fill(t.bg_chrome).inner_margin(egui::Margin::symmetric(12, 0)))
+                .exact_size(crate::ui::options_bar::HEIGHT)
+                .show(ui, |ui| crate::ui::options_bar::show(ui, self));
+            // The status bar is claimed BEFORE the sidebar, so it spans the full window width. Panels
+            // take their slice in declaration order: sidebar-first would give the left panel the whole
+            // remaining height and leave the status bar starting at x=208.
+            egui::Panel::bottom("status")
+                .frame(egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::symmetric(12, 0)))
+                .exact_size(crate::ui::status_bar::HEIGHT)
+                .show(ui, |ui| {
+                    ui.horizontal_centered(|ui| crate::ui::status_bar::show(ui, self));
+                });
+            egui::Panel::left("sidebar")
+                .frame(egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::same(12)))
+                .default_size(crate::ui::sidebar::DEFAULT_WIDTH)
+                .size_range(crate::ui::sidebar::MIN_WIDTH..=crate::ui::sidebar::MAX_WIDTH)
+                .resizable(true)
+                .show(ui, |ui| crate::ui::sidebar::show(ui, self));
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(t.bg_desk))
+                .show(ui, |ui| {
+                    canvas::show(ui, self, pointer_on_resize_grip);
+                });
+        }
 
         self.new_dialog(&ctx);
         self.resize_dialog(&ctx);
@@ -1760,8 +1936,11 @@ impl eframe::App for GasciiApp {
         self.confirm_dialog(&ctx);
 
         // Last, on the foreground layer: with the OS frame gone, nothing else draws the window's
-        // own outline.
-        crate::ui::titlebar::paint_window_edge(&ctx);
+        // own outline. Skipped while fullscreen — there is no window edge to outline, and kiosk's
+        // own top/sidebar panel frames already draw their own borders.
+        if !is_fullscreen {
+            crate::ui::titlebar::paint_window_edge(&ctx);
+        }
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -1918,6 +2097,156 @@ mod tests {
         assert_eq!(order_for(Some(Binding::R)), [Binding::R, Binding::L]);
     }
 
+    /// The full truth table behind Escape's fullscreen-exit precedence: only "no keyboard-owning
+    /// session AND no live stroke" claims Escape for exiting fullscreen. Either higher-priority
+    /// claim alone is enough to withhold it.
+    #[test]
+    fn should_handle_escape_for_fullscreen_truth_table() {
+        assert!(
+            should_handle_escape_for_fullscreen(None, false),
+            "no session, no stroke: Escape should exit fullscreen"
+        );
+        assert!(
+            !should_handle_escape_for_fullscreen(Some(Binding::L), false),
+            "an active keyboard-owning session outranks the fullscreen exit"
+        );
+        assert!(
+            !should_handle_escape_for_fullscreen(None, true),
+            "a live pointer stroke outranks the fullscreen exit"
+        );
+        assert!(
+            !should_handle_escape_for_fullscreen(Some(Binding::R), true),
+            "both higher-priority claims held at once still withhold Escape from fullscreen"
+        );
+    }
+
+    /// Stylus pressure must drive `tool_ctx`'s size for the live stroke without ever touching the
+    /// slot's own `StampSettings.size` — the same field the Size stepper/`[`/`]` keys edit and
+    /// `Prefs::from_app` persists. A user's configured size must survive a pressure-modulated
+    /// stroke byte-for-byte.
+    #[test]
+    fn pressure_override_drives_tool_ctx_size_without_touching_the_slots_configured_size() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Brush);
+        let brush_slot = sized_slot(ToolKind::Brush).expect("Brush is a sized tool");
+        app.slots[Binding::L.ix()].stamps[brush_slot].size = 10;
+
+        crate::canvas::begin_gesture(&mut app, Binding::L, 0, 0);
+        assert_eq!(app.stroke_owner, Some(Binding::L), "sanity: L is mid-stroke");
+        assert_eq!(
+            app.pressure_stamp_size, None,
+            "a fresh stroke starts with no pressure override"
+        );
+
+        // A light-pressure dab (mirrors canvas.rs's quantization) sets only the transient override.
+        app.pressure_stamp_size = Some(2);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        assert_eq!(tctx.size, 2, "the live stroke's footprint follows the pressure override");
+        assert_eq!(
+            app.slots[Binding::L.ix()].stamps[brush_slot].size, 10,
+            "the binding's configured/persisted Brush size must be untouched by pressure"
+        );
+
+        // The other binding never sees a pressure override that isn't its own.
+        let r_tctx = crate::canvas::tool_ctx(&app, Binding::R);
+        assert_ne!(r_tctx.size, 2, "pressure only overrides the stroke-owning binding");
+
+        // Ending the stroke clears the override; the slot's size is still exactly what it was.
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        if let ToolResponse::Commit(Some(edit)) =
+            app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc)
+        {
+            app.apply_edit(edit, Some(Binding::L));
+        }
+        app.stroke_owner = None;
+        app.pressure_stamp_size = None;
+        assert_eq!(
+            app.slots[Binding::L.ix()].stamps[brush_slot].size, 10,
+            "the configured size survives the whole stroke, including release"
+        );
+    }
+
+    /// `F11` must exit/enter fullscreen even while a Text session is fully active — the exact
+    /// scenario `suppresses_tool_shortcuts` exists to gate (single-letter tool keys), which F11 is
+    /// not one of. A stale `!focused` gate on F11 previously reused that same flag and swallowed
+    /// the toggle for as long as a Text burst lasted.
+    #[test]
+    fn f11_toggles_fullscreen_even_during_an_active_text_session() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('h'), &tctx, &app.doc);
+        app.acquire_keyboard(Binding::L);
+        let owner_kind = app.keyboard_owner().map(|b| app.slot(b).kind);
+        assert!(
+            suppresses_tool_shortcuts(owner_kind),
+            "sanity: an active Text session suppresses the single-letter tool shortcuts"
+        );
+
+        let ctx = egui::Context::default();
+        let mut raw_input = egui::RawInput::default();
+        raw_input.events.push(egui::Event::Key {
+            key: egui::Key::F11,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let output = ctx.run_ui(raw_input, |ui| app.handle_keys(ui));
+
+        let sent_toggle = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|vp| vp.commands.iter().any(|c| matches!(c, egui::ViewportCommand::Fullscreen(true))));
+        assert!(sent_toggle, "F11 must toggle fullscreen even while a Text session is active");
+    }
+
+    /// eframe's own window persistence restores the previous run's fullscreen state, so the first
+    /// frame must force the launch state — windowed unless `--fullscreen` — exactly once.
+    #[test]
+    fn startup_window_state_is_forced_exactly_once() {
+        let mut app = GasciiApp::headless();
+        app.startup_fullscreen = Some(false);
+        let ctx = egui::Context::default();
+
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let c = ui.ctx().clone();
+            app.apply_startup_window_state(&c);
+        });
+        let sent_windowed = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|vp| vp.commands.iter().any(|c| matches!(c, egui::ViewportCommand::Fullscreen(false))));
+        assert!(sent_windowed, "the first frame must pin the window state even if eframe restored fullscreen");
+        assert!(app.startup_fullscreen.is_none(), "the forced state is one-shot");
+
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let c = ui.ctx().clone();
+            app.apply_startup_window_state(&c);
+        });
+        let sent_again = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|vp| !vp.commands.is_empty());
+        assert!(!sent_again, "later frames must never re-force the window state");
+    }
+
+    /// `--fullscreen` launches straight into kiosk mode, which must arrive with zoom snapped to
+    /// Fit exactly like an interactive entry does.
+    #[test]
+    fn a_fullscreen_launch_requests_the_same_fit_snap_as_an_interactive_entry() {
+        let mut app = GasciiApp::headless();
+        app.startup_fullscreen = Some(true);
+        app.pending_fit = false;
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let c = ui.ctx().clone();
+            app.apply_startup_window_state(&c);
+        });
+        assert!(app.pending_fit, "a fullscreen launch must snap zoom to Fit");
+    }
+
     /// A paste lands on a binding already holding Selection rather than rebinding one, and falls
     /// back to L (never R) when neither does — silently rebinding the right button out from under
     /// the user is worse than rebinding the left.
@@ -2070,6 +2399,24 @@ mod tests {
             assert_eq!(suppresses_tool_shortcuts(Some(kind)), expected, "{kind:?}");
         }
         assert!(!suppresses_tool_shortcuts(None));
+    }
+
+    /// Pure-function coverage over every `ToolKind`: only Text's shortcut is gated, and only while
+    /// fullscreen — kiosk's sidebar has no cell for Text, so `T` must not be reachable there, but
+    /// every other tool's shortcut (visible in the kiosk grid, showing L/R badges) stays live in
+    /// both chrome modes.
+    #[test]
+    fn tool_shortcut_reachable_only_gates_text_and_only_while_fullscreen() {
+        for kind in ALL_KINDS {
+            assert!(tool_shortcut_reachable(kind, false), "{kind:?}: every shortcut works windowed");
+        }
+        for kind in ALL_KINDS {
+            let expected = kind != ToolKind::Text;
+            assert_eq!(
+                tool_shortcut_reachable(kind, true), expected,
+                "{kind:?}: fullscreen gating must affect only Text"
+            );
+        }
     }
 
     /// `flush_slot` commits pending work but never releases the keyboard — that is `end_session`'s
@@ -2622,5 +2969,384 @@ mod tests {
         assert_eq!(app.doc.background, Rgba(1, 2, 3, 255));
         assert!(!app.new_dialog_open, "creating the document must close the dialog");
         assert!(!app.history.can_undo(), "a fresh document starts with empty history");
+    }
+
+    /// The Clear button's wiring end to end: one undoable step that blanks the document and
+    /// undoes cleanly, exercised through `GasciiApp::clear_document` rather than the core free
+    /// function directly (core's own tests already cover the pure edit-building math).
+    #[test]
+    fn clear_document_app_method_produces_one_undoable_step() {
+        let mut app = GasciiApp::headless();
+        app.doc.set_cell(0, 0, 0, cell('a'));
+        app.doc.set_cell(0, 5, 5, cell('z'));
+        let before = app.doc.clone();
+
+        app.clear_document();
+
+        assert!(app.doc.layers[0].cells().iter().all(gascii_core::Cell::is_blank));
+        assert!(app.history.can_undo());
+        assert!(app.history.undo(&mut app.doc));
+        assert_eq!(app.doc, before);
+    }
+
+    /// Clearing an already-blank document must not push a phantom undo entry — matches every
+    /// other tool's "nothing to commit" contract.
+    #[test]
+    fn clear_document_on_an_already_blank_document_creates_no_undo_entry() {
+        let mut app = GasciiApp::headless();
+        assert!(!app.history.can_undo());
+        app.clear_document();
+        assert!(!app.history.can_undo());
+    }
+
+    /// Clear flushes first, same trigger-table discipline as Save/Export/Resize/Copy: a live text
+    /// burst must commit before Clear blanks the document, not be silently discarded.
+    #[test]
+    fn clear_document_flushes_a_pending_text_burst_before_blanking() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('A'), &tctx, &app.doc);
+
+        app.clear_document();
+
+        // The burst's 'A' commits, then Clear blanks it right back out — both as real edits, so
+        // two undos are needed to get back to the empty starting document.
+        assert!(app.doc.layers[0].cells().iter().all(gascii_core::Cell::is_blank));
+        assert!(app.history.undo(&mut app.doc));
+        assert_eq!(app.doc.cell(0, 0, 0).unwrap().ch, 'A', "undo #1 restores the burst's commit");
+        assert!(app.history.undo(&mut app.doc));
+        assert_eq!(app.doc.cell(0, 0, 0).unwrap().ch, ' ', "undo #2 restores the pre-burst blank state");
+    }
+
+    /// The Selection counterpart of the Text-burst flush test above: a floating stamp is a
+    /// session too (`holds_session`), so `clear_document`'s `flush_all()` must drop it into the
+    /// document before Clear blanks everything — not silently discard the pending paste/move.
+    #[test]
+    fn clear_document_flushes_a_pending_floating_selection_stamp_before_blanking() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Selection);
+        let patch = CellPatch { width: 1, height: 1, cells: vec![cell('z')] };
+        app.slots[Binding::L.ix()].tool.accept_stamp(patch, (4, 4), &app.doc);
+
+        app.clear_document();
+
+        // Same two-undo-entry shape as the Text-burst case: the drop commits, then Clear blanks
+        // it back out.
+        assert!(app.doc.layers[0].cells().iter().all(gascii_core::Cell::is_blank));
+        assert!(app.history.undo(&mut app.doc));
+        assert_eq!(app.doc.cell(0, 4, 4).unwrap().ch, 'z', "undo #1 restores the dropped stamp");
+        assert!(app.history.undo(&mut app.doc));
+        assert_eq!(app.doc.cell(0, 4, 4).unwrap().ch, ' ', "undo #2 restores the pre-drop blank state");
+    }
+
+    /// Clear must round-trip through both undo AND redo, not just undo — `History::redo` re-applies
+    /// the exact same `Edit::Cells` `clear_document` built, so re-blanking after a redo must match
+    /// the original clear byte-for-byte, and the history's can_undo/can_redo flags must track it.
+    #[test]
+    fn clear_document_survives_an_undo_then_redo_round_trip() {
+        let mut app = GasciiApp::headless();
+        app.doc.set_cell(0, 1, 1, cell('a'));
+        app.doc.set_cell(0, 3, 3, cell('b'));
+        let before = app.doc.clone();
+
+        app.clear_document();
+        let after_clear = app.doc.clone();
+        assert!(app.history.can_undo());
+        assert!(!app.history.can_redo());
+
+        assert!(app.history.undo(&mut app.doc));
+        assert_eq!(app.doc, before, "undo must restore the exact pre-Clear document");
+        assert!(app.history.can_redo());
+
+        assert!(app.history.redo(&mut app.doc));
+        assert_eq!(app.doc, after_clear, "redo must re-apply the exact same Clear edit");
+        assert!(!app.history.can_redo());
+    }
+
+    /// The bug class `Tool::resync` exists to prevent: Clear runs mid-stroke (`flush_all` only
+    /// commits session-holding kinds, so a raw Pencil drag survives Clear untouched at the tool
+    /// level), but the document underneath it is blanked. `apply_edit`'s resync fan-out must
+    /// recompose the stroke's already-touched pending cells against the new blank document —
+    /// including on a masked-off plane, where a missed recompose would silently commit the
+    /// pre-Clear bg color back in on release.
+    #[test]
+    fn clear_mid_stroke_resyncs_the_pending_drags_masked_off_bg_plane_to_the_post_clear_blank_state() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Pencil);
+        app.mask = PlaneMask { glyph: true, bg: false }; // bg masked off: must always track `before`
+        app.active_glyph = '#';
+        app.active_fg = Rgba::WHITE;
+
+        let old_bg = Rgba(10, 20, 30, 255);
+        app.doc.set_cell(0, 2, 2, gascii_core::Cell { ch: 'x', fg: Rgba::WHITE, bg: old_bg });
+
+        crate::canvas::begin_gesture(&mut app, Binding::L, 2, 2);
+        assert_eq!(app.stroke_owner, Some(Binding::L));
+        assert!(
+            !app.slots[Binding::L.ix()].tool.pending().is_empty(),
+            "sanity: the stroke touched a cell before Clear ran"
+        );
+
+        app.clear_document();
+        assert!(
+            app.doc.layers[0].cells().iter().all(gascii_core::Cell::is_blank),
+            "Clear must blank the document even with a stroke mid-flight"
+        );
+        assert_eq!(app.stroke_owner, Some(Binding::L), "Clear must not itself end an in-progress stroke");
+
+        // Finish the stroke where it started (a click) and commit.
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        if let ToolResponse::Commit(Some(edit)) =
+            app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc)
+        {
+            app.apply_edit(edit, Some(Binding::L));
+        }
+        app.stroke_owner = None;
+
+        let committed = app.doc.cell(0, 2, 2).unwrap();
+        assert_eq!(committed.ch, '#', "the unmasked glyph plane still stamps the drawn glyph");
+        assert_ne!(committed.bg, old_bg, "the masked-off bg plane must not resurrect the pre-Clear color");
+        assert_eq!(
+            committed.bg,
+            Rgba::TRANSPARENT,
+            "the masked-off bg plane must follow the post-Clear blank bg, not a stale composition"
+        );
+    }
+
+    /// `begin_gesture`'s own reset of `pressure_stamp_size` is the last line of defense against a
+    /// leaked override, independent of every release/cancel path already covered elsewhere: even if
+    /// some future bug left a stale value behind, the very next stroke on ANY binding — pen or not —
+    /// must never inherit it.
+    #[test]
+    fn begin_gesture_always_clears_a_stale_pressure_override_regardless_of_which_binding_or_tool_set_it() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::R.ix()] = ToolSlot::new(ToolKind::Pencil);
+        app.pressure_stamp_size = Some(3); // simulates a leftover value some other path failed to clear
+
+        crate::canvas::begin_gesture(&mut app, Binding::R, 0, 0);
+
+        assert_eq!(
+            app.pressure_stamp_size, None,
+            "a fresh stroke on ANY binding must start with no pressure override"
+        );
+        let tctx = crate::canvas::tool_ctx(&app, Binding::R);
+        let pencil_slot = sized_slot(ToolKind::Pencil).expect("Pencil is sized");
+        assert_eq!(
+            tctx.size, app.slots[Binding::R.ix()].stamps[pencil_slot].size,
+            "a non-pen stroke must use its own configured size, never an inherited override"
+        );
+    }
+
+    /// K2: zoom snaps to Fit only on the false→true transition, never on exit. `pending_fit` is the
+    /// mechanism — this pins it directly against `toggle_fullscreen` rather than trusting the
+    /// existing Escape/F11 tests, which don't inspect `pending_fit` at all.
+    #[test]
+    fn toggle_fullscreen_snaps_pending_fit_only_on_the_false_to_true_transition() {
+        let mut app = GasciiApp::headless();
+        app.pending_fit = false;
+        let ctx = egui::Context::default(); // no viewport info registered: fullscreen reads as false
+        app.toggle_fullscreen(&ctx); // false -> true
+        assert!(app.pending_fit, "entering fullscreen must snap zoom to Fit");
+
+        app.pending_fit = false;
+        let mut raw = egui::RawInput::default();
+        raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().fullscreen = Some(true);
+        let _ = ctx.run_ui(raw, |_ui| {});
+        app.toggle_fullscreen(&ctx); // true -> false
+        assert!(!app.pending_fit, "exiting fullscreen must NOT re-trigger a Fit snap");
+    }
+
+    /// End-to-end trace of K1's full precedence chain across two real frames — not just the pure
+    /// `should_handle_escape_for_fullscreen` predicate, but `handle_keys` AND `canvas.rs`'s own
+    /// Text-session Escape handling racing over the same frame's events, exactly as `GasciiApp::ui`
+    /// drives them in sequence. Frame 1's Escape must end the session and leave fullscreen alone;
+    /// frame 2's Escape (session now gone) must exit fullscreen.
+    #[test]
+    fn escape_precedence_chain_first_ends_text_session_second_exits_fullscreen() {
+        let mut app = GasciiApp::headless();
+        app.pending_fit = false;
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &app.doc);
+        app.acquire_keyboard(Binding::L);
+        assert_eq!(app.keyboard_owner(), Some(Binding::L), "sanity: the Text session holds the keyboard");
+
+        let ctx = egui::Context::default();
+        fonts::install_fonts(&ctx);
+
+        fn escape_event() -> egui::Event {
+            egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }
+        }
+
+        // Frame 1: fullscreen, Escape pressed, Text session still active.
+        let mut raw1 = egui::RawInput::default();
+        raw1.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().fullscreen = Some(true);
+        raw1.events.push(escape_event());
+        let out1 = ctx.run_ui(raw1, |ui| {
+            app.handle_keys(ui);
+            crate::canvas::show(ui, &mut app, false);
+        });
+        let toggled_frame1 = out1
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|vp| vp.commands.iter().any(|c| matches!(c, egui::ViewportCommand::Fullscreen(_))));
+        assert!(!toggled_frame1, "frame 1's Escape must be claimed by the session, not fullscreen");
+        assert_eq!(
+            app.keyboard_owner(), None,
+            "frame 1's Escape must end the Text session (canvas.rs's own handling)"
+        );
+
+        // Frame 2: fullscreen, Escape pressed again, no session left to claim it.
+        let mut raw2 = egui::RawInput::default();
+        raw2.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().fullscreen = Some(true);
+        raw2.events.push(escape_event());
+        let out2 = ctx.run_ui(raw2, |ui| app.handle_keys(ui));
+        let toggled_frame2 = out2
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|vp| vp.commands.iter().any(|c| matches!(c, egui::ViewportCommand::Fullscreen(false))));
+        assert!(toggled_frame2, "frame 2's Escape, with no session left, must exit fullscreen");
+    }
+
+    /// The third rung of K1's precedence chain: a live pointer stroke outranks Escape's
+    /// fullscreen-exit claim exactly like an active session does — exiting mid-drag would yank the
+    /// canvas out from under the pointer. Drives the real `handle_keys` rather than only the pure
+    /// predicate, so a future accidental reordering of the guards would be caught here too.
+    #[test]
+    fn escape_does_not_exit_fullscreen_while_a_stroke_is_mid_drag() {
+        let mut app = GasciiApp::headless();
+        crate::canvas::begin_gesture(&mut app, Binding::L, 0, 0);
+        assert!(app.stroke_in_progress(), "sanity: a stroke is mid-drag");
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().fullscreen = Some(true);
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let output = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        let toggled = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|vp| vp.commands.iter().any(|c| matches!(c, egui::ViewportCommand::Fullscreen(_))));
+        assert!(!toggled, "Escape must not exit fullscreen while a stroke is mid-drag");
+        assert!(app.stroke_in_progress(), "the mid-drag stroke itself must be untouched");
+    }
+
+    /// Extends the existing F11-during-Text-session regression test: toggling fullscreen must be a
+    /// pure side-channel to the Text session, not just "doesn't block the toggle command" — typing
+    /// must keep working immediately afterward and the eventual flush must commit every character,
+    /// proving the toggle never touched `keyboard_owner`, the tool instance, or its pending buffer.
+    #[test]
+    fn f11_mid_text_burst_leaves_the_burst_content_and_caret_fully_intact_after_toggling() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('h'), &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('i'), &tctx, &app.doc);
+        app.acquire_keyboard(Binding::L);
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::F11,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        // The toggle must be a pure side-channel: keyboard ownership, the tool instance, and the
+        // caret are all untouched, so typing continues exactly where it left off.
+        assert_eq!(app.keyboard_owner(), Some(Binding::L), "F11 must not release the keyboard");
+        assert!(app.slots[Binding::L.ix()].tool.caret().is_some(), "F11 must not clear the caret");
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('!'), &tctx, &app.doc);
+        app.flush_slot(Binding::L);
+
+        assert_eq!(app.doc.cell(0, 0, 0).unwrap().ch, 'h');
+        assert_eq!(app.doc.cell(0, 1, 0).unwrap().ch, 'i');
+        assert_eq!(app.doc.cell(0, 2, 0).unwrap().ch, '!', "typing after the F11 toggle must still commit");
+    }
+
+    /// End-to-end companion to `tool_shortcut_reachable_only_gates_text_and_only_while_fullscreen`:
+    /// drives the real `handle_keys` rather than the pure predicate alone, confirming `T` is left
+    /// unconsumed (L stays whatever it was) while fullscreen, and that this gating is narrow — every
+    /// other tool's shortcut (e.g. Fill's `F`) still switches L normally in the same chrome mode.
+    #[test]
+    fn pressing_t_while_fullscreen_leaves_l_unchanged_but_other_tool_shortcuts_still_work() {
+        let mut app = GasciiApp::headless();
+        let original_l_kind = app.slot(Binding::L).kind;
+
+        let ctx = egui::Context::default();
+        let mut raw_t = egui::RawInput::default();
+        raw_t.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().fullscreen = Some(true);
+        raw_t.events.push(egui::Event::Key {
+            key: egui::Key::T,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run_ui(raw_t, |ui| app.handle_keys(ui));
+        assert_eq!(app.slot(Binding::L).kind, original_l_kind, "T must not switch L to Text while fullscreen");
+
+        let mut raw_f = egui::RawInput::default();
+        raw_f.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().fullscreen = Some(true);
+        raw_f.events.push(egui::Event::Key {
+            key: egui::Key::F,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run_ui(raw_f, |ui| app.handle_keys(ui));
+        assert_eq!(
+            app.slot(Binding::L).kind, ToolKind::Fill,
+            "every other tool's shortcut must stay reachable while fullscreen"
+        );
+    }
+
+    /// Acceptance criterion: "X swaps FG/BG in both chrome modes". K12's own fix (the pre-existing
+    /// tooltip/missing-keybinding gap) had no dedicated test anywhere — the `X` branch isn't gated
+    /// on `is_fullscreen` at all, so this drives the real `handle_keys` in both chrome modes and
+    /// confirms the swap actually happens each time.
+    #[test]
+    fn x_key_swaps_fg_and_bg_in_both_windowed_and_fullscreen_chrome() {
+        for fullscreen in [false, true] {
+            let mut app = GasciiApp::headless();
+            app.active_fg = Rgba(1, 2, 3, 255);
+            app.active_bg = Rgba(4, 5, 6, 255);
+
+            let ctx = egui::Context::default();
+            let mut raw = egui::RawInput::default();
+            raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().fullscreen = Some(fullscreen);
+            raw.events.push(egui::Event::Key {
+                key: egui::Key::X,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+            assert_eq!(app.active_fg, Rgba(4, 5, 6, 255), "fullscreen={fullscreen}: X must swap FG");
+            assert_eq!(app.active_bg, Rgba(1, 2, 3, 255), "fullscreen={fullscreen}: X must swap BG");
+        }
     }
 }

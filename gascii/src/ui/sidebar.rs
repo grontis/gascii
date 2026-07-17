@@ -4,7 +4,7 @@ use eframe::egui::{self, Sense, Stroke, Ui, Vec2};
 
 use super::widgets::{self, Bound};
 use super::theme;
-use crate::app::{Binding, GasciiApp, ToolKind, TOOLS};
+use crate::app::{Binding, GasciiApp, ToolDef, ToolKind, TOOLS};
 use crate::fonts;
 
 /// The panel's default width; it is resizable (see `app.rs`'s `Panel::left` builder), so this is
@@ -35,21 +35,13 @@ fn page_label(page_name: &str) -> &str {
     }
 }
 
-fn rgba_to_color32(c: gascii_core::Rgba) -> egui::Color32 {
-    egui::Color32::from_rgba_unmultiplied(c.0, c.1, c.2, c.3)
-}
-
-fn hex(c: gascii_core::Rgba) -> String {
-    format!("#{:02X}{:02X}{:02X}", c.0, c.1, c.2)
-}
-
 pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
     let t = theme::current(ui.ctx());
     ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
 
     toolbox(ui, app);
     ui.add_space(2.0);
-    palette(ui, app);
+    palette(ui, app, widgets::SWATCH, fonts::size::GLYPH, 220.0);
 
     // Colours and write toggles sit at the foot of the panel, pushed there with an explicit
     // spacer rather than a `bottom_up` layout: bottom-up mis-measures the nested rows here and
@@ -70,17 +62,19 @@ fn rule(ui: &mut Ui, color: egui::Color32) {
     ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, color));
 }
 
-/// MacPaint-style 3-column grid: cells butt together and the 1px gaps are the grid's own border
-/// showing through, so the whole block reads as one object rather than nine buttons.
-fn toolbox(ui: &mut Ui, app: &mut GasciiApp) {
+/// MacPaint-style grid: `tools` laid out `cols` wide at `cell_h` tall, cells butted together
+/// with the grid's own 1px border showing through the gaps, so the whole block reads as one
+/// object rather than a row of separate buttons. Click binds L, secondary-click binds R — the
+/// only place R is ever set by pointer, in either chrome mode.
+pub(crate) fn tool_grid(ui: &mut Ui, app: &mut GasciiApp, tools: &[ToolDef], cols: usize, cell_h: f32) {
     let t = theme::current(ui.ctx());
     let avail = ui.available_width();
-    let cell_w = ((avail - (TOOL_COLS - 1) as f32) / TOOL_COLS as f32).floor();
-    let cell = Vec2::new(cell_w, widgets::TOOL_CELL);
-    let rows = TOOLS.len().div_ceil(TOOL_COLS);
+    let cell_w = ((avail - (cols - 1) as f32) / cols as f32).floor();
+    let cell = Vec2::new(cell_w, cell_h);
+    let rows = tools.len().div_ceil(cols);
 
     let grid_size = Vec2::new(
-        cell_w * TOOL_COLS as f32 + (TOOL_COLS - 1) as f32,
+        cell_w * cols as f32 + (cols - 1) as f32,
         cell.y * rows as f32 + (rows - 1) as f32,
     );
     let (grid_rect, _) = ui.allocate_exact_size(grid_size, Sense::hover());
@@ -88,8 +82,8 @@ fn toolbox(ui: &mut Ui, app: &mut GasciiApp) {
     ui.painter().rect_filled(grid_rect, 0.0, t.border_strong);
 
     let mut rebind: Option<(Binding, ToolKind)> = None;
-    for (i, def) in TOOLS.iter().enumerate() {
-        let (col, row) = (i % TOOL_COLS, i / TOOL_COLS);
+    for (i, def) in tools.iter().enumerate() {
+        let (col, row) = (i % cols, i / cols);
         let min = grid_rect.min
             + Vec2::new(col as f32 * (cell_w + 1.0), row as f32 * (cell.y + 1.0));
         let mut child = ui.new_child(
@@ -121,7 +115,13 @@ fn toolbox(ui: &mut Ui, app: &mut GasciiApp) {
     }
 }
 
-fn palette(ui: &mut Ui, app: &mut GasciiApp) {
+/// MacPaint-style 3-column grid: cells butt together and the 1px gaps are the grid's own border
+/// showing through, so the whole block reads as one object rather than nine buttons.
+fn toolbox(ui: &mut Ui, app: &mut GasciiApp) {
+    tool_grid(ui, app, &TOOLS, TOOL_COLS, widgets::TOOL_CELL);
+}
+
+pub(crate) fn palette(ui: &mut Ui, app: &mut GasciiApp, swatch: f32, glyph_px: f32, scroll_h: f32) {
     let mut page = app.active_page;
     let options: Vec<(usize, &str)> = app
         .pages
@@ -136,36 +136,37 @@ fn palette(ui: &mut Ui, app: &mut GasciiApp) {
     if !app.recent_glyphs.is_empty() {
         widgets::micro_label(ui, "RECENT");
         let recent = app.recent_glyphs.clone();
-        swatch_row(ui, app, &recent);
+        swatch_row(ui, app, &recent, swatch, glyph_px);
     }
 
     // The ASCII page is 95 glyphs and Box Drawing is 128 — 16 and 22 rows at six per row, far
     // more than one screenful, so this has to scroll.
     let glyphs = app.pages[app.active_page].glyphs.clone();
     egui::ScrollArea::vertical()
-        .max_height(220.0)
+        .max_height(scroll_h)
         .auto_shrink([false, true])
         .show(ui, |ui| {
-            swatch_row(ui, app, &glyphs);
+            swatch_row(ui, app, &glyphs, swatch, glyph_px);
         });
 }
 
-/// How many swatches fit per row at the given available width, floored at `SWATCH_COLS_MIN` and
-/// capped at `SWATCH_COLS_MAX` — the sidebar is resizable, so this can no longer be a fixed six.
-fn swatch_cols(avail: f32) -> usize {
-    let cols = ((avail + SWATCH_GAP) / (widgets::SWATCH + SWATCH_GAP)).floor() as i32;
+/// How many swatches fit per row at the given available width and swatch size, floored at
+/// `SWATCH_COLS_MIN` and capped at `SWATCH_COLS_MAX` — the sidebar is resizable and kiosk mode
+/// uses a larger swatch, so this can no longer be a fixed six.
+fn swatch_cols(avail: f32, swatch: f32) -> usize {
+    let cols = ((avail + SWATCH_GAP) / (swatch + SWATCH_GAP)).floor() as i32;
     cols.clamp(SWATCH_COLS_MIN as i32, SWATCH_COLS_MAX as i32) as usize
 }
 
 /// A wrapped grid of glyph swatches, reflowing to the sidebar's current width.
-fn swatch_row(ui: &mut Ui, app: &mut GasciiApp, glyphs: &[char]) {
+fn swatch_row(ui: &mut Ui, app: &mut GasciiApp, glyphs: &[char], swatch: f32, glyph_px: f32) {
     let mut picked: Option<char> = None;
-    let cols = swatch_cols(ui.available_width());
+    let cols = swatch_cols(ui.available_width(), swatch);
     ui.spacing_mut().item_spacing = Vec2::splat(SWATCH_GAP);
     ui.horizontal_wrapped(|ui| {
-        ui.set_max_width(widgets::SWATCH * cols as f32 + SWATCH_GAP * (cols - 1) as f32);
+        ui.set_max_width(swatch * cols as f32 + SWATCH_GAP * (cols - 1) as f32);
         for &ch in glyphs {
-            if widgets::glyph_swatch(ui, ch, app.active_glyph == ch).clicked() {
+            if widgets::glyph_swatch(ui, ch, app.active_glyph == ch, swatch, glyph_px).clicked() {
                 picked = Some(ch);
             }
         }
@@ -205,7 +206,7 @@ fn color_popup(ui: &Ui, resp: &egui::Response, color: &mut gascii_core::Rgba) {
             for (name, preset) in ANSI16.iter() {
                 let sw = ui.add(
                     egui::Button::new("")
-                        .fill(rgba_to_color32(*preset))
+                        .fill(widgets::rgba_to_color32(*preset))
                         .min_size(Vec2::new(18.0, 16.0)),
                 );
                 if sw.on_hover_text(*name).clicked() {
@@ -228,8 +229,9 @@ fn colors(ui: &mut Ui, app: &mut GasciiApp) {
     ui.horizontal(|ui| {
         let wells = widgets::color_wells(
             ui,
-            rgba_to_color32(app.active_fg),
-            rgba_to_color32(app.active_bg),
+            widgets::rgba_to_color32(app.active_fg),
+            widgets::rgba_to_color32(app.active_bg),
+            widgets::WELL,
         );
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
@@ -237,11 +239,11 @@ fn colors(ui: &mut Ui, app: &mut GasciiApp) {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     ui.label(egui::RichText::new(tag).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary));
-                    ui.label(egui::RichText::new(hex(c)).font(fonts::ui_medium_id(fonts::size::LABEL)).color(t.fg_text));
+                    ui.label(egui::RichText::new(widgets::hex_string(c)).font(fonts::ui_medium_id(fonts::size::LABEL)).color(t.fg_text));
                 });
             }
         });
-        if widgets::swap_button(ui) {
+        if widgets::swap_button(ui, widgets::SWAP_BUTTON) {
             app.swap_colors();
         }
         color_popup(ui, &wells.fg, &mut app.active_fg);
@@ -274,7 +276,7 @@ mod tests {
         // available content width is narrower than the panel width (padding/margins), but must
         // never be negative in practice.
         for avail in [0.0, 50.0, 121.0 /* just below the min-clamp boundary */, 150.0, 170.0, 200.0, 260.0, 320.0, 1000.0] {
-            let cols = swatch_cols(avail);
+            let cols = swatch_cols(avail, widgets::SWATCH);
             assert!(
                 (SWATCH_COLS_MIN..=SWATCH_COLS_MAX).contains(&cols),
                 "avail={avail}: cols={cols} outside [{SWATCH_COLS_MIN},{SWATCH_COLS_MAX}]"
@@ -284,12 +286,12 @@ mod tests {
 
     #[test]
     fn swatch_cols_clamps_to_the_minimum_at_a_very_narrow_width() {
-        assert_eq!(swatch_cols(0.0), SWATCH_COLS_MIN);
+        assert_eq!(swatch_cols(0.0, widgets::SWATCH), SWATCH_COLS_MIN);
     }
 
     #[test]
     fn swatch_cols_clamps_to_the_maximum_at_a_very_wide_width() {
-        assert_eq!(swatch_cols(1000.0), SWATCH_COLS_MAX);
+        assert_eq!(swatch_cols(1000.0, widgets::SWATCH), SWATCH_COLS_MAX);
     }
 
     /// A negative available width (a defensive/adversarial input this pure function has no reason
@@ -297,7 +299,7 @@ mod tests {
     /// minimum rather than underflowing the `usize` cast or panicking.
     #[test]
     fn swatch_cols_does_not_panic_or_underflow_on_a_negative_width() {
-        assert_eq!(swatch_cols(-500.0), SWATCH_COLS_MIN);
+        assert_eq!(swatch_cols(-500.0, widgets::SWATCH), SWATCH_COLS_MIN);
     }
 
     /// Pins the exact column count at the sidebar's default width (216, `DEFAULT_WIDTH`) minus a
@@ -309,6 +311,20 @@ mod tests {
         // DEFAULT_WIDTH (216) minus a representative panel margin (~16px, matching the app's own
         // sidebar content-frame inset) still comfortably fits the full 6-column cap.
         let content_width = DEFAULT_WIDTH - 16.0;
-        assert_eq!(swatch_cols(content_width), SWATCH_COLS_MAX);
+        assert_eq!(swatch_cols(content_width, widgets::SWATCH), SWATCH_COLS_MAX);
+    }
+
+    /// Pins kiosk's own combination: a fixed 300px sidebar (`kiosk::SIDEBAR_W`) with a 16px inner
+    /// margin on each side (`kiosk::sidebar`'s panel frame) and 48px swatches (`kiosk::SWATCH`) —
+    /// the mock's own 5-per-row glyph grid. A future change to any of those three numbers that
+    /// silently drops kiosk below or above 5 columns is caught here, not just by eyeballing the
+    /// mock.
+    #[test]
+    fn swatch_cols_at_the_kiosk_sidebar_width_fits_five_per_row() {
+        const KIOSK_SIDEBAR_W: f32 = 300.0;
+        const KIOSK_MARGIN: f32 = 16.0;
+        const KIOSK_SWATCH: f32 = 48.0;
+        let content_width = KIOSK_SIDEBAR_W - KIOSK_MARGIN * 2.0;
+        assert_eq!(swatch_cols(content_width, KIOSK_SWATCH), 5);
     }
 }

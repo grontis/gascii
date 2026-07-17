@@ -128,11 +128,11 @@ pub enum DialogAction {
 pub fn buttons(ui: &mut Ui, cancel: &str, confirm: &str) -> DialogAction {
     let mut action = DialogAction::None;
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        if widgets::button(ui, confirm, true).clicked() {
+        if widgets::button(ui, confirm, true, true).clicked() {
             action = DialogAction::Confirm;
         }
         ui.add_space(8.0);
-        if widgets::button(ui, cancel, false).clicked() {
+        if widgets::button(ui, cancel, false, true).clicked() {
             action = DialogAction::Cancel;
         }
     });

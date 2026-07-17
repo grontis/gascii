@@ -22,11 +22,13 @@ const ICON: f32 = 17.0;
 /// Palette glyph swatch.
 pub const SWATCH: f32 = 28.0;
 /// FG/BG colour wells.
-const WELL: f32 = 26.0;
+pub(crate) const WELL: f32 = 26.0;
 /// How far the FG well overlaps the BG well.
 const WELL_OVERLAP: f32 = 4.0;
+/// The sidebar's ⇄ swap control.
+pub(crate) const SWAP_BUTTON: f32 = 24.0;
 const CHECKBOX: f32 = 14.0;
-const STEPPER_H: f32 = 26.0;
+pub(crate) const STEPPER_H: f32 = 26.0;
 const STEPPER_BTN_W: f32 = 24.0;
 const STEPPER_VALUE_W: f32 = 34.0;
 const SEG_PAD: Vec2 = Vec2::new(11.0, 5.0);
@@ -120,20 +122,24 @@ pub fn segmented<T: PartialEq + Copy>(
     changed
 }
 
-/// A `[−][value][+]` stepper. The value cell is mono and scroll-wheel-adjustable.
-pub fn stepper(ui: &mut Ui, value: &mut u16, min: u16, max: u16) -> bool {
+/// A `[−][value][+]` stepper. The value cell is mono and scroll-wheel-adjustable. `h` scales the
+/// whole control proportionally from the 26px normal-chrome geometry.
+pub fn stepper(ui: &mut Ui, value: &mut u16, min: u16, max: u16, h: f32) -> bool {
     let t = tokens(ui);
-    let size = Vec2::new(STEPPER_BTN_W * 2.0 + STEPPER_VALUE_W, STEPPER_H);
+    let scale = h / STEPPER_H;
+    let btn_w = STEPPER_BTN_W * scale;
+    let value_w = STEPPER_VALUE_W * scale;
+    let size = Vec2::new(btn_w * 2.0 + value_w, h);
     let (rect, group) = ui.allocate_exact_size(size, Sense::hover());
     let painter = ui.painter().clone();
     let before = *value;
 
-    let minus = Rect::from_min_size(rect.min, Vec2::new(STEPPER_BTN_W, STEPPER_H));
+    let minus = Rect::from_min_size(rect.min, Vec2::new(btn_w, h));
     let val = Rect::from_min_size(
         Pos2::new(minus.max.x, rect.min.y),
-        Vec2::new(STEPPER_VALUE_W, STEPPER_H),
+        Vec2::new(value_w, h),
     );
-    let plus = Rect::from_min_size(Pos2::new(val.max.x, rect.min.y), Vec2::new(STEPPER_BTN_W, STEPPER_H));
+    let plus = Rect::from_min_size(Pos2::new(val.max.x, rect.min.y), Vec2::new(btn_w, h));
 
     for (r, label, delta) in [(minus, "–", -1i32), (plus, "+", 1)] {
         let resp = ui.interact(r, group.id.with(label), Sense::click());
@@ -274,11 +280,11 @@ pub fn tool_cell(ui: &mut Ui, kind: ToolKind, bound: Bound, size: Vec2) -> Respo
     resp
 }
 
-/// A 28px palette glyph swatch. Idle has a soft border; hover gains the shared wash plus a strong
-/// border; selected inverts.
-pub fn glyph_swatch(ui: &mut Ui, ch: char, selected: bool) -> Response {
+/// A palette glyph swatch, `size` square with a `glyph_px`-sized canvas-font glyph inside. Idle
+/// has a soft border; hover gains the shared wash plus a strong border; selected inverts.
+pub fn glyph_swatch(ui: &mut Ui, ch: char, selected: bool, size: f32, glyph_px: f32) -> Response {
     let t = tokens(ui);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(SWATCH), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     let painter = ui.painter().clone();
 
     let fill = if selected {
@@ -303,9 +309,26 @@ pub fn glyph_swatch(ui: &mut Ui, ch: char, selected: bool) -> Response {
         rect.center(),
         Align2::CENTER_CENTER,
         ch,
-        fonts::canvas_font_id(fonts::size::GLYPH),
+        fonts::canvas_font_id(glyph_px),
         if selected { t.fg_inverse } else { t.fg_text },
     );
+    resp
+}
+
+/// A flat solid-fill tappable swatch — the kiosk quick-color row's primitive. Distinct from
+/// [`glyph_swatch`]: no glyph, no canvas font, just a colour and a border. Selection is a 1px
+/// inset ring rather than inversion — inverting would hide the colour itself, the one thing this
+/// swatch exists to show.
+pub fn color_swatch(ui: &mut Ui, color: Color32, idle_border: Color32, selected: bool, size: f32) -> Response {
+    let t = tokens(ui);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    let painter = ui.painter().clone();
+    painter.rect_filled(rect, 0.0, color);
+    let edge = if resp.hovered() { t.border_strong } else { idle_border };
+    border(&painter, rect, edge);
+    if selected {
+        painter.rect_stroke(rect.shrink(3.0), 0.0, Stroke::new(1.0, t.bg_inverse), StrokeKind::Inside);
+    }
     resp
 }
 
@@ -315,15 +338,16 @@ pub struct WellsResponse {
     pub bg: Response,
 }
 
-/// Overlapping FG/BG wells — the paint-app convention. FG sits in front, top-left.
-pub fn color_wells(ui: &mut Ui, fg: Color32, bg: Color32) -> WellsResponse {
+/// Overlapping FG/BG wells — the paint-app convention. FG sits in front, top-left. `well` is the
+/// side of one well; the overlap between them stays a fixed 4px regardless of size.
+pub fn color_wells(ui: &mut Ui, fg: Color32, bg: Color32, well: f32) -> WellsResponse {
     let t = tokens(ui);
-    let span = WELL * 2.0 - WELL_OVERLAP;
+    let span = well * 2.0 - WELL_OVERLAP;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(span, span), Sense::hover());
     let painter = ui.painter().clone();
 
-    let bg_rect = Rect::from_min_size(rect.min + Vec2::splat(WELL - WELL_OVERLAP), Vec2::splat(WELL));
-    let fg_rect = Rect::from_min_size(rect.min, Vec2::splat(WELL));
+    let bg_rect = Rect::from_min_size(rect.min + Vec2::splat(well - WELL_OVERLAP), Vec2::splat(well));
+    let fg_rect = Rect::from_min_size(rect.min, Vec2::splat(well));
 
     // FG is interacted with FIRST so it wins the overlapped corner — egui gives the click to the
     // last-registered widget at a position, and BG must not steal clicks from the well on top of it.
@@ -341,9 +365,9 @@ pub fn color_wells(ui: &mut Ui, fg: Color32, bg: Color32) -> WellsResponse {
 
 /// The ⇄ swap control that sits beside the wells. Separate from [`color_wells`] so callers can push
 /// it to the row's trailing edge.
-pub fn swap_button(ui: &mut Ui) -> bool {
+pub fn swap_button(ui: &mut Ui, size: f32) -> bool {
     let t = tokens(ui);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     let painter = ui.painter().clone();
     let fg = cell(&painter, rect, &t, false, resp.hovered());
     if !resp.hovered() {
@@ -351,28 +375,45 @@ pub fn swap_button(ui: &mut Ui) -> bool {
     }
     // `⇄` exists in neither Instrument Sans nor Fragment Mono; the Iosevka backstop on the tail of
     // the chrome font chains is what resolves it.
-    painter.text(rect.center(), Align2::CENTER_CENTER, "⇄", fonts::mono_id(fonts::size::CONTROL), fg);
+    let font_px = (size * 0.5).round().max(fonts::size::CONTROL);
+    painter.text(rect.center(), Align2::CENTER_CENTER, "⇄", fonts::mono_id(font_px), fg);
     resp.on_hover_text("Swap FG/BG (X)").clicked()
 }
 
 /// A button: 1px border, transparent fill (hover washes it, same as every other control). `primary`
-/// inverts and gains a 2px hard offset shadow.
-pub fn button(ui: &mut Ui, label: &str, primary: bool) -> Response {
+/// inverts and gains a 2px hard offset shadow. `enabled` false paints the theme's documented
+/// disabled contract (`fg_secondary` text, `border_soft` border, no hover reaction) and senses only
+/// hover, never click — `.clicked()` can then never return true for it.
+pub fn button(ui: &mut Ui, label: &str, primary: bool, enabled: bool) -> Response {
     let t = tokens(ui);
-    let font = fonts::ui_medium_id(fonts::size::CONTROL);
-    let text = measure(ui, label, &font);
-    // 6px vertical, 16px horizontal padding.
-    let size = Vec2::new(text.x + 32.0, text.y + 12.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let size = button_size(ui, label);
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let (rect, resp) = ui.allocate_exact_size(size, sense);
     let painter = ui.painter().clone();
 
+    if !enabled {
+        border(&painter, rect, t.border_soft);
+        let font = fonts::ui_medium_id(fonts::size::CONTROL);
+        painter.text(rect.center(), Align2::CENTER_CENTER, label, font, t.fg_secondary);
+        return resp;
+    }
     if primary {
         hard_shadow(&painter, rect, 2.0, t.shadow);
     }
     let fg = cell(&painter, rect, &t, primary, resp.hovered());
     border(&painter, rect, t.border_strong);
-    painter.text(rect.center(), Align2::CENTER_CENTER, label, font, fg);
+    painter.text(rect.center(), Align2::CENTER_CENTER, label, fonts::ui_medium_id(fonts::size::CONTROL), fg);
     resp
+}
+
+/// A button's footprint at its current label/padding — factored out of [`button`] so a caller that
+/// lays buttons out manually (kiosk's top bar) can measure before allocating, without the two
+/// formulas drifting apart.
+pub fn button_size(ui: &Ui, label: &str) -> Vec2 {
+    let font = fonts::ui_medium_id(fonts::size::CONTROL);
+    let text = measure(ui, label, &font);
+    // 6px vertical, 16px horizontal padding.
+    Vec2::new(text.x + 32.0, text.y + 12.0)
 }
 
 /// A compact mono button for the status bar's zoom cluster: no fill, `soft` picks the quieter
@@ -409,4 +450,82 @@ pub fn micro_label(ui: &mut Ui, text: &str) {
     ui.label(
         egui::RichText::new(spaced).font(fonts::mono_id(fonts::size::MICRO)).color(t.fg_secondary),
     );
+}
+
+/// Straight-alpha `gascii_core::Rgba` to egui's premultiplied `Color32`, un-multiplied — the one
+/// conversion every colour readout and swatch in the chrome goes through.
+pub(crate) fn rgba_to_color32(c: gascii_core::Rgba) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.0, c.1, c.2, c.3)
+}
+
+/// `#RRGGBB` hex readout (alpha omitted — the chrome's FG/BG labels show opaque swatches).
+pub(crate) fn hex_string(c: gascii_core::Rgba) -> String {
+    format!("#{:02X}{:02X}{:02X}", c.0, c.1, c.2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Headless `egui::Context` with fonts staged and applied — `button`/`glyph_swatch`/etc. all
+    /// measure text through the bundled UI faces, which only exist after `install_fonts` and one
+    /// pass to apply the staged definitions (mirrors `viewport.rs`'s own harness).
+    fn headless_ctx() -> egui::Context {
+        let ctx = egui::Context::default();
+        fonts::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+        ctx
+    }
+
+    #[test]
+    fn disabled_button_senses_only_hover_and_can_never_report_clicked() {
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let ctx = headless_ctx();
+            ctx.set_theme(theme);
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let resp = button(ui, "Undo", false, false);
+                assert_eq!(resp.sense, Sense::hover(), "{theme:?}: a disabled button must sense only hover");
+                assert!(!resp.clicked(), "{theme:?}: a disabled button must never report clicked");
+            });
+        }
+    }
+
+    #[test]
+    fn enabled_button_senses_click() {
+        let ctx = headless_ctx();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let resp = button(ui, "Undo", false, true);
+            assert_eq!(resp.sense, Sense::click(), "an enabled button must sense clicks");
+        });
+    }
+
+    #[test]
+    fn button_size_matches_the_rect_button_actually_allocates() {
+        let ctx = headless_ctx();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let expected = button_size(ui, "Redo");
+            let resp = button(ui, "Redo", false, true);
+            assert_eq!(resp.rect.size(), expected, "button_size must predict button's own allocation");
+        });
+    }
+
+    #[test]
+    fn color_swatch_allocates_a_square_click_sensing_rect_of_the_requested_size() {
+        let ctx = headless_ctx();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let resp = color_swatch(ui, Color32::RED, Color32::BLACK, false, 32.0);
+            assert_eq!(resp.rect.size(), Vec2::splat(32.0));
+            assert_eq!(resp.sense, Sense::click());
+        });
+    }
+
+    #[test]
+    fn color_swatch_selected_or_not_still_allocates_the_same_footprint() {
+        let ctx = headless_ctx();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let idle = color_swatch(ui, Color32::BLUE, Color32::BLACK, false, 24.0);
+            let selected = color_swatch(ui, Color32::BLUE, Color32::BLACK, true, 24.0);
+            assert_eq!(idle.rect.size(), selected.rect.size(), "selection must not change the swatch's footprint");
+        });
+    }
 }

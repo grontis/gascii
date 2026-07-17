@@ -382,4 +382,64 @@ mod tests {
         );
         assert!(app.show_grid);
     }
+
+    /// Acceptance criterion: "fullscreen state is never persisted" (and the same for the stylus
+    /// session fields). `Prefs::from_app` simply never reads `app.stylus_detected`/
+    /// `app.brush_pressure`/`app.pinch_zoom_accum`/`app.kiosk_last_fit_size`/
+    /// `app.pressure_stamp_size`, and there is no `fullscreen` field on `Prefs` at all — pinned at
+    /// the serialization boundary so a future accidental `#[derive(Serialize)]` field addition
+    /// would break this test rather than silently start persisting session-only state.
+    #[test]
+    fn saved_prefs_json_never_mentions_fullscreen_or_any_stylus_session_field() {
+        let mut app = GasciiApp::headless();
+        app.stylus_detected = true;
+        app.brush_pressure = true;
+        app.pinch_zoom_accum = 1.4;
+
+        let json = serde_json::to_string(&Prefs::from_app(&app)).unwrap();
+        for forbidden in [
+            "fullscreen",
+            "stylus_detected",
+            "brush_pressure",
+            "pinch_zoom_accum",
+            "kiosk_last_fit_size",
+            "pressure_stamp_size",
+        ] {
+            assert!(!json.contains(forbidden), "prefs JSON must never mention {forbidden:?}: {json}");
+        }
+    }
+
+    /// The load-side half of the same guarantee: even a hostile/forward-compatible prefs blob that
+    /// smuggles in extra `fullscreen`/`stylus_detected`/`brush_pressure` keys (e.g. hand-edited, or
+    /// written by some future build) must be silently ignored by serde's default
+    /// unknown-field-tolerant deserialization, and `apply_to` must never set the corresponding
+    /// session-only fields on a freshly-constructed app.
+    #[test]
+    fn a_hostile_prefs_blob_with_extra_fullscreen_and_stylus_fields_never_touches_session_only_state() {
+        let json = serde_json::json!({
+            "theme": "dark",
+            "slots": [
+                { "kind": "Pencil", "stamps": [[1, 0], [1, 0], [1, 0], [1, 0]] },
+                { "kind": "Eraser", "stamps": [[1, 0], [1, 0], [1, 0], [1, 0]] }
+            ],
+            "recent_glyphs": "",
+            "recent_files": [],
+            "export": { "format": "text", "scale": 1, "transparent": false, "trim": false },
+            "show_grid": false,
+            "fullscreen": true,
+            "stylus_detected": true,
+            "brush_pressure": true
+        })
+        .to_string();
+
+        let prefs: Prefs =
+            serde_json::from_str(&json).expect("unknown extra fields must not fail to parse");
+        let mut app = GasciiApp::headless();
+        assert!(!app.stylus_detected && !app.brush_pressure, "sanity: session defaults are off");
+
+        prefs.apply_to(&mut app);
+
+        assert!(!app.stylus_detected, "apply_to must never set stylus_detected — it isn't a prefs field");
+        assert!(!app.brush_pressure, "apply_to must never set brush_pressure — it isn't a prefs field");
+    }
 }

@@ -9,7 +9,7 @@ use crate::fonts;
 
 pub const HEIGHT: f32 = 30.0;
 
-fn mono(ui: &mut Ui, text: String, secondary: bool) {
+pub(crate) fn mono(ui: &mut Ui, text: String, secondary: bool) {
     let t = theme::current(ui.ctx());
     let color = if secondary { t.fg_secondary } else { t.fg_text };
     ui.label(egui::RichText::new(text).font(fonts::mono_id(fonts::size::LABEL)).color(color));

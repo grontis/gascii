@@ -1,6 +1,7 @@
 //! gascii-core is headless: it has ZERO GUI dependencies. Never add eframe/egui/winit/wgpu here.
 
 pub mod brush;
+pub mod clear;
 pub mod clipboard;
 pub mod edit;
 pub mod io;
@@ -14,6 +15,7 @@ pub use brush::{
     builtin_ramps, intensity_to_index, Buildup, DensityMode, Fixed, IntensitySource, Ramp,
     StrokeSample,
 };
+pub use clear::clear_document;
 pub use clipboard::CellPatch;
 pub use edit::{CellEdit, DocSnapshot, Edit, History};
 pub use resize::{resize_document, AxisAnchor, ResizeAnchor, ResizeError};
