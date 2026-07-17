@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
 use eframe::egui;
@@ -18,6 +19,29 @@ use crate::viewport::Viewport;
 
 /// PNG cell-px per export scale preset: `16 * {1, 2, 4}`.
 const EXPORT_CELL_PX_BASE: u32 = 16;
+
+/// Terminal Ctrl+C presses received over the process lifetime. Written by the signal-handler
+/// thread, drained by `handle_ctrl_c` on the UI thread each frame.
+static CTRL_C_PRESSES: AtomicU32 = AtomicU32::new(0);
+
+/// What a batch of new Ctrl+C presses should do. A first press asks for a normal close — the same
+/// path as the window's close button, unsaved-changes veto included. A press arriving while that
+/// veto dialog is already up means the user is insisting: close without saving.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CtrlCResponse {
+    RequestClose,
+    ForceClose,
+}
+
+/// Pure escalation rule for `handle_ctrl_c`: `count` is the process-lifetime press total, `seen`
+/// how many have already been acted on, `close_confirm_up` whether the close veto dialog is
+/// currently showing.
+fn ctrl_c_response(count: u32, seen: u32, close_confirm_up: bool) -> Option<CtrlCResponse> {
+    if count == seen {
+        return None;
+    }
+    Some(if close_confirm_up { CtrlCResponse::ForceClose } else { CtrlCResponse::RequestClose })
+}
 
 /// Whether a pasted `Event::Paste` text is still the app's own copy: the OS clipboard is "ours"
 /// exactly when `internal`'s own flattening still matches what came back on paste. Pulled out of
@@ -465,6 +489,9 @@ pub struct GasciiApp {
     /// itself. Set by `close_now` so "Save" and "Don't Save" can re-request a real close without
     /// re-triggering the veto they just cleared.
     force_close: bool,
+    /// How many of `CTRL_C_PRESSES` this app has already acted on — the drain cursor for
+    /// `handle_ctrl_c`.
+    ctrl_c_seen: u32,
     /// The title last pushed to the OS, so it is only sent when it changes.
     shown_title: String,
     started: Instant,
@@ -516,6 +543,16 @@ impl GasciiApp {
         prefs::load(cc.storage, &mut app);
         cc.egui_ctx.set_theme(app.theme_pref);
         app.startup_fullscreen = Some(launch_fullscreen);
+        // A terminal Ctrl+C would otherwise kill the process outright, skipping the
+        // unsaved-changes veto and eframe's shutdown persistence. The handler only counts and
+        // wakes the event loop; `handle_ctrl_c` decides on the UI thread.
+        let ctx = cc.egui_ctx.clone();
+        if let Err(e) = ctrlc::set_handler(move || {
+            CTRL_C_PRESSES.fetch_add(1, Ordering::Relaxed);
+            ctx.request_repaint();
+        }) {
+            eprintln!("Ctrl+C handler not installed ({e}); Ctrl+C will terminate abruptly");
+        }
         app
     }
 
@@ -592,6 +629,7 @@ impl GasciiApp {
             saved_marker: None,
             confirm: None,
             force_close: false,
+            ctrl_c_seen: 0,
             shown_title: String::new(),
             started,
             first_frame: true,
@@ -1654,6 +1692,21 @@ impl GasciiApp {
         }
     }
 
+    /// Drains terminal Ctrl+C presses once per frame, just before `handle_close_request` so a
+    /// forced repeat press has `force_close` set ahead of the close request it re-triggers. First
+    /// press: a normal close request, identical to the window's close button. Repeat press while
+    /// the veto dialog is up: close without saving.
+    fn handle_ctrl_c(&mut self, ctx: &egui::Context) {
+        let count = CTRL_C_PRESSES.load(Ordering::Relaxed);
+        let confirming = self.confirm == Some(PendingConfirm::CloseApp);
+        let Some(resp) = ctrl_c_response(count, self.ctrl_c_seen, confirming) else { return };
+        self.ctrl_c_seen = count;
+        match resp {
+            CtrlCResponse::RequestClose => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            CtrlCResponse::ForceClose => self.close_now(ctx),
+        }
+    }
+
     /// Runs once per frame near the top of `ui()`. Vetoes the root viewport's close request with a
     /// modal Save/Don't Save/Cancel dialog whenever the document is dirty; lets a clean close (or
     /// the one close this dialog just re-requested via `close_now`) proceed untouched.
@@ -1835,6 +1888,7 @@ impl eframe::App for GasciiApp {
         }
         let ctx = ui.ctx().clone();
         self.apply_startup_window_state(&ctx);
+        self.handle_ctrl_c(&ctx);
         self.handle_close_request(&ctx);
         if !self.modal_open() {
             self.handle_keys(ui);
@@ -2387,6 +2441,29 @@ mod tests {
     #[test]
     fn edit_marker_differs_is_dirty_when_current_is_some_but_saved_is_none() {
         assert!(edit_marker_differs(Some(0), None));
+    }
+
+    #[test]
+    fn ctrl_c_response_is_none_when_no_new_presses() {
+        assert_eq!(ctrl_c_response(2, 2, false), None);
+        assert_eq!(ctrl_c_response(2, 2, true), None);
+    }
+
+    #[test]
+    fn ctrl_c_response_first_press_requests_a_normal_close() {
+        assert_eq!(ctrl_c_response(1, 0, false), Some(CtrlCResponse::RequestClose));
+    }
+
+    /// Several presses landing before the first frame drains them still count as one request —
+    /// the veto dialog hasn't had a chance to appear, so nothing is discarded unprompted.
+    #[test]
+    fn ctrl_c_response_burst_before_dialog_shows_stays_a_normal_close() {
+        assert_eq!(ctrl_c_response(3, 0, false), Some(CtrlCResponse::RequestClose));
+    }
+
+    #[test]
+    fn ctrl_c_response_repeat_press_while_confirming_forces_the_close() {
+        assert_eq!(ctrl_c_response(2, 1, true), Some(CtrlCResponse::ForceClose));
     }
 
     /// Pure-function coverage over every `ToolKind` plus `None`: only a Text-owning keyboard
