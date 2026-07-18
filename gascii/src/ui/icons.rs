@@ -1,4 +1,5 @@
-//! The nine tool icons, transcribed from SVG paths (quoted above each constant).
+//! The nine tool icons. Most are transcribed from SVG paths (quoted above each constant); the
+//! eyedropper is an original pipette design authored directly in viewBox space.
 //!
 //! egui cannot render SVG without a new dependency, so each path is stored as polylines in its
 //! source 16×16 viewBox and stroked at 1.4px, exactly as the source markup specifies. Curves
@@ -41,11 +42,11 @@ const PENCIL: &[SubPath] =
 const ERASER: &[SubPath] =
     &[open(&[(6.0, 13.0), (2.5, 9.5), (9.0, 3.0), (12.5, 6.5), (7.0, 12.0), (14.0, 12.0)])];
 
-// M8 5l-5 5v3h3l5-5M8 5l2-2 3 3-2 2M8 5l3 3
+// pipette: squeeze bulb (top-left), tapered barrel to the tip (bottom-right), collar band
 const EYEDROPPER: &[SubPath] = &[
-    open(&[(8.0, 5.0), (3.0, 10.0), (3.0, 13.0), (6.0, 13.0), (11.0, 8.0)]),
-    open(&[(8.0, 5.0), (10.0, 3.0), (13.0, 6.0), (11.0, 8.0)]),
-    open(&[(8.0, 5.0), (11.0, 8.0)]),
+    closed(&[(2.5, 5.0), (2.0, 3.0), (3.5, 2.0), (5.5, 2.5), (6.0, 4.5)]),
+    open(&[(5.0, 4.0), (12.5, 11.5), (13.5, 13.5)]),
+    open(&[(4.0, 5.5), (6.5, 3.0)]),
 ];
 
 // M3 4V3h10v1M8 3v10M6.5 13h3
@@ -182,5 +183,11 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The bulb is the feature that distinguishes the eyedropper's silhouette from the pencil's.
+    #[test]
+    fn eyedropper_has_a_closed_bulb_subpath() {
+        assert!(EYEDROPPER.iter().any(|s| s.closed), "eyedropper is missing its closed bulb subpath");
     }
 }

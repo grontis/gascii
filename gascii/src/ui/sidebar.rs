@@ -203,6 +203,7 @@ fn binding_options(ui: &mut Ui, app: &mut GasciiApp) {
             });
         });
         if let Some(slot) = sized_slot(kind) {
+            widgets::micro_label(ui, "SHAPE");
             let mut shape = app.slots[b.ix()].stamps[slot].shape;
             if widgets::segmented(ui, &mut shape, &SHAPE_OPTIONS, false) {
                 app.slots[b.ix()].stamps[slot].shape = shape;

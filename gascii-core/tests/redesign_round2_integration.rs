@@ -1,14 +1,15 @@
-//! Cross-feature integration for redesign round 2: `BrushShape::Raw` (the new default) driven
-//! through the real sized-tool pipelines (pencil/eraser/line/density brush), not just
-//! `footprint()`'s own isolated geometry tests; anchored resize combined with undo/redo and
-//! `Document::background`; and `Document::background` carried through resize + save/load +
-//! legacy-file compatibility. Complements `feel_integration.rs` (which exercises resize's own
-//! pipeline seams but only ever drives it top-left anchored, with Square-shaped sized tools).
+//! Cross-feature integration for redesign round 2: `BrushShape::Raw` (the new default, a
+//! horizontal run) driven through the real sized-tool pipelines (pencil/eraser/line/density
+//! brush), not just `footprint()`'s own isolated geometry tests; anchored resize combined with
+//! undo/redo and `Document::background`; and `Document::background` carried through resize +
+//! save/load + legacy-file compatibility. Complements `feel_integration.rs` (which exercises
+//! resize's own pipeline seams but only ever drives it top-left anchored, with Square-shaped sized
+//! tools).
 
 use gascii_core::{
-    load_str, save_string, AxisAnchor, BrushShape, Buildup, Cell, DensityBrush, DensityMode, Document,
-    Edit, Eraser, Fixed, History, Line, Pencil, PlaneMask, ResizeAnchor, Rgba, Tool, ToolCtx, ToolEvent,
-    ToolResponse, resize_document,
+    footprint, load_str, save_string, AxisAnchor, BrushShape, Buildup, Cell, DensityBrush, DensityMode,
+    Document, Edit, Eraser, Fixed, History, Line, Pencil, PlaneMask, ResizeAnchor, Rgba, Tool, ToolCtx,
+    ToolEvent, ToolResponse, resize_document,
 };
 
 fn sized_ctx(glyph: char, size: u16, shape: BrushShape) -> ToolCtx {
@@ -38,35 +39,35 @@ fn commit_cells(resp: ToolResponse) -> Vec<gascii_core::CellEdit> {
 // the aspect-corrected Square/Circle shapes every existing sized-tool test exercises instead.)
 
 #[test]
-fn raw_shaped_pencil_press_stamps_the_true_size_by_size_box_not_the_aspect_corrected_one() {
+fn raw_shaped_pencil_press_stamps_a_horizontal_run_not_the_aspect_corrected_box() {
     let doc = Document::new(20, 20);
     let mut pencil = Pencil::new();
     let tctx = sized_ctx('#', 3, BrushShape::Raw);
     pencil.update(ToolEvent::Press { x: 10, y: 10 }, &tctx, &doc);
     let cells = commit_cells(pencil.update(ToolEvent::Release, &tctx, &doc));
-    assert_eq!(cells.len(), 9, "Raw size-3 press must cover exactly a 3x3 box (9 cells), not Square's 6x3 (18)");
+    assert_eq!(cells.len(), 3, "Raw size-3 press must cover exactly a 1x3 horizontal run, not Square's 3x6 box");
     for c in &cells {
-        assert!((9..=11).contains(&c.x) && (9..=11).contains(&c.y), "cell ({},{}) outside the expected 3x3 box", c.x, c.y);
+        assert!((9..=11).contains(&c.x) && c.y == 10, "cell ({},{}) outside the expected 1x3 run", c.x, c.y);
     }
 }
 
 #[test]
-fn raw_shaped_pencil_press_at_the_corner_clips_to_a_quarter_of_the_size_by_size_box() {
-    // Square size-3 clipped at the origin keeps 8 cells (pencil.rs's own
-    // `sized_stroke_clips_at_the_document_edge`); Raw's uncorrected 3x3 box keeps only 4.
+fn raw_shaped_pencil_press_at_the_corner_clips_the_run_to_the_grid() {
+    // Raw's single row has no vertical extent to clip at the origin, only the row's left edge;
+    // Square's box clips on both axes (pencil.rs's own `sized_stroke_clips_at_the_document_edge`).
     let doc = Document::new(20, 20);
     let mut pencil = Pencil::new();
     let tctx = sized_ctx('#', 3, BrushShape::Raw);
     pencil.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &doc);
     let cells = commit_cells(pencil.update(ToolEvent::Release, &tctx, &doc));
-    assert_eq!(cells.len(), 4, "Raw's uncorrected box clips to a 2x2 quadrant at the origin, not Square's 8");
+    assert_eq!(cells.len(), 2, "Raw's 1x3 run clips to 2 cells at the left edge, not Square's 8");
     for c in &cells {
-        assert!(c.x <= 1 && c.y <= 1);
+        assert!(c.x <= 1 && c.y == 0);
     }
 }
 
 #[test]
-fn raw_shaped_eraser_press_clears_the_true_size_by_size_box_and_nothing_outside_it() {
+fn raw_shaped_eraser_press_clears_a_horizontal_run_and_nothing_outside_it() {
     let mut doc = Document::new(20, 20);
     for y in 8..13u16 {
         for x in 8..13u16 {
@@ -77,17 +78,18 @@ fn raw_shaped_eraser_press_clears_the_true_size_by_size_box_and_nothing_outside_
     let tctx = sized_ctx('#', 3, BrushShape::Raw);
     eraser.update(ToolEvent::Press { x: 10, y: 10 }, &tctx, &doc);
     let cells = commit_cells(eraser.update(ToolEvent::Release, &tctx, &doc));
-    assert_eq!(cells.len(), 9, "Raw size-3 erase must clear exactly the 3x3 box, not a wider aspect-corrected one");
+    assert_eq!(cells.len(), 3, "Raw size-3 erase must clear exactly the 1x3 run, not a wider aspect-corrected box");
     for c in &cells {
-        assert!((9..=11).contains(&c.x) && (9..=11).contains(&c.y));
+        assert!((9..=11).contains(&c.x) && c.y == 10);
         assert_eq!(c.after, Cell::BLANK);
     }
-    // Cells just outside the 3x3 box (e.g. the painted region's own edge) must survive untouched.
-    assert_eq!(doc.cell(0, 8, 8), Some(&Cell { ch: 'Q', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) }));
+    // Rows above/below the erased run must survive untouched.
+    assert_eq!(doc.cell(0, 10, 9), Some(&Cell { ch: 'Q', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) }));
+    assert_eq!(doc.cell(0, 10, 11), Some(&Cell { ch: 'Q', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) }));
 }
 
 #[test]
-fn raw_shaped_thick_line_sweeps_a_narrower_band_than_square_and_still_never_joins() {
+fn raw_shaped_thick_line_sweeps_a_single_row_and_still_never_joins() {
     let mut doc = Document::new(30, 30);
     // Existing vertical box-drawing run the line would join against at size 1, to prove size>1
     // (Raw included) still stamps the glyph directly with no join, matching `line.rs`'s own
@@ -102,21 +104,21 @@ fn raw_shaped_thick_line_sweeps_a_narrower_band_than_square_and_still_never_join
     let cells = commit_cells(line.update(ToolEvent::Release, &tctx, &doc));
 
     assert!(cells.iter().all(|c| c.after.ch == '#'), "size>1 Raw must stamp the glyph directly, never join");
-    // Raw's uncorrected 3-row-by-3-col footprint swept along a 21-cell horizontal run covers a
-    // 23-wide x 3-tall band (cols 4..=26, rows 14..=16) = 69 cells -- narrower than Square's
-    // 6-wide-per-step aspect-corrected sweep, which would cover a much wider band.
+    // Raw's footprint has no vertical extent, so the swept run stays a single row (y=15) widened
+    // by 1 cell on each end (the first/last stamp's own 3-wide run) -- narrower than Square's
+    // multi-row aspect-corrected sweep.
     let xs: std::collections::HashSet<u16> = cells.iter().map(|c| c.x).collect();
     let ys: std::collections::HashSet<u16> = cells.iter().map(|c| c.y).collect();
     assert_eq!(*xs.iter().min().unwrap(), 4);
     assert_eq!(*xs.iter().max().unwrap(), 26);
-    assert_eq!(ys, [14u16, 15, 16].into_iter().collect());
-    assert_eq!(cells.len(), 23 * 3);
+    assert_eq!(ys, [15u16].into_iter().collect());
+    assert_eq!(cells.len(), 23);
 }
 
 #[test]
-fn raw_shaped_wide_buildup_drag_advances_the_narrower_true_size_band_exactly_once_per_pass() {
+fn raw_shaped_wide_buildup_drag_advances_the_single_row_exactly_once_per_pass() {
     // Mirrors density_brush.rs's own `wide_buildup_drag_advances_each_covered_cell_exactly_once_per_pass`
-    // (which pins Square's wider 0..=11 aspect-corrected band) but for Raw -- the leading-edge-only
+    // (which pins Square's wider multi-row aspect-corrected band) but for Raw -- the leading-edge-only
     // advance logic (`prev_fp` masking) is shape-dependent, so this is a genuinely different seam,
     // not just a relabeled duplicate: a regression that silently widened Raw's footprint back to
     // Square's geometry would still pass the Square-shaped test but fail this one.
@@ -134,15 +136,85 @@ fn raw_shaped_wide_buildup_drag_advances_the_narrower_true_size_band_exactly_onc
     let mut history = History::new();
     history.apply(&mut doc, edit);
 
-    // Raw's uncorrected footprint sweeps cols 1..=9, rows 1..=3 (narrower than Square's 0..=11).
-    for y in 1..=3u16 {
-        for x in 1..=9u16 {
-            assert_eq!(doc.cell(0, x, y).unwrap().ch, 'a', "cell ({x},{y}) must advance exactly once");
+    // Raw's footprint has no vertical extent, so only row y=2 (cols 1..=9) advances.
+    for x in 1..=9u16 {
+        assert_eq!(doc.cell(0, x, 2).unwrap().ch, 'a', "cell ({x},2) must advance exactly once");
+    }
+    // Rows above/below the single swept row (inside Square's wider band) must be untouched.
+    assert_eq!(doc.cell(0, 5, 1), Some(&Cell::BLANK), "row 1 is outside Raw's single-row footprint");
+    assert_eq!(doc.cell(0, 5, 3), Some(&Cell::BLANK), "row 3 is outside Raw's single-row footprint");
+}
+
+#[test]
+fn raw_shaped_footprint_directly_at_sizes_4_and_5_is_still_a_single_row_of_exactly_size_cells() {
+    // footprint()'s own unit tests in tools/mod.rs only pin Raw at sizes 1, 2, and 3; this confirms
+    // the horizontal-run geometry holds at two sizes those tests never exercise -- size 4 (even,
+    // right-biased like size 2) and size 5 (odd, symmetric like size 3) -- via the same public path
+    // the app crate calls (`gascii_core::footprint`), not just through a tool pipeline.
+    let mut out = Vec::new();
+
+    footprint((10, 10), 4, BrushShape::Raw, &mut out);
+    assert_eq!(
+        out.iter().copied().collect::<std::collections::HashSet<_>>(),
+        [(9, 10), (10, 10), (11, 10), (12, 10)].into_iter().collect(),
+        "size 4 Raw must be a single right-biased row of exactly 4 cells"
+    );
+    assert_eq!(out.len(), 4);
+
+    footprint((10, 10), 5, BrushShape::Raw, &mut out);
+    assert_eq!(
+        out.iter().copied().collect::<std::collections::HashSet<_>>(),
+        [(8, 10), (9, 10), (10, 10), (11, 10), (12, 10)].into_iter().collect(),
+        "size 5 Raw must be a single symmetric row of exactly 5 cells"
+    );
+    assert_eq!(out.len(), 5);
+}
+
+#[test]
+fn raw_shaped_pencil_press_size_4_at_the_bottom_right_grid_corner_clips_the_run_to_the_grid() {
+    // Mirrors `raw_shaped_pencil_press_at_the_corner_clips_the_run_to_the_grid` (size 3, top-left
+    // origin) but at an even size and the opposite corner, so it's the right-bias pinned by
+    // `footprint_raw_even_size_biases_right` that gets clipped here, not a symmetric overhang.
+    let doc = Document::new(20, 20);
+    let mut pencil = Pencil::new();
+    let tctx = sized_ctx('#', 4, BrushShape::Raw);
+    pencil.update(ToolEvent::Press { x: 19, y: 19 }, &tctx, &doc);
+    let cells = commit_cells(pencil.update(ToolEvent::Release, &tctx, &doc));
+    // hlo=-1, hhi=2 around x=19 -> x in 18..=21; 20 and 21 fall outside the 20-wide document.
+    assert_eq!(cells.len(), 2, "Raw's size-4 run clips to 2 cells at the right document edge");
+    for c in &cells {
+        assert!((18..=19).contains(&c.x) && c.y == 19, "cell ({},{}) outside the expected clipped run", c.x, c.y);
+    }
+}
+
+#[test]
+fn raw_shaped_eraser_size_5_press_near_the_document_edge_clips_the_run_but_never_the_row() {
+    // A near-edge clip case at a size the existing raw_shaped_* tests don't cover (5, odd, wider
+    // than any prior case here). Raw's footprint has no vertical extent, so only the overhanging
+    // column drops -- the rows above/below stay fully untouched, unlike Square/Circle, which would
+    // also lose cells vertically at the same document edge.
+    let mut doc = Document::new(20, 20);
+    for y in 14..=16u16 {
+        for x in 14..20u16 {
+            doc.set_cell(0, x, y, Cell { ch: 'Q', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) });
         }
     }
-    // Just outside the Raw band (still inside Square's wider band) must be untouched.
-    assert_eq!(doc.cell(0, 0, 2), Some(&Cell::BLANK), "col 0 is outside Raw's narrower footprint");
-    assert_eq!(doc.cell(0, 10, 2), Some(&Cell::BLANK), "col 10 is outside Raw's narrower footprint");
+    let mut eraser = Eraser::new();
+    let tctx = sized_ctx('#', 5, BrushShape::Raw);
+    eraser.update(ToolEvent::Press { x: 18, y: 15 }, &tctx, &doc);
+    let cells = commit_cells(eraser.update(ToolEvent::Release, &tctx, &doc));
+    // hlo=-2, hhi=2 around x=18 -> x in 16..=20; 20 falls outside the 20-wide document.
+    assert_eq!(cells.len(), 4, "Raw's size-5 run clips to 4 cells at the right document edge");
+    for c in &cells {
+        assert!((16..=19).contains(&c.x) && c.y == 15);
+        assert_eq!(c.after, Cell::BLANK);
+    }
+    // Rows above/below the erased row must survive untouched, including their own edge-adjacent
+    // cells -- proving the clip is horizontal-only, not a footprint that also lost vertical extent.
+    for x in 14..20u16 {
+        assert_eq!(doc.cell(0, x, 14), Some(&Cell { ch: 'Q', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) }));
+        assert_eq!(doc.cell(0, x, 16), Some(&Cell { ch: 'Q', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) }));
+    }
 }
 
 // --- 2. Anchored (non-Start) resize x undo/redo x Document::background ---

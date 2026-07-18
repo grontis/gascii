@@ -202,6 +202,11 @@ fn binding_options(ui: &mut Ui, app: &mut GasciiApp, k: f32) {
             ui.horizontal(|ui| {
                 // Indented to sit under the tool name, clear of the L/R gutter.
                 ui.add_space(18.0);
+                widgets::micro_label(ui, "SHAPE");
+            });
+            ui.horizontal(|ui| {
+                // Indented to sit under the tool name, clear of the L/R gutter.
+                ui.add_space(18.0);
                 let mut shape = app.slots[b.ix()].stamps[slot].shape;
                 if widgets::segmented(ui, &mut shape, &SHAPE_OPTIONS, false) {
                     app.slots[b.ix()].stamps[slot].shape = shape;
