@@ -444,12 +444,16 @@ pub fn pinstripe(painter: &Painter, rect: Rect, color: Color32) {
 
 /// A section micro-label: mono, uppercase, letter-spaced — `RECENT`, `WRITE`.
 pub fn micro_label(ui: &mut Ui, text: &str) {
+    micro_label_response(ui, text);
+}
+
+/// [`micro_label`], but returns the label's `Response` — for callers that need to act on its
+/// layout, e.g. the palette's jump-to-section headers scrolling themselves into view.
+pub(crate) fn micro_label_response(ui: &mut Ui, text: &str) -> Response {
     let t = tokens(ui);
     // egui has no letter-spacing, so it is faked by interleaving thin spaces.
     let spaced: String = text.chars().flat_map(|c| [c, '\u{2009}']).collect();
-    ui.label(
-        egui::RichText::new(spaced).font(fonts::mono_id(fonts::size::MICRO)).color(t.fg_secondary),
-    );
+    ui.label(egui::RichText::new(spaced).font(fonts::mono_id(fonts::size::MICRO)).color(t.fg_secondary))
 }
 
 /// Straight-alpha `gascii_core::Rgba` to egui's premultiplied `Color32`, un-multiplied — the one
@@ -461,6 +465,29 @@ pub(crate) fn rgba_to_color32(c: gascii_core::Rgba) -> Color32 {
 /// `#RRGGBB` hex readout (alpha omitted — the chrome's FG/BG labels show opaque swatches).
 pub(crate) fn hex_string(c: gascii_core::Rgba) -> String {
     format!("#{:02X}{:02X}{:02X}", c.0, c.1, c.2)
+}
+
+/// `#RRGGBBAA` hex readout, alpha included — for the picker's editable HEX field, which must
+/// round-trip through [`parse_hex`] without silently forcing translucent colours opaque.
+pub(crate) fn hex_string_rgba(c: gascii_core::Rgba) -> String {
+    format!("#{:02X}{:02X}{:02X}{:02X}", c.0, c.1, c.2, c.3)
+}
+
+/// Parses `#RRGGBB` / `RRGGBB` (and `#RRGGBBAA` / `RRGGBBAA`) into a straight-alpha
+/// `gascii_core::Rgba`. Alpha defaults to 255 when absent. `None` on malformed input — wrong
+/// length, non-hex digits, or empty.
+///
+/// Every byte is checked against `is_ascii_hexdigit` up front, since `from_str_radix` otherwise
+/// treats a leading `'+'` as a sign to strip rather than an invalid digit (mirrors
+/// `gascii_core`'s own hex-colour parser).
+pub(crate) fn parse_hex(s: &str) -> Option<gascii_core::Rgba> {
+    let s = s.strip_prefix('#').unwrap_or(s);
+    if !matches!(s.len(), 6 | 8) || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let byte = |i: usize| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok();
+    let a = if s.len() == 8 { byte(3)? } else { 255 };
+    Some(gascii_core::Rgba(byte(0)?, byte(1)?, byte(2)?, a))
 }
 
 #[cfg(test)]
@@ -527,5 +554,71 @@ mod tests {
             let selected = color_swatch(ui, Color32::BLUE, Color32::BLACK, true, 24.0);
             assert_eq!(idle.rect.size(), selected.rect.size(), "selection must not change the swatch's footprint");
         });
+    }
+
+    #[test]
+    fn parse_hex_accepts_hashed_and_bare_six_digit_forms() {
+        let expected = gascii_core::Rgba(0xAB, 0xCD, 0xEF, 255);
+        assert_eq!(parse_hex("#ABCDEF"), Some(expected));
+        assert_eq!(parse_hex("ABCDEF"), Some(expected));
+        assert_eq!(parse_hex("abcdef"), Some(expected));
+    }
+
+    #[test]
+    fn parse_hex_accepts_eight_digit_forms_with_explicit_alpha() {
+        assert_eq!(parse_hex("#ABCDEF80"), Some(gascii_core::Rgba(0xAB, 0xCD, 0xEF, 0x80)));
+        assert_eq!(parse_hex("ABCDEF00"), Some(gascii_core::Rgba(0xAB, 0xCD, 0xEF, 0x00)));
+    }
+
+    #[test]
+    fn parse_hex_rejects_malformed_input() {
+        assert_eq!(parse_hex(""), None, "empty");
+        assert_eq!(parse_hex("#FFF"), None, "too short");
+        assert_eq!(parse_hex("#ABCDEFAB1"), None, "too long");
+        assert_eq!(parse_hex("#GGGGGG"), None, "non-hex digits");
+        assert_eq!(parse_hex("#ZZCDEF"), None, "non-hex digits, partial");
+    }
+
+    #[test]
+    fn parse_hex_round_trips_hex_string_for_opaque_colours() {
+        for c in [
+            gascii_core::Rgba(0, 0, 0, 255),
+            gascii_core::Rgba(255, 255, 255, 255),
+            gascii_core::Rgba(0x12, 0x34, 0x56, 255),
+            gascii_core::Rgba(0xC9, 0x4F, 0x3D, 255),
+        ] {
+            assert_eq!(parse_hex(&hex_string(c)), Some(c), "round-trip for {c:?}");
+        }
+    }
+
+    /// `color_picker_body`'s `HexBuf` formats and re-parses through `hex_string_rgba`, not the
+    /// alpha-less `hex_string` (that one stays reserved for the FG/BG readout labels). `GasciiApp`'s
+    /// default `active_bg` is `Rgba::TRANSPARENT` (`app.rs`), so a translucent/transparent alpha
+    /// reaching this seam is an entirely ordinary interaction: open a fresh document's BG well and
+    /// edit the HEX field at all. This asserts the round trip is lossless.
+    #[test]
+    fn hex_string_rgba_then_parse_hex_round_trips_a_translucent_colours_alpha() {
+        let translucent = gascii_core::Rgba(0, 0, 0, 0); // the app's own default transparent BG
+        let round_tripped = parse_hex(&hex_string_rgba(translucent))
+            .expect("hex_string_rgba always emits 8 valid hex digits");
+        assert_eq!(round_tripped, translucent, "alpha must round-trip through hex_string_rgba/parse_hex");
+    }
+
+    #[test]
+    fn hex_string_rgba_formats_exact_eight_digit_uppercase_hex() {
+        assert_eq!(hex_string_rgba(gascii_core::Rgba(0x12, 0x34, 0x56, 0xFF)), "#123456FF");
+        assert_eq!(hex_string_rgba(gascii_core::Rgba(0xAB, 0xCD, 0xEF, 0x80)), "#ABCDEF80");
+    }
+
+    #[test]
+    fn parse_hex_round_trips_hex_string_rgba_for_opaque_translucent_and_transparent_colours() {
+        for c in [
+            gascii_core::Rgba(0, 0, 0, 255),
+            gascii_core::Rgba(255, 255, 255, 255),
+            gascii_core::Rgba(0x12, 0x34, 0x56, 0x80),
+            gascii_core::Rgba(0xC9, 0x4F, 0x3D, 0),
+        ] {
+            assert_eq!(parse_hex(&hex_string_rgba(c)), Some(c), "round-trip for {c:?}");
+        }
     }
 }

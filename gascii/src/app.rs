@@ -429,6 +429,9 @@ pub struct GasciiApp {
     pub(crate) internal_clipboard: Option<CellPatch>,
     pub(crate) pages: Vec<Page>,
     pub(crate) active_page: usize,
+    /// Pending jump-to-section request from the palette page buttons; consumed next frame once
+    /// the target section header is laid out. Not persisted.
+    pub(crate) palette_scroll_target: Option<usize>,
     /// The last [`RECENT_GLYPHS`] glyphs used, most recent first. Fed by picking a swatch
     /// (`pick_glyph`) and by a committed stroke that stamped the active glyph (`note_glyph_drawn`).
     pub(crate) recent_glyphs: Vec<char>,
@@ -601,6 +604,7 @@ impl GasciiApp {
             internal_clipboard: None,
             pages: builtin_pages(),
             active_page: 0,
+            palette_scroll_target: None,
             recent_glyphs: Vec::new(),
             ramps: builtin_ramps(),
             active_ramp: 0,

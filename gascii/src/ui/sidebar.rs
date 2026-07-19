@@ -266,6 +266,10 @@ fn brush_options(ui: &mut Ui, app: &mut GasciiApp) {
     }
 }
 
+/// The page segmented control, the RECENT row, then every page stacked in one scroll area, each
+/// under its own section header — replaces the old page-filtered single-page view. The segmented
+/// control is jump-to-section: picking a page both highlights it and scrolls its header into view
+/// on the next frame (`app.palette_scroll_target`), rather than hiding every other page's glyphs.
 pub(crate) fn palette(ui: &mut Ui, app: &mut GasciiApp, swatch: f32, glyph_px: f32, scroll_h: f32) {
     let mut page = app.active_page;
     let options: Vec<(usize, &str)> = app
@@ -276,6 +280,7 @@ pub(crate) fn palette(ui: &mut Ui, app: &mut GasciiApp, swatch: f32, glyph_px: f
         .collect();
     if widgets::segmented(ui, &mut page, &options, false) {
         app.active_page = page;
+        app.palette_scroll_target = Some(page);
     }
 
     if !app.recent_glyphs.is_empty() {
@@ -284,14 +289,22 @@ pub(crate) fn palette(ui: &mut Ui, app: &mut GasciiApp, swatch: f32, glyph_px: f
         swatch_row(ui, app, &recent, swatch, glyph_px);
     }
 
-    // The ASCII page is 95 glyphs and Box Drawing is 128 — 16 and 22 rows at six per row, far
-    // more than one screenful, so this has to scroll.
-    let glyphs = app.pages[app.active_page].glyphs.clone();
+    // Cloned up front: swatch_row takes &mut app (it calls app.pick_glyph), so an immutable
+    // borrow of app.pages can't survive the loop below.
+    let sections: Vec<(String, Vec<char>)> =
+        app.pages.iter().map(|p| (p.name.to_string(), p.glyphs.clone())).collect();
     egui::ScrollArea::vertical()
         .max_height(scroll_h)
         .auto_shrink([false, true])
         .show(ui, |ui| {
-            swatch_row(ui, app, &glyphs, swatch, glyph_px);
+            for (i, (name, glyphs)) in sections.iter().enumerate() {
+                let header = widgets::micro_label_response(ui, page_label(name));
+                if app.palette_scroll_target == Some(i) {
+                    header.scroll_to_me(Some(egui::Align::TOP));
+                    app.palette_scroll_target = None;
+                }
+                swatch_row(ui, app, glyphs, swatch, glyph_px);
+            }
         });
 }
 
@@ -342,29 +355,69 @@ const ANSI16: [(&str, gascii_core::Rgba); 16] = [
     ("Bright White", gascii_core::Rgba(255, 255, 255, 255)),
 ];
 
-/// The picker hung off a colour well. Deliberately egui's stock truecolor widget rather than a
+/// Buffer backing `color_picker_body`'s HEX field, kept in egui temp memory keyed by the field's
+/// `Id` rather than on `GasciiApp` — `synced` is the colour the buffer was last derived from, so
+/// in-progress/invalid typing survives frames without being clobbered by the picker/preset paths
+/// (which write `*color` directly), while a change from either of those reformats the buffer.
+#[derive(Clone)]
+struct HexBuf {
+    text: String,
+    synced: gascii_core::Rgba,
+}
+
+/// ANSI-16 presets, the egui HS-square + hue-bar + RGBA picker, and an editable HEX field. Edits
+/// `color` in place. Shared by the normal-mode well popup and the kiosk well popup — deliberately
+/// egui's stock HS/hue picker rather than a custom-painted wheel.
+pub(crate) fn color_picker_body(ui: &mut Ui, color: &mut gascii_core::Rgba) {
+    widgets::micro_label(ui, "ANSI 16");
+    ui.horizontal_wrapped(|ui| {
+        for (name, preset) in ANSI16.iter() {
+            let sw = ui.add(
+                egui::Button::new("")
+                    .fill(widgets::rgba_to_color32(*preset))
+                    .min_size(Vec2::new(18.0, 16.0)),
+            );
+            if sw.on_hover_text(*name).clicked() {
+                *color = *preset;
+            }
+        }
+    });
+    ui.separator();
+    let mut c32 = egui::Color32::from_rgba_unmultiplied(color.0, color.1, color.2, color.3);
+    if egui::color_picker::color_picker_color32(ui, &mut c32, egui::color_picker::Alpha::OnlyBlend) {
+        let [r, g, b, a] = c32.to_srgba_unmultiplied();
+        *color = gascii_core::Rgba(r, g, b, a);
+    }
+    ui.separator();
+    widgets::micro_label(ui, "HEX");
+    let id = ui.id().with("hex_edit");
+    let mut buf = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<HexBuf>(id))
+        .unwrap_or_else(|| HexBuf { text: widgets::hex_string_rgba(*color), synced: *color });
+    // The ANSI-16 or picker paths above may have just written `*color` directly — reformat the
+    // buffer to match rather than let it go stale, but only when it wasn't this field's own edit.
+    if buf.synced != *color {
+        buf.text = widgets::hex_string_rgba(*color);
+        buf.synced = *color;
+    }
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut buf.text).desired_width(90.0).font(fonts::mono_id(fonts::size::CONTROL)),
+    );
+    if resp.changed() {
+        if let Some(parsed) = widgets::parse_hex(&buf.text) {
+            *color = parsed;
+            buf.synced = parsed;
+        }
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(id, buf));
+}
+
+/// The picker hung off a colour well. Deliberately egui's stock HS/hue picker rather than a
 /// custom-painted one.
 fn color_popup(ui: &Ui, resp: &egui::Response, color: &mut gascii_core::Rgba) {
     egui::Popup::from_toggle_button_response(resp).show(|ui| {
-        widgets::micro_label(ui, "ANSI 16");
-        ui.horizontal_wrapped(|ui| {
-            for (name, preset) in ANSI16.iter() {
-                let sw = ui.add(
-                    egui::Button::new("")
-                        .fill(widgets::rgba_to_color32(*preset))
-                        .min_size(Vec2::new(18.0, 16.0)),
-                );
-                if sw.on_hover_text(*name).clicked() {
-                    *color = *preset;
-                }
-            }
-        });
-        ui.separator();
-        widgets::micro_label(ui, "CUSTOM");
-        let mut arr = [color.0, color.1, color.2, color.3];
-        if ui.color_edit_button_srgba_unmultiplied(&mut arr).changed() {
-            *color = gascii_core::Rgba(arr[0], arr[1], arr[2], arr[3]);
-        }
+        color_picker_body(ui, color);
     });
     let _ = ui;
 }
@@ -498,5 +551,114 @@ mod tests {
         const KIOSK_SWATCH: f32 = 48.0;
         let content_width = KIOSK_SIDEBAR_W - KIOSK_MARGIN * 2.0;
         assert_eq!(swatch_cols(content_width, KIOSK_SWATCH), SWATCH_COLS_MAX);
+    }
+
+    /// The palette's stacked-scroll restructure: a pending jump-to-section target must render
+    /// without panicking (the target section's header calls `scroll_to_me` mid-layout) and a
+    /// render with no pointer input must not mutate `active_page` — the segmented control is the
+    /// only thing that changes it.
+    #[test]
+    fn palette_renders_with_a_pending_scroll_target_without_panicking_or_mutating_active_page() {
+        let mut app = crate::app::GasciiApp::headless();
+        app.active_page = 0;
+        app.palette_scroll_target = Some(1);
+
+        let ctx = egui::Context::default();
+        fonts::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            palette(ui, &mut app, widgets::SWATCH, fonts::size::GLYPH, 200.0);
+        });
+
+        assert_eq!(app.active_page, 0, "a render pass with no input must not change the active page");
+        // The scroll target is consumed once its section's header is laid out during the render
+        // above — it must not still be pending afterward.
+        assert_eq!(app.palette_scroll_target, None, "the jump target must be consumed by the render");
+    }
+
+    /// Walks every valid section index (the palette's actual page count, not just the single index
+    /// the coder's own test picked) — each must be consumed (cleared to `None`) by exactly one
+    /// render pass, matching the code review's trace of `ScrollArea`'s single-consumption
+    /// `pass_state.scroll_target.take()`.
+    #[test]
+    fn palette_consumes_a_scroll_target_at_every_valid_section_index() {
+        let app_template = crate::app::GasciiApp::headless();
+        let page_count = app_template.pages.len();
+        assert!(page_count > 0, "sanity: the built-in palette must have at least one page");
+
+        let ctx = egui::Context::default();
+        fonts::install_fonts(&ctx);
+        for target in 0..page_count {
+            let mut app = crate::app::GasciiApp::headless();
+            app.palette_scroll_target = Some(target);
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                palette(ui, &mut app, widgets::SWATCH, fonts::size::GLYPH, 200.0);
+            });
+            assert_eq!(
+                app.palette_scroll_target, None,
+                "target {target} of {page_count} sections must be consumed by the render"
+            );
+        }
+    }
+
+    /// The code review argued an out-of-range `palette_scroll_target` is "structurally impossible"
+    /// because the only production writer (the segmented control) always hands it an index drawn
+    /// from `app.pages`' own range — true, but the field itself is a bare `Option<usize>` with no
+    /// type-level guarantee against a future caller setting it directly. Confirms the defensive
+    /// case explicitly: an out-of-range target never matches any section's index in the render
+    /// loop, so it is simply never consumed (stays pending rather than panic-indexing anything) —
+    /// a silent no-op, not a crash, across two render passes.
+    #[test]
+    fn palette_does_not_panic_on_an_out_of_range_scroll_target_and_leaves_it_pending() {
+        let mut app = crate::app::GasciiApp::headless();
+        let out_of_range = app.pages.len() + 50;
+        app.palette_scroll_target = Some(out_of_range);
+
+        let ctx = egui::Context::default();
+        fonts::install_fonts(&ctx);
+        for _ in 0..2 {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                palette(ui, &mut app, widgets::SWATCH, fonts::size::GLYPH, 200.0);
+            });
+        }
+        assert_eq!(
+            app.palette_scroll_target,
+            Some(out_of_range),
+            "an out-of-range target matches no section header, so it is left pending rather than \
+             silently dropped or, worse, matched against the wrong section"
+        );
+    }
+
+    /// `color_picker_body` (ANSI-16 presets, the egui HS/hue/RGBA picker, and the HEX field) must
+    /// render in both themes without panicking, and a render with no pointer/keyboard input must
+    /// leave the edited colour untouched.
+    #[test]
+    fn color_picker_body_renders_in_both_themes_without_mutating_color_on_a_no_input_render() {
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let mut color = gascii_core::Rgba(0x12, 0x34, 0x56, 255);
+            let ctx = egui::Context::default();
+            fonts::install_fonts(&ctx);
+            ctx.set_theme(theme);
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                color_picker_body(ui, &mut color);
+            });
+            assert_eq!(color, gascii_core::Rgba(0x12, 0x34, 0x56, 255), "{theme:?}: no-input render must not change the colour");
+        }
+    }
+
+    /// Regression guard for the `HexBuf` write-back gating around `hex_string_rgba`: seeding
+    /// `color_picker_body` with the app's own default transparent BG (`Rgba::TRANSPARENT`, the
+    /// exact value that was silently forced opaque before the alpha-preserving formatter landed)
+    /// and rendering with no pointer/keyboard input must leave the colour untouched — the
+    /// `resp.changed()` gate must not fire on its own, regardless of what the buffer is seeded
+    /// with or formatted through.
+    #[test]
+    fn color_picker_body_does_not_mutate_a_transparent_colour_on_a_no_input_render() {
+        let mut color = gascii_core::Rgba::TRANSPARENT;
+        let ctx = egui::Context::default();
+        fonts::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            color_picker_body(ui, &mut color);
+        });
+        assert_eq!(color, gascii_core::Rgba::TRANSPARENT, "a no-input render must not force a transparent colour opaque");
     }
 }

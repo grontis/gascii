@@ -5,7 +5,7 @@
 
 use eframe::egui::{self, Align2, Pos2, Rect, Ui, UiBuilder, Vec2};
 
-use super::sidebar::{palette, ramp_label, rule, tool_grid, SHAPE_OPTIONS};
+use super::sidebar::{color_picker_body, palette, ramp_label, rule, tool_grid, SHAPE_OPTIONS};
 use super::{theme, widgets};
 use crate::app::{sized_slot, tool_def, Binding, GasciiApp, ToolKind, TOOLS};
 use crate::fonts;
@@ -271,17 +271,39 @@ fn brush_options(ui: &mut Ui, app: &mut GasciiApp) {
 
 fn colors(ui: &mut Ui, app: &mut GasciiApp, k: f32) {
     widgets::micro_label(ui, "COLOR");
+    let mut wells = None;
     ui.horizontal(|ui| {
-        // Display + swap only, no popup — kiosk's touch-first colour row hands precise picking
-        // off to the quick-color swatches below instead.
-        widgets::color_wells(ui, widgets::rgba_to_color32(app.active_fg), widgets::rgba_to_color32(app.active_bg), WELL * k);
+        // Tapping a well opens the full picker in a popup, touch-scaled — the quick-color row
+        // below stays for fast taps.
+        wells = Some(widgets::color_wells(
+            ui,
+            widgets::rgba_to_color32(app.active_fg),
+            widgets::rgba_to_color32(app.active_bg),
+            WELL * k,
+        ));
         ui.add_space(14.0);
         if widgets::swap_button(ui, SWAP_BUTTON * k) {
             app.swap_colors();
         }
     });
+    if let Some(wells) = wells {
+        touch_color_popup(ui, &wells.fg, &mut app.active_fg, k);
+        touch_color_popup(ui, &wells.bg, &mut app.active_bg, k);
+    }
     ui.add_space(8.0);
     quick_colors(ui, app, k);
+}
+
+/// `color_picker_body` hung off a well, scaled up for touch — bumps the interact size and slider
+/// width the picker's RGBA sliders and hue bar use, so the popup keeps kiosk's tappable geometry
+/// rather than falling back to normal-chrome sizing.
+fn touch_color_popup(ui: &Ui, resp: &egui::Response, color: &mut gascii_core::Rgba, k: f32) {
+    egui::Popup::from_toggle_button_response(resp).show(|ui| {
+        ui.spacing_mut().interact_size *= k;
+        ui.spacing_mut().slider_width *= k;
+        color_picker_body(ui, color);
+    });
+    let _ = ui;
 }
 
 fn quick_colors(ui: &mut Ui, app: &mut GasciiApp, k: f32) {
@@ -415,5 +437,23 @@ mod tests {
             "a render pass with no input must not flip the density mode"
         );
         assert_eq!(app.active_ramp, ramp_before, "a render pass with no input must not change the ramp");
+    }
+
+    /// The colour block (wells + K1 well popups + quick-color row) must render without panicking,
+    /// and a render with no pointer input must not mutate either active colour.
+    #[test]
+    fn colors_renders_without_panicking_or_mutating_active_colors() {
+        let mut app = crate::app::GasciiApp::headless();
+        let fg_before = app.active_fg;
+        let bg_before = app.active_bg;
+
+        let ctx = egui::Context::default();
+        fonts::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            colors(ui, &mut app, 1.0);
+        });
+
+        assert_eq!(app.active_fg, fg_before, "a render pass with no input must not change the FG colour");
+        assert_eq!(app.active_bg, bg_before, "a render pass with no input must not change the BG colour");
     }
 }
