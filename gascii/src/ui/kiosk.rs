@@ -5,7 +5,7 @@
 
 use eframe::egui::{self, Align2, Pos2, Rect, Ui, UiBuilder, Vec2};
 
-use super::sidebar::{color_picker_body, palette, ramp_label, rule, tool_grid, SHAPE_OPTIONS};
+use super::sidebar::{self, color_picker_body, palette, ramp_label, rule, tool_grid, SHAPE_OPTIONS};
 use super::{theme, widgets};
 use crate::app::{sized_slot, tool_def, Binding, GasciiApp, ToolKind, TOOLS};
 use crate::fonts;
@@ -146,6 +146,8 @@ pub fn sidebar(ui: &mut Ui, app: &mut GasciiApp) {
         tool_grid(ui, app, &kiosk_tools(), TOOL_COLS, TOOL_CELL_H * k);
         rule(ui, t.border_soft);
         binding_options(ui, app, k);
+        rule(ui, t.border_soft);
+        sidebar::trace_controls(ui, app, k);
         rule(ui, t.border_soft);
         // available_height is unbounded inside the scroll area — size the glyph scroll against
         // the panel's real height minus what the grid and options actually consumed.
@@ -455,5 +457,26 @@ mod tests {
 
         assert_eq!(app.active_fg, fg_before, "a render pass with no input must not change the FG colour");
         assert_eq!(app.active_bg, bg_before, "a render pass with no input must not change the BG colour");
+    }
+
+    /// Full-stack smoke test for kiosk's `TRACE` wiring (`sidebar::trace_controls` called from
+    /// kiosk's own `sidebar`, sitting between `binding_options` and the palette): the whole sidebar
+    /// must render with an image background loaded without panicking, and a no-input render must
+    /// not mutate the loaded image's settings — mirrors the normal-chrome coverage in
+    /// `ui::sidebar`'s own tests.
+    #[test]
+    fn kiosk_sidebar_renders_with_an_image_loaded_without_panicking_or_mutating_its_settings() {
+        let mut app = crate::app::GasciiApp::headless();
+        app.image_bg = Some(crate::image_bg::ImageBackground::new(image::RgbaImage::new(4, 3), None, None));
+
+        let ctx = egui::Context::default();
+        fonts::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            sidebar(ui, &mut app);
+        });
+
+        let bg = app.image_bg.as_ref().expect("a no-input render must not clear the loaded image");
+        assert!(bg.show_as_trace, "a no-input render must not change trace visibility");
+        assert!((bg.trace_opacity - 0.5).abs() < f32::EPSILON, "a no-input render must not change opacity");
     }
 }

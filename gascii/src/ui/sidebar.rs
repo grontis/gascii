@@ -69,6 +69,8 @@ pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
         rule(ui, t.border_soft);
         binding_options(ui, app);
         rule(ui, t.border_soft);
+        trace_controls(ui, app, 1.0);
+        rule(ui, t.border_soft);
 
         // The options block's height varies (shape rows, the brush block), so the glyph scroll
         // gives up height first. `available_height` is unbounded inside the scroll area — size
@@ -263,6 +265,54 @@ fn brush_options(ui: &mut Ui, app: &mut GasciiApp) {
     // offering a pressure toggle before there is any pressure signal to drive it.
     if app.stylus_detected {
         widgets::checkbox(ui, &mut app.brush_pressure, "Pressure");
+    }
+}
+
+/// TRACE section: Load…/Clear buttons, a visibility toggle, and an opacity slider for the loaded
+/// image background's live trace overlay (see `canvas.rs`'s render of it). Shared by both chrome
+/// modes — `k` scales the touch geometry in kiosk, `1.0` in normal chrome. `Load…`/`Clear` are
+/// deferred past the block that mutably borrows `app.image_bg` for the toggle/slider, since both
+/// take `&mut self` wholesale.
+pub(crate) fn trace_controls(ui: &mut Ui, app: &mut GasciiApp, k: f32) {
+    widgets::micro_label(ui, "TRACE");
+
+    enum Action {
+        None,
+        Load,
+        Clear,
+    }
+    let mut action = Action::None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        if widgets::button(ui, "Load…", false, true).clicked() {
+            action = Action::Load;
+        }
+        if widgets::button(ui, "Clear", false, app.image_bg.is_some()).clicked() {
+            action = Action::Clear;
+        }
+    });
+
+    if let Some(bg) = app.image_bg.as_mut() {
+        let t = theme::current(ui.ctx());
+        widgets::checkbox(ui, &mut bg.show_as_trace, "Show");
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            ui.add_sized(
+                Vec2::new(100.0 * k, 20.0 * k),
+                egui::Slider::new(&mut bg.trace_opacity, 0.0..=1.0).show_value(false),
+            );
+            ui.label(
+                egui::RichText::new(format!("{:.0}%", bg.trace_opacity * 100.0))
+                    .font(fonts::mono_id(fonts::size::LABEL))
+                    .color(t.fg_secondary),
+            );
+        });
+    }
+
+    match action {
+        Action::Load => app.load_trace_image(ui.ctx()),
+        Action::Clear => app.clear_image_bg(),
+        Action::None => {}
     }
 }
 
@@ -660,5 +710,38 @@ mod tests {
             color_picker_body(ui, &mut color);
         });
         assert_eq!(color, gascii_core::Rgba::TRANSPARENT, "a no-input render must not force a transparent colour opaque");
+    }
+
+    /// With no image background loaded, `trace_controls` must render just the TRACE label and a
+    /// disabled Clear button without panicking, and a no-input render must leave `image_bg` `None`.
+    #[test]
+    fn trace_controls_renders_with_no_image_loaded_without_panicking_or_loading_one() {
+        let mut app = crate::app::GasciiApp::headless();
+        let ctx = egui::Context::default();
+        fonts::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            trace_controls(ui, &mut app, 1.0);
+        });
+        assert!(app.image_bg.is_none(), "a no-input render must not conjure an image background");
+    }
+
+    /// With an image background present (`texture: None`, the headless/pre-upload no-op path — see
+    /// `canvas.rs`'s matching render-guard test), the visibility toggle and opacity slider must
+    /// render without panicking, and a no-input render must not mutate any of the loaded image's
+    /// settings.
+    #[test]
+    fn trace_controls_renders_with_an_image_loaded_without_panicking_or_mutating_its_settings() {
+        let mut app = crate::app::GasciiApp::headless();
+        app.image_bg = Some(crate::image_bg::ImageBackground::new(image::RgbaImage::new(4, 3), None, None));
+
+        let ctx = egui::Context::default();
+        fonts::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            trace_controls(ui, &mut app, 1.0);
+        });
+
+        let bg = app.image_bg.as_ref().expect("a no-input render must not clear the loaded image");
+        assert!(bg.show_as_trace, "a no-input render must not change trace visibility");
+        assert!((bg.trace_opacity - 0.5).abs() < f32::EPSILON, "a no-input render must not change opacity");
     }
 }

@@ -12,6 +12,7 @@ use gascii_core::{
 
 use crate::canvas::{self, CanvasRenderer, NaiveRenderer};
 use crate::fonts;
+use crate::image_bg;
 use crate::png_export;
 use crate::prefs;
 use crate::ui::dialog::{self, DialogAction};
@@ -468,12 +469,20 @@ pub struct GasciiApp {
     new_w: u16,
     new_h: u16,
     new_bg: Rgba,
+    /// The loaded reference image, if any — shown as a live trace overlay under the canvas, and
+    /// (when `use_in_export` is set) composited into the PNG export. One at a time, in-memory only.
+    pub(crate) image_bg: Option<image_bg::ImageBackground>,
+    /// Bumped on every `image_bg` change that affects the export composite (load, clear, opacity/
+    /// gate edits) — folds into the export preview's cache key (`ExportPreviewKey`) so a stale
+    /// preview never survives an image edit.
+    pub(crate) image_bg_gen: u64,
     export_dialog_open: bool,
     pub(crate) export: ExportSettings,
     export_preview: Option<egui::TextureHandle>,
-    /// The settings the current `export_preview` texture was generated from — regenerated only
-    /// when this stops matching `self.export`, or on dialog open (`None` after close).
-    export_preview_key: Option<ExportSettings>,
+    /// The settings (and image-background generation) the current `export_preview` texture was
+    /// generated from — regenerated only when this stops matching the current key, or on dialog
+    /// open (`None` after close).
+    export_preview_key: Option<ExportPreviewKey>,
     current_path: Option<PathBuf>,
     /// Up to 8 most-recently-opened/saved paths, most recent first. A failed re-open drops its
     /// entry rather than leaving a dead path in the list.
@@ -535,6 +544,16 @@ impl ExportSettings {
     pub(crate) fn cell_px(&self) -> u32 {
         EXPORT_CELL_PX_BASE * self.scale as u32
     }
+}
+
+/// The export preview's cache key: `ExportSettings` alone isn't enough once a background image can
+/// affect the composite, since `ImageBackground` itself isn't `Copy` and can't live in the key
+/// directly — `image_gen` (`GasciiApp::image_bg_gen`) stands in for "has the image (or its
+/// opacity/gate) changed since this preview was built".
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct ExportPreviewKey {
+    settings: ExportSettings,
+    image_gen: u64,
 }
 
 impl GasciiApp {
@@ -622,6 +641,8 @@ impl GasciiApp {
             new_w: Document::DEFAULT_WIDTH,
             new_h: Document::DEFAULT_HEIGHT,
             new_bg: Rgba(0, 0, 0, 255),
+            image_bg: None,
+            image_bg_gen: 0,
             export_dialog_open: false,
             export: ExportSettings::default(),
             export_preview: None,
@@ -1459,18 +1480,20 @@ impl GasciiApp {
             self.export_preview_key = None;
             return;
         }
-        if self.export_preview_key == Some(self.export) {
+        let key = ExportPreviewKey { settings: self.export, image_gen: self.image_bg_gen };
+        if self.export_preview_key == Some(key) {
             return;
         }
         let opaque_bg = (!self.export.transparent).then_some(self.doc.background);
+        let bg_image = self.image_bg.as_ref().filter(|b| b.use_in_export).map(|b| (&b.pixels, b.export_opacity));
         // A small, fixed preview scale — independent of the export's own cell_px, which can be up
         // to 4x the base and would make an oversized in-dialog thumbnail.
-        if let Ok((w, h, pixels)) = png_export::rasterize_rgba8(&self.doc, 4, opaque_bg) {
+        if let Ok((w, h, pixels)) = png_export::rasterize_rgba8(&self.doc, 4, opaque_bg, bg_image) {
             let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &pixels);
             self.export_preview =
                 Some(ctx.load_texture("export_preview", image, egui::TextureOptions::NEAREST));
         }
-        self.export_preview_key = Some(self.export);
+        self.export_preview_key = Some(key);
     }
 
     /// Unified Export dialog: Text/PNG format, PNG scale + transparency, Text trim, a live
@@ -1482,6 +1505,12 @@ impl GasciiApp {
         self.refresh_export_preview(ctx);
         let doc = &self.doc;
         let preview = self.export_preview.clone();
+        enum BgAction {
+            None,
+            Load,
+            Clear,
+        }
+        let mut bg_action = BgAction::None;
         let resp = dialog::modal(ctx, "export", "Export", |ui| {
             let formats = [(ExportFormat::Text, "Text (.txt)"), (ExportFormat::Png, "PNG")];
             crate::ui::widgets::segmented(ui, &mut self.export.format, &formats, false);
@@ -1496,6 +1525,47 @@ impl GasciiApp {
                     });
                     ui.add_space(6.0);
                     crate::ui::widgets::checkbox(ui, &mut self.export.transparent, "Transparent background");
+                    ui.add_space(10.0);
+
+                    // Background image: the same loaded ImageBackground the TRACE section uses,
+                    // composited beneath the art in the exported PNG (Cover fit — fills the frame,
+                    // crops the overflow). Load…/Clear here also make the image available as a
+                    // trace, and vice versa — one shared image, two independent opacities/gates.
+                    let bg_theme = crate::ui::theme::current(ui.ctx());
+                    ui.label(
+                        egui::RichText::new("Background image")
+                            .font(fonts::mono_id(fonts::size::LABEL))
+                            .color(bg_theme.fg_secondary),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        if crate::ui::widgets::button(ui, "Load…", false, true).clicked() {
+                            bg_action = BgAction::Load;
+                        }
+                        if crate::ui::widgets::button(ui, "Clear", false, self.image_bg.is_some()).clicked() {
+                            bg_action = BgAction::Clear;
+                        }
+                    });
+                    if let Some(bg) = self.image_bg.as_mut() {
+                        let mut changed =
+                            crate::ui::widgets::checkbox(ui, &mut bg.use_in_export, "Use as background");
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            let slider = ui.add_sized(
+                                egui::Vec2::new(100.0, 20.0),
+                                egui::Slider::new(&mut bg.export_opacity, 0.0..=1.0).show_value(false),
+                            );
+                            changed |= slider.changed();
+                            ui.label(
+                                egui::RichText::new(format!("{:.0}%", bg.export_opacity * 100.0))
+                                    .font(fonts::mono_id(fonts::size::LABEL))
+                                    .color(bg_theme.fg_secondary),
+                            );
+                        });
+                        if changed {
+                            self.image_bg_gen += 1;
+                        }
+                    }
                 }
                 ExportFormat::Text => {
                     crate::ui::widgets::checkbox(ui, &mut self.export.trim, "Trim trailing spaces");
@@ -1557,6 +1627,11 @@ impl GasciiApp {
             ui.add_space(12.0);
             dialog::buttons(ui, "Cancel", "Export…")
         });
+        match bg_action {
+            BgAction::Load => self.load_trace_image(ctx),
+            BgAction::Clear => self.clear_image_bg(),
+            BgAction::None => {}
+        }
         match resp.inner {
             DialogAction::Confirm => self.run_export(),
             DialogAction::Cancel => self.close_export_dialog(),
@@ -1572,6 +1647,40 @@ impl GasciiApp {
         self.export_dialog_open = false;
         self.export_preview = None;
         self.export_preview_key = None;
+    }
+
+    /// Opens a native picker filtered to png/jpg/jpeg, decodes the chosen file, and uploads it as
+    /// the (single) image background — replacing whatever was loaded before. A failed pick is a
+    /// silent no-op (matches `open_file`); a failed read/decode is non-fatal (`last_error`, current
+    /// image left unchanged), never a panic.
+    pub(crate) fn load_trace_image(&mut self, ctx: &egui::Context) {
+        let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg"]).pick_file() else {
+            return;
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.last_error = Some(format!("failed to load image: {e}"));
+                return;
+            }
+        };
+        match image_bg::decode_image(&bytes) {
+            Ok(rgba) => {
+                let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+                let color_image = egui::ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw());
+                let texture = ctx.load_texture("trace_bg", color_image, egui::TextureOptions::LINEAR);
+                self.image_bg = Some(image_bg::ImageBackground::new(rgba, Some(texture), Some(path)));
+                self.image_bg_gen += 1;
+                self.last_error = None;
+            }
+            Err(e) => self.last_error = Some(format!("failed to load image: {e}")),
+        }
+    }
+
+    /// Drops the loaded image background entirely, freeing its texture's GPU memory.
+    pub(crate) fn clear_image_bg(&mut self) {
+        self.image_bg = None;
+        self.image_bg_gen += 1;
     }
 
     /// Flushes, opens a native save dialog filtered by the current format, and writes the result.
@@ -1602,7 +1711,8 @@ impl GasciiApp {
                     return;
                 };
                 let opaque_bg = (!self.export.transparent).then_some(self.doc.background);
-                match png_export::export_png(&self.doc, self.export.cell_px(), opaque_bg) {
+                let bg_image = self.image_bg.as_ref().filter(|b| b.use_in_export).map(|b| (&b.pixels, b.export_opacity));
+                match png_export::export_png(&self.doc, self.export.cell_px(), opaque_bg, bg_image) {
                     Ok(bytes) => match std::fs::write(&path, bytes) {
                         Ok(()) => {
                             self.last_error = None;
@@ -3423,5 +3533,98 @@ mod tests {
             assert_eq!(app.active_fg, Rgba(4, 5, 6, 255), "fullscreen={fullscreen}: X must swap FG");
             assert_eq!(app.active_bg, Rgba(1, 2, 3, 255), "fullscreen={fullscreen}: X must swap BG");
         }
+    }
+
+    /// Loading a second image over an already-loaded one must **replace** the whole
+    /// `ImageBackground` in one assignment, not accumulate state — mirrors `load_trace_image`'s own
+    /// `self.image_bg = Some(...)` step (an `rfd` pick can't be driven headlessly, so this drives
+    /// the same decode/upload/assign sequence directly). Proven two ways: the second image's
+    /// `pixels`/`path` are the only ones present afterward (no merge), and the *first* texture is
+    /// actually freed from the `TextureManager` once the second assignment drops it — a stacking or
+    /// leak bug (e.g. pushing into a `Vec` instead of replacing the `Option`) would leave the first
+    /// texture id still allocated.
+    #[test]
+    fn loading_a_second_image_over_an_existing_one_replaces_it_and_frees_the_old_texture() {
+        let mut app = GasciiApp::headless();
+        let ctx = egui::Context::default();
+
+        fn make_png(w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
+            let mut img = image::RgbaImage::new(w, h);
+            for px in img.pixels_mut() {
+                px.0 = rgba;
+            }
+            let mut bytes = Vec::new();
+            img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).unwrap();
+            bytes
+        }
+        fn load(ctx: &egui::Context, bytes: &[u8]) -> image_bg::ImageBackground {
+            let rgba = image_bg::decode_image(bytes).unwrap();
+            let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+            let tex = ctx.load_texture(
+                "trace_bg",
+                egui::ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw()),
+                egui::TextureOptions::LINEAR,
+            );
+            image_bg::ImageBackground::new(rgba, Some(tex), None)
+        }
+
+        let bg_a = load(&ctx, &make_png(3, 2, [10, 20, 30, 255]));
+        let id_a = bg_a.texture.as_ref().unwrap().id();
+        app.image_bg = Some(bg_a);
+        app.image_bg_gen += 1;
+        assert!(
+            ctx.tex_manager().read().meta(id_a).is_some(),
+            "sanity: the first texture must actually be allocated before the replace"
+        );
+
+        let bg_b = load(&ctx, &make_png(5, 7, [90, 100, 110, 255]));
+        let id_b = bg_b.texture.as_ref().unwrap().id();
+        // Mirrors `load_trace_image`'s own replace: this single assignment swaps the whole
+        // `Option`, dropping the previous `ImageBackground` (and its `TextureHandle`) right here.
+        app.image_bg = Some(bg_b);
+        app.image_bg_gen += 1;
+
+        let bg = app.image_bg.as_ref().unwrap();
+        assert_eq!(
+            (bg.pixels.width(), bg.pixels.height()),
+            (5, 7),
+            "the second image's dimensions replace the first's, not stack alongside them"
+        );
+        assert_eq!(app.image_bg_gen, 2, "each load bumps the generation once, not merged into one bump");
+        assert!(
+            ctx.tex_manager().read().meta(id_a).is_none(),
+            "the first texture must be freed once the second `Some(...)` assignment drops it"
+        );
+        assert!(ctx.tex_manager().read().meta(id_b).is_some(), "the second (current) texture must still be allocated");
+    }
+
+    /// An `image_bg_gen` bump alone — with `ExportSettings` completely unchanged — must still
+    /// invalidate `refresh_export_preview`'s cache key. This is the whole reason
+    /// `ExportPreviewKey` exists (`Option<ExportSettings>` alone can't see an opacity/gate/load
+    /// edit): without the generation folded in, a preview built before an image edit would be
+    /// served forever afterward, since `self.export` never itself changed.
+    #[test]
+    fn an_image_bg_gen_bump_invalidates_the_cached_export_preview_key_with_export_settings_unchanged() {
+        let mut app = GasciiApp::headless();
+        app.export.format = ExportFormat::Png;
+        let ctx = egui::Context::default();
+
+        app.refresh_export_preview(&ctx);
+        let key_before = app.export_preview_key;
+        assert!(key_before.is_some(), "sanity: a PNG-format refresh must produce a cache key");
+
+        // `self.export` is untouched below — only the image generation moves, exactly as
+        // `load_trace_image`/`clear_image_bg`/the export dialog's opacity slider and "Use as
+        // background" toggle all do.
+        app.image_bg_gen += 1;
+        app.refresh_export_preview(&ctx);
+        let key_after = app.export_preview_key;
+
+        assert_ne!(key_before, key_after, "an image_bg_gen bump alone must change the cache key");
+        assert_eq!(
+            key_after.map(|k| k.image_gen),
+            Some(1),
+            "the new key must reflect the bumped generation, not just differ arbitrarily"
+        );
     }
 }

@@ -2,6 +2,7 @@ mod app;
 mod canvas;
 mod font_coverage;
 mod fonts;
+mod image_bg;
 mod png_export;
 mod prefs;
 mod ui;

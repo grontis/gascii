@@ -71,12 +71,10 @@ impl CanvasRenderer for NaiveRenderer {
         let (x0, y0, x1, y1) = visible;
         let doc_bg = color32(doc.background);
 
-        let doc_rect = Rect::from_min_size(
-            origin + vp.pan,
-            Vec2::new(doc.width as f32 * cell.x, doc.height as f32 * cell.y),
-        );
-        painter.rect_filled(doc_rect, 0.0, doc_bg);
-
+        // The full-`doc_rect` background fill lives in `show()`, ahead of the trace-image block —
+        // not here — so the trace paints above it instead of being immediately painted over. This
+        // renderer only ever fills `doc_bg` per-cell (vacated float regions, pending-cell previews)
+        // from here down.
         let font_id = canvas_font_id(vp.font_px());
         for y in y0..y1 {
             for x in x0..x1 {
@@ -720,6 +718,33 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
     );
     painter.rect_filled(doc_rect.translate(Vec2::splat(3.0)), 0.0, t.shadow);
 
+    // The document's own solid background, filled here — ahead of the trace image and
+    // `renderer.paint` — rather than as the renderer's first operation: the renderer paints only
+    // cells, so this is the one full-`doc_rect` fill in the stack and everything above it (trace,
+    // then cells) is guaranteed to land on top rather than risk being painted over.
+    painter.rect_filled(doc_rect, 0.0, color32(app.doc.background));
+
+    // The trace image: a tracing aid shown above that solid fill and under the document's cells,
+    // letterboxed (`fit_contain`) into `doc_rect` so it tracks pan/zoom for free. `texture: None`
+    // (not yet uploaded, or a headless test) is a pure no-op — nothing paints.
+    if let Some(bg) = &app.image_bg {
+        if bg.show_as_trace {
+            if let Some(tex) = &bg.texture {
+                if let Some((ox, oy, w, h)) =
+                    crate::image_bg::fit_contain(bg.pixels.width(), bg.pixels.height(), doc_rect.width(), doc_rect.height())
+                {
+                    let target = Rect::from_min_size(doc_rect.min + Vec2::new(ox, oy), Vec2::new(w, h));
+                    painter.image(
+                        tex.id(),
+                        target,
+                        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                        Color32::from_white_alpha((bg.trace_opacity * 255.0).round() as u8),
+                    );
+                }
+            }
+        }
+    }
+
     app.renderer.paint(
         &painter,
         &app.doc,
@@ -923,6 +948,73 @@ mod tests {
         assert_eq!(
             app.pressure_stamp_size, None,
             "the pressure override must not survive a focus-loss cancel"
+        );
+    }
+
+    /// The trace-image overlay's `texture: None` guard (a headless image background — never
+    /// uploaded, or a decode that hasn't reached the GPU yet) must be a pure no-op: `show` renders
+    /// without panicking and leaves `image_bg` itself untouched by a no-input frame.
+    #[test]
+    fn a_trace_image_with_no_texture_renders_without_panicking_or_mutating_image_bg() {
+        let mut app = GasciiApp::headless();
+        app.image_bg = Some(crate::image_bg::ImageBackground::new(
+            image::RgbaImage::new(4, 3),
+            None,
+            None,
+        ));
+
+        let ctx = headless_ctx();
+        let _ = ctx.run_ui(raw_input_with_screen(900.0, 700.0, false), |ui| show(ui, &mut app, false));
+
+        let bg = app.image_bg.as_ref().expect("a no-input render must not clear the loaded image");
+        assert!(bg.texture.is_none(), "still no texture: the render must not have synthesized one");
+        assert!((bg.trace_opacity - 0.5).abs() < f32::EPSILON, "a no-input render must not change opacity");
+        assert!(bg.show_as_trace, "a no-input render must not change trace visibility");
+    }
+
+    /// Layering regression guard for the trace-invisible-under-an-opaque-background bug: the trace
+    /// image must be painted ABOVE the document's full-`doc_rect` background fill, not underneath
+    /// it, or an opaque background (every new document's default) hides it entirely. Confirmed
+    /// structurally rather than pixel-by-pixel — a real GPU rasterizer isn't available headlessly —
+    /// by capturing `show`'s returned `FullOutput` and asserting the trace's shape is submitted
+    /// AFTER the background fill's shape: `show` paints everything through one `Painter` bound to a
+    /// single layer, and within a layer, later-submitted shapes are drawn on top of earlier ones, so
+    /// submission order here is a direct, load-bearing proxy for paint (and visibility) order.
+    #[test]
+    fn the_trace_image_paints_above_the_documents_opaque_background_fill_not_beneath_it() {
+        let mut app = GasciiApp::headless();
+        assert_eq!(
+            app.doc.background,
+            gascii_core::Rgba(0, 0, 0, 255),
+            "must exercise the default opaque background — the case that was broken"
+        );
+
+        let ctx = headless_ctx();
+        let pixels = image::RgbaImage::new(4, 3);
+        let color_image = egui::ColorImage::from_rgba_unmultiplied([4, 3], pixels.as_raw());
+        let texture = ctx.load_texture("trace_layering_test", color_image, egui::TextureOptions::LINEAR);
+        let tex_id = texture.id();
+        app.image_bg = Some(crate::image_bg::ImageBackground::new(pixels, Some(texture), None));
+        assert!(app.image_bg.as_ref().unwrap().show_as_trace, "must exercise the visible-trace path");
+
+        let output = ctx.run_ui(raw_input_with_screen(900.0, 700.0, false), |ui| show(ui, &mut app, false));
+
+        let doc_bg = color32(app.doc.background);
+        let bg_index = output
+            .shapes
+            .iter()
+            .position(|cs| matches!(&cs.shape, Shape::Rect(r) if r.fill == doc_bg))
+            .expect("the document's full-rect opaque background fill must be painted");
+        let trace_index = output
+            .shapes
+            .iter()
+            .position(|cs| matches!(&cs.shape, Shape::Mesh(m) if m.texture_id == tex_id))
+            .expect("the trace image must be painted: a texture is loaded and show_as_trace is set");
+
+        assert!(
+            trace_index > bg_index,
+            "the trace image (submitted at shape index {trace_index}) must come AFTER the opaque \
+             background fill (index {bg_index}) so it paints on top instead of being hidden under it"
         );
     }
 }
