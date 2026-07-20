@@ -81,8 +81,16 @@ impl Layer {
     }
     /// Builds a Layer directly from an already-shaped, row-major cell buffer. The caller owns the
     /// width/height bookkeeping (same externally-tracked-dimensions convention `blank()` already
-    /// relies on) — used by `resize_document` to assemble a resized layer's contents.
-    pub(crate) fn from_cells(cells: Vec<Cell>) -> Self {
+    /// relies on) — used by `resize_document` to assemble a resized layer's contents. The
+    /// dimensions are taken purely to assert the `len == width*height` invariant at construction:
+    /// it otherwise survives on caller discipline alone, and a mis-sized layer would surface as a
+    /// distant index panic (e.g. in `resize_layer`) instead of at its source.
+    pub(crate) fn from_cells(cells: Vec<Cell>, width: u16, height: u16) -> Self {
+        debug_assert_eq!(
+            cells.len(),
+            width as usize * height as usize,
+            "Layer buffer must be exactly width*height cells"
+        );
         Layer { cells }
     }
 }
@@ -320,6 +328,16 @@ mod tests {
         // neighbours untouched
         assert_eq!(doc.cell(0, 2, 2), Some(&Cell::BLANK));
         assert_eq!(doc.cell(0, 4, 2), Some(&Cell::BLANK));
+    }
+
+    /// The `cells.len() == width*height` invariant is asserted at construction (debug builds)
+    /// rather than surviving on caller discipline alone — a mis-sized buffer must fail at its
+    /// source, not as a distant index panic once a multi-layer feature makes it reachable.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "width*height")]
+    fn from_cells_with_a_mis_sized_buffer_panics_in_debug_builds() {
+        let _ = Layer::from_cells(vec![Cell::BLANK; 7], 4, 2);
     }
 
     #[test]

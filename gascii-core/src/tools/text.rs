@@ -75,7 +75,8 @@ impl TextBurst {
 
 /// Click places a cursor; typing writes width-validated glyphs through the plane mask at the
 /// cursor, advancing right (no wrap — stops at the right edge); Backspace deletes leftward and
-/// no-ops at the anchor column; Enter returns to the anchor column on the next row (stops, cursor
+/// no-ops at the anchor column or column 0 (arrows can move the cursor left of the anchor);
+/// Enter returns to the anchor column on the next row (stops, cursor
 /// goes inert, at the bottom edge); arrows navigate without writing.
 #[derive(Default)]
 pub struct TextTool {
@@ -117,8 +118,8 @@ impl Tool for TextTool {
             }
             ToolEvent::Backspace => {
                 let Some((cx, cy)) = self.cursor else { return ToolResponse::Idle };
-                if cx == self.start_x {
-                    return ToolResponse::Active; // anchor column: no-op
+                if cx == 0 || cx == self.start_x {
+                    return ToolResponse::Active; // anchor column or left edge: no-op
                 }
                 let nx = cx - 1;
                 self.burst.write(nx, cy, Cell::BLANK, ctx.mask, doc, ctx.layer);
@@ -274,6 +275,40 @@ mod tests {
         tool.update(ToolEvent::Char('z'), &tctx, &doc);
         assert_eq!(tool.pending()[0].x, 4);
         assert_eq!(tool.pending()[0].y, 4);
+    }
+
+    #[test]
+    fn backspace_at_column_zero_after_arrowing_left_of_anchor_is_a_no_op() {
+        let doc = Document::new(20, 20);
+        let mut tool = TextTool::new();
+        let tctx = ctx(PlaneMask::ALL);
+        tool.update(ToolEvent::Press { x: 5, y: 5 }, &tctx, &doc);
+        for _ in 0..5 {
+            tool.update(ToolEvent::Arrow(Direction::Left), &tctx, &doc);
+        }
+        assert_eq!(tool.caret(), Some((0, 5)));
+        tool.update(ToolEvent::Backspace, &tctx, &doc); // must not underflow past column 0
+        assert_eq!(tool.caret(), Some((0, 5)), "cursor stays at column 0");
+        assert!(tool.pending().is_empty());
+        // Typing still lands at the real cursor cell.
+        tool.update(ToolEvent::Char('z'), &tctx, &doc);
+        assert_eq!((tool.pending()[0].x, tool.pending()[0].y), (0, 5));
+    }
+
+    #[test]
+    fn backspace_left_of_anchor_but_right_of_column_zero_deletes_leftward() {
+        let doc = Document::new(20, 20);
+        let mut tool = TextTool::new();
+        let tctx = ctx(PlaneMask::ALL);
+        tool.update(ToolEvent::Press { x: 5, y: 5 }, &tctx, &doc);
+        for _ in 0..3 {
+            tool.update(ToolEvent::Arrow(Direction::Left), &tctx, &doc);
+        }
+        assert_eq!(tool.caret(), Some((2, 5)));
+        tool.update(ToolEvent::Backspace, &tctx, &doc); // deletes (1,5), cursor -> (1,5)
+        assert_eq!(tool.caret(), Some((1, 5)));
+        assert_eq!(tool.pending().len(), 1);
+        assert_eq!((tool.pending()[0].x, tool.pending()[0].y), (1, 5));
     }
 
     #[test]

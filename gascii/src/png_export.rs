@@ -60,34 +60,7 @@ fn blend_pixel(img: &mut image::RgbaImage, x: u32, y: u32, color: Rgba) {
     px.0 = composite_over(color, px.0);
 }
 
-/// Scales `src`'s RGB by its own per-pixel alpha, returning a premultiplied copy. `image`'s own
-/// `imageops::resize` assumes premultiplied alpha for any image whose alpha isn't constant across
-/// pixels — resizing straight alpha directly lets a transparent pixel's (otherwise invisible) RGB
-/// bleed into its opaque neighbors near a soft or hard alpha edge. A fully-opaque source (`a == 255`
-/// everywhere) is unchanged by this step, so the common "backdrop photo" case is unaffected.
-fn premultiply(src: &image::RgbaImage) -> image::RgbaImage {
-    let mut out = src.clone();
-    for px in out.pixels_mut() {
-        let a = px.0[3] as f32 / 255.0;
-        px.0[0] = (px.0[0] as f32 * a).round() as u8;
-        px.0[1] = (px.0[1] as f32 * a).round() as u8;
-        px.0[2] = (px.0[2] as f32 * a).round() as u8;
-    }
-    out
-}
-
-/// Reverses `premultiply` on a single resized pixel, returning straight alpha for the blend loop
-/// below (which, via `blend_pixel`/`composite_over`, expects straight alpha throughout). `a == 0`
-/// has no recoverable color (the premultiplied RGB is `0` regardless of what it originally was) and
-/// is returned as fully transparent black, matching `composite_over`'s own `out_a == 0` guard.
-fn unpremultiply(p: [u8; 4]) -> [u8; 4] {
-    let a = p[3];
-    if a == 0 {
-        return [0, 0, 0, 0];
-    }
-    let un = |c: u8| -> u8 { (c as f32 * 255.0 / a as f32).round().clamp(0.0, 255.0) as u8 };
-    [un(p[0]), un(p[1]), un(p[2]), a]
-}
+use crate::image_bg::{premultiply, unpremultiply};
 
 /// Rasterizes `doc`'s composited cells at `cell_px` pixels per cell into a straight-alpha RGBA8
 /// pixel buffer (row-major, `4 * width * height` bytes) plus its `(width, height)`. `opaque_bg`

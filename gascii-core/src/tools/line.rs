@@ -12,6 +12,11 @@ use crate::model::{Cell, Document};
 #[derive(Default)]
 pub struct Line {
     anchor: Option<(u16, u16)>,
+    /// Latest Press/Drag cursor plus a snapshot of its `ToolCtx`, held so `resync` can re-run
+    /// `recompute` against a document that changed underneath the gesture (Clear, undo/redo, the
+    /// other binding's commit). The geometry depends only on anchor+cursor, so a full recompute
+    /// refreshes joins and mask composition without altering the previewed shape.
+    cur: Option<((u16, u16), ToolCtx)>,
     pending: Vec<PendingCell>,
     buf: Vec<(u16, u16)>,
     fp: Vec<(u16, u16)>,
@@ -80,10 +85,12 @@ impl Tool for Line {
         match ev {
             ToolEvent::Press { x, y } => {
                 self.anchor = Some((x, y));
+                self.cur = Some(((x, y), ctx.clone()));
                 self.recompute((x, y), ctx, doc);
                 ToolResponse::Active
             }
             ToolEvent::Drag { x, y } => {
+                self.cur = Some(((x, y), ctx.clone()));
                 self.recompute((x, y), ctx, doc);
                 ToolResponse::Active
             }
@@ -91,10 +98,12 @@ impl Tool for Line {
                 let edit = diff_pending(&self.pending, doc, ctx.layer);
                 self.pending.clear();
                 self.anchor = None;
+                self.cur = None;
                 ToolResponse::Commit(edit)
             }
             ToolEvent::Cancel => {
                 self.anchor = None;
+                self.cur = None;
                 self.pending.clear();
                 ToolResponse::Idle
             }
@@ -104,6 +113,12 @@ impl Tool for Line {
 
     fn pending(&self) -> &[PendingCell] {
         &self.pending
+    }
+
+    fn resync(&mut self, doc: &Document, layer: usize) {
+        let Some((cur, mut ctx)) = self.cur.clone() else { return };
+        ctx.layer = layer;
+        self.recompute(cur, &ctx, doc);
     }
 }
 
@@ -246,6 +261,36 @@ mod tests {
         let resp = line.update(ToolEvent::Cancel, &tctx, &doc);
         assert!(matches!(resp, ToolResponse::Idle));
         assert!(line.pending().is_empty());
+    }
+
+    /// A mutation landing between the final Drag and Release (the only window a Drag can't
+    /// self-heal) must be reflected by `resync`: joins recompute against the mutated document and
+    /// masked planes recompose, so Release never commits press-time content back over it.
+    #[test]
+    fn resync_after_external_clear_recomputes_joins_against_the_mutated_document() {
+        let mut doc = Document::new(10, 10);
+        for y in 0..10u16 {
+            doc.set_cell(0, 5, y, Cell { ch: '│', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        }
+        let tctx = ctx(PlaneMask::ALL, '#');
+        let mut line = drag(&doc, &tctx, (2, 3), (8, 3));
+        assert!(line.pending().iter().any(|p| p.cell.ch == '┼'), "crossing joins pre-mutation");
+
+        // Simulate a Clear landing after the final Drag.
+        for y in 0..10u16 {
+            doc.set_cell(0, 5, y, Cell::BLANK);
+        }
+        line.resync(&doc, 0);
+
+        let resp = line.update(ToolEvent::Release, &tctx, &doc);
+        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
+            panic!("expected a committed edit");
+        };
+        assert_eq!(cells.len(), 7);
+        assert!(
+            cells.iter().all(|c| c.after.ch == '─'),
+            "the vanished vertical run must not leave a stale '┼' join"
+        );
     }
 
     #[test]

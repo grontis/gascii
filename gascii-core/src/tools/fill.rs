@@ -4,12 +4,18 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use super::{diff_pending, mask_apply, PendingCell, Tool, ToolCtx, ToolEvent, ToolResponse};
+use super::{diff_pending, mask_apply, PendingCell, PlaneMask, Tool, ToolCtx, ToolEvent, ToolResponse};
 use crate::model::{Cell, Document};
 
 #[derive(Default)]
 pub struct FloodFill {
     pending: Vec<PendingCell>,
+    /// The Press-time `(proposed, mask)` inputs, held so `resync` can recompose every pending
+    /// cell against the live document. The flood *region* stays pinned at Press: recomputing it
+    /// against a mutated document could balloon it far beyond what the preview showed (a Clear
+    /// would turn a bounded fill into a whole-canvas one), so the previewed shape is the contract
+    /// and only the composition refreshes.
+    source: Option<(Cell, PlaneMask)>,
 }
 
 impl FloodFill {
@@ -23,11 +29,13 @@ impl Tool for FloodFill {
         match ev {
             ToolEvent::Press { x, y } => {
                 self.pending.clear();
+                self.source = None;
                 if !doc.in_bounds(x, y) {
                     return ToolResponse::Active;
                 }
                 let target = doc.cell(ctx.layer, x, y).copied().unwrap_or(Cell::BLANK);
                 let proposed = Cell { ch: ctx.glyph, fg: ctx.fg, bg: ctx.bg };
+                self.source = Some((proposed, ctx.mask));
 
                 // Iterative worklist — never recursion: a full 1024x1024 canvas is ~1M cells and
                 // would overflow the stack if this were a recursive flood.
@@ -68,10 +76,12 @@ impl Tool for FloodFill {
             ToolEvent::Release => {
                 let edit = diff_pending(&self.pending, doc, ctx.layer);
                 self.pending.clear();
+                self.source = None;
                 ToolResponse::Commit(edit)
             }
             ToolEvent::Cancel => {
                 self.pending.clear();
+                self.source = None;
                 ToolResponse::Idle
             }
             _ => ToolResponse::Active,
@@ -80,6 +90,18 @@ impl Tool for FloodFill {
 
     fn pending(&self) -> &[PendingCell] {
         &self.pending
+    }
+
+    /// Recomposes every pending cell against `doc`'s current content. Without this, a mutation
+    /// landing between Press and Release (Clear, undo/redo, the other binding's commit) leaves
+    /// the Press-time composition in `pending`, and Release's `diff_pending` would commit it
+    /// wholesale — re-imposing the superseded content, on masked-off planes especially.
+    fn resync(&mut self, doc: &Document, layer: usize) {
+        let Some((proposed, mask)) = self.source else { return };
+        for p in &mut self.pending {
+            let current = doc.cell(layer, p.x, p.y).copied().unwrap_or(Cell::BLANK);
+            p.cell = mask_apply(current, proposed, mask);
+        }
     }
 }
 
@@ -236,6 +258,65 @@ mod tests {
         assert!(fill.pending().is_empty());
         let resp = fill.update(ToolEvent::Release, &tctx, &doc);
         assert!(matches!(resp, ToolResponse::Commit(None)));
+    }
+
+    /// A document mutation landing between Press and Release (a Clear, an undo/redo, the other
+    /// binding's commit) must not be silently reverted by the fill's Release: `resync` recomposes
+    /// the held region against the mutated document, so masked-off planes commit the document's
+    /// *current* content, never the Press-time snapshot.
+    #[test]
+    fn resync_after_external_clear_recomposes_instead_of_reimposing_stale_content() {
+        let mut doc = Document::new(3, 1);
+        let colored = Cell { ch: 'x', fg: Rgba(1, 1, 1, 255), bg: Rgba(7, 7, 7, 255) };
+        for x in 0..3u16 {
+            doc.set_cell(0, x, 0, colored);
+        }
+        let mask = PlaneMask { glyph: true, bg: false };
+        let tctx = ctx(mask, '#', Rgba(9, 9, 9, 255), Rgba(2, 2, 2, 255));
+        let mut fill = FloodFill::new();
+        fill.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &doc);
+        assert_eq!(fill.pending().len(), 3);
+        assert!(fill.pending().iter().all(|p| p.cell.bg == colored.bg), "press-time composition keeps existing bg");
+
+        // Simulate a Clear landing mid-gesture.
+        for x in 0..3u16 {
+            doc.set_cell(0, x, 0, Cell::BLANK);
+        }
+        fill.resync(&doc, 0);
+
+        let resp = fill.update(ToolEvent::Release, &tctx, &doc);
+        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
+            panic!("expected a committed edit");
+        };
+        assert_eq!(cells.len(), 3, "the previewed region still commits");
+        for c in &cells {
+            assert_eq!(c.after.ch, '#');
+            assert_eq!(c.after.bg, Cell::BLANK.bg, "bg masked off: the cleared bg must survive, not the press-time bg");
+            assert_eq!(c.before, Cell::BLANK, "before must be the post-clear value");
+        }
+    }
+
+    /// The flood region itself is pinned at Press: an external mutation must not grow it, even
+    /// when the mutated document would flood further.
+    #[test]
+    fn resync_never_regrows_the_region_beyond_the_press_time_flood() {
+        let mut doc = Document::new(5, 1);
+        // A wall at column 2 bounds the press-time flood to columns 0..2.
+        doc.set_cell(0, 2, 0, Cell { ch: '|', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        let tctx = ctx(PlaneMask::ALL, '#', Rgba::WHITE, Rgba::TRANSPARENT);
+        let mut fill = FloodFill::new();
+        fill.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &doc);
+        assert_eq!(fill.pending().len(), 2);
+
+        // The wall vanishes mid-gesture (e.g. an undo); the region must stay as previewed.
+        doc.set_cell(0, 2, 0, Cell::BLANK);
+        fill.resync(&doc, 0);
+        assert_eq!(fill.pending().len(), 2, "resync recomposes, never re-floods");
+        let resp = fill.update(ToolEvent::Release, &tctx, &doc);
+        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
+            panic!("expected a committed edit");
+        };
+        assert!(cells.iter().all(|c| c.x < 2));
     }
 
     #[test]

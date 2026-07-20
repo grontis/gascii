@@ -46,7 +46,7 @@ pub trait CanvasRenderer {
         visible: (u16, u16, u16, u16),
         pending: &[PendingCell],
         hover: &[(u16, u16)],
-        cursor_on: Option<(u16, u16)>,
+        caret: Option<(u16, u16, bool)>,
         selection: Option<SelectionView>,
     );
 }
@@ -65,7 +65,7 @@ impl CanvasRenderer for NaiveRenderer {
         visible: (u16, u16, u16, u16),
         pending: &[PendingCell],
         hover: &[(u16, u16)],
-        cursor_on: Option<(u16, u16)>,
+        caret: Option<(u16, u16, bool)>,
         selection: Option<SelectionView>,
     ) {
         let (x0, y0, x1, y1) = visible;
@@ -142,11 +142,17 @@ impl CanvasRenderer for NaiveRenderer {
             painter.rect_stroke(rect, 0.0, Stroke::new(1.0, ACCENT), StrokeKind::Inside);
         }
 
-        // The text caret stays a solid block — it marks an insertion point rather than a target, and
-        // it blinks, so it must read differently from the cell cursor.
-        if let Some((cx, cy)) = cursor_on {
+        // The text caret: a solid block during the blink's on-phase — it marks an insertion point
+        // rather than a target, and it blinks, so it must read differently from the cell cursor —
+        // plus a persistent underscore so the insertion point never fully vanishes between blinks.
+        if let Some((cx, cy, block_on)) = caret {
             let rect = Rect::from_min_size(vp.cell_to_screen(cx, cy, cell, origin), cell);
-            painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 120));
+            if block_on {
+                painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 120));
+            }
+            let h = (cell.y * 0.12).max(1.0);
+            let underscore = Rect::from_min_max(Pos2::new(rect.min.x, rect.max.y - h), rect.max);
+            painter.rect_filled(underscore, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 200));
         }
 
         if let Some(marquee) = selection.and_then(|s| s.marquee) {
@@ -251,6 +257,13 @@ pub(crate) fn tool_ctx(app: &GasciiApp, b: Binding) -> gascii_core::ToolCtx {
     } else {
         stamp.size
     };
+    // Only the density brush reads `density`/`ramp`; for every other tool the ramp clone would
+    // be a per-drag-frame allocation on the stroke hot path for data it ignores.
+    let ramp = if app.slot(b).kind == ToolKind::Brush {
+        app.ramps[app.active_ramp].chars.clone()
+    } else {
+        Vec::new()
+    };
     gascii_core::ToolCtx {
         layer: 0,
         glyph: app.active_glyph,
@@ -258,7 +271,7 @@ pub(crate) fn tool_ctx(app: &GasciiApp, b: Binding) -> gascii_core::ToolCtx {
         bg: app.active_bg,
         mask: app.mask,
         density: app.density_mode,
-        ramp: app.ramps[app.active_ramp].chars.clone(),
+        ramp,
         size,
         shape: stamp.shape,
     }
@@ -316,15 +329,22 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
     let ctx = ui.ctx().clone();
     let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
     if app.pending_fit {
-        app.viewport
-            .fit_to_window(ui.available_size(), DESK_MARGIN, app.doc.extent(), &ctx);
         app.pending_fit = false;
-        app.kiosk_last_fit_size = Some(ui.available_size());
+        // Dropped mid-stroke, same policy as `pending_step_zoom`: an unconditional recenter
+        // would remap the still pointer to a different cell under a live gesture.
+        if !app.stroke_in_progress() {
+            app.viewport
+                .fit_to_window(ui.available_size(), DESK_MARGIN, app.doc.extent(), &ctx);
+            app.kiosk_last_fit_size = Some(ui.available_size());
+        }
     } else if is_fullscreen {
         // Kiosk's zoom stays "auto": re-fit whenever the canvas area's own size changes (window
         // resize, monitor change, sidebar geometry change), but not unconditionally every frame.
+        // Held off (not skipped) mid-stroke — same reason as `pending_fit`/`pending_step_zoom`
+        // above: a refit remaps the still pointer to a different cell under a live gesture. The
+        // size mismatch persists, so the refit lands on the first frame after release.
         let avail = ui.available_size();
-        if app.kiosk_last_fit_size != Some(avail) {
+        if app.kiosk_last_fit_size != Some(avail) && !app.stroke_in_progress() {
             app.viewport.fit_to_window(avail, DESK_MARGIN, app.doc.extent(), &ctx);
             app.kiosk_last_fit_size = Some(avail);
         }
@@ -376,6 +396,21 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
             // No active gesture: reset rather than let a stale accumulator from a prior pinch
             // trigger an unexpected zoom on the very first frame of the next one.
             app.pinch_zoom_accum = 1.0;
+        }
+
+        // Precedence 1c: deferred step zoom (`+`/`-` chords, View menu, status bar). Anchored on
+        // the pointer when it's over the canvas — the same contract that makes the wheel path
+        // safe — else on the viewport's visible center. Dropped (not held) mid-stroke: an anchored
+        // zoom keeps the pointer's *cell* fixed but a keyboard zoom isn't under the pointer's
+        // control, so firing it into a live stroke still surprises; the user can re-press after
+        // release.
+        if app.pending_step_zoom != 0 {
+            let dir = app.pending_step_zoom;
+            app.pending_step_zoom = 0;
+            if !app.stroke_in_progress() {
+                let anchor = response.hover_pos().unwrap_or_else(|| response.rect.center());
+                app.viewport.zoom_at(anchor, dir, cell, origin);
+            }
         }
 
         // Precedence 2: pan. Middle-drag is always available (never conflicts with a primary
@@ -647,7 +682,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
     if caret.is_some() {
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
     }
-    let caret_cell = caret.filter(|_| cursor_blink_on(ui));
+    let caret_cell = caret.map(|(x, y)| (x, y, cursor_blink_on(ui)));
 
     // Preview target: the binding whose next stamp the outline should show. Mid-stroke that's the
     // gesturing binding itself — the outline then shows where the *next* stamp lands, which is

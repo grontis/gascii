@@ -156,6 +156,12 @@ impl Tool for SelectionTool {
     fn update(&mut self, ev: ToolEvent, ctx: &ToolCtx, doc: &Document) -> ToolResponse {
         match ev {
             ToolEvent::Press { x, y } => {
+                // The app's canvas clamps before events reach any tool, but `ToolEvent` is
+                // constructible by external code — absorb out-of-bounds input like every sibling
+                // tool instead of building a marquee whose rect math assumes in-bounds corners.
+                if !doc.in_bounds(x, y) {
+                    return ToolResponse::Active;
+                }
                 if self.float.is_some() {
                     let regrab = self.float.as_ref().map(|f| (f.contains(x, y), f.dest));
                     if let Some((true, dest)) = regrab {
@@ -187,6 +193,13 @@ impl Tool for SelectionTool {
             ToolEvent::Drag { x, y } => {
                 match self.mode {
                     DragMode::Marquee { anchor } => {
+                        // Same absorb-don't-assume stance as Press; clamping (rather than
+                        // ignoring) keeps an off-edge drag extending the marquee to the border,
+                        // matching what the app's own canvas clamp produces. Move mode below
+                        // needs no clamp: its offset math is i32 and a float may legitimately
+                        // hang off the canvas (clipped at drop).
+                        let x = x.min(doc.width.saturating_sub(1));
+                        let y = y.min(doc.height.saturating_sub(1));
                         self.selection = Some(CellRect::from_corners(anchor, (x, y)));
                     }
                     DragMode::Move { grab, orig_dest } => {
@@ -310,6 +323,28 @@ mod tests {
             ToolResponse::Commit(edit) => edit,
             other => panic!("expected Commit, got {other:?}"),
         }
+    }
+
+    /// `ToolEvent` is constructible by external code, so out-of-bounds coordinates must be
+    /// absorbed like every sibling tool: an OOB Press starts nothing, an OOB Drag clamps the
+    /// marquee to the border instead of building a rect whose math assumes in-bounds corners.
+    #[test]
+    fn out_of_bounds_events_are_absorbed_without_panicking() {
+        let doc = filled_doc(5, 5);
+        let tctx = ctx();
+        let mut sel = SelectionTool::new();
+
+        sel.update(ToolEvent::Press { x: 999, y: 999 }, &tctx, &doc);
+        assert!(sel.selection_overlay().is_none(), "an OOB press must not start a marquee");
+
+        sel.update(ToolEvent::Press { x: 1, y: 1 }, &tctx, &doc);
+        sel.update(ToolEvent::Drag { x: 999, y: 999 }, &tctx, &doc);
+        sel.update(ToolEvent::Release, &tctx, &doc);
+        let rect = sel
+            .selection_overlay()
+            .and_then(|v| v.marquee)
+            .expect("in-bounds press then OOB drag keeps a marquee");
+        assert_eq!((rect.x1, rect.y1), (4, 4), "the OOB drag corner clamps to the border");
     }
 
     #[test]

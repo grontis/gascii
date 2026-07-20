@@ -43,10 +43,12 @@ impl CellPatch {
             .join("\n")
     }
 
-    /// Builds a patch from pasted plain text: rows split on `\n`, each character routed through
-    /// `validate_width` (a rejected character is dropped, counted, and leaves that cell Blank),
-    /// short rows padded with Blank out to the widest row. Returns the patch plus the number of
-    /// rejected characters, so the caller can surface a warning.
+    /// Builds a patch from pasted plain text: rows split on `\n` with any trailing `\r` stripped
+    /// (CRLF clipboard text — the standard Windows form — must not gain a phantom column or count
+    /// its `\r`s as rejected characters), each character routed through `validate_width` (a
+    /// rejected character is dropped, counted, and leaves that cell Blank), short rows padded with
+    /// Blank out to the widest row. Returns the patch plus the number of rejected characters, so
+    /// the caller can surface a warning.
     ///
     /// Pasted text is untrusted external input, exactly like a loaded `.gascii` file: its line
     /// count and per-line character count arrive as unbounded `usize` values with no relation to
@@ -57,7 +59,8 @@ impl CellPatch {
     /// rejected characters, so the caller's existing "N character(s) rejected" warning covers it
     /// too, rather than discarding it silently.
     pub fn from_external_text(text: &str, fg: Rgba, bg: Rgba) -> (CellPatch, usize) {
-        let all_lines: Vec<&str> = text.split('\n').collect();
+        let all_lines: Vec<&str> =
+            text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
         let max_height = Document::MAX_HEIGHT as usize;
         let max_width = Document::MAX_WIDTH as usize;
         let mut dropped = 0usize;
@@ -186,6 +189,27 @@ mod tests {
         let (patch, dropped) = CellPatch::from_external_text("│", Rgba::WHITE, Rgba::TRANSPARENT);
         assert_eq!(dropped, 0);
         assert_eq!(patch.cells[0].ch, '│');
+    }
+
+    #[test]
+    fn from_external_text_strips_crlf_line_endings_without_widening_or_rejecting() {
+        // CRLF is the standard CF_UNICODETEXT form on Windows (Notepad, browsers, Word) — it must
+        // paste identically to the same text with bare '\n' endings: no phantom column from the
+        // '\r', no spurious rejected-character count.
+        let (patch, dropped) = CellPatch::from_external_text("ab\r\ncd\r\n", Rgba::WHITE, Rgba::TRANSPARENT);
+        assert_eq!(dropped, 0, "\\r must not count as a rejected character");
+        assert_eq!(patch.width, 2, "\\r must not widen the measured row");
+        assert_eq!(patch.height, 3, "trailing CRLF yields a final empty row, same as trailing \\n");
+        let chars: Vec<char> = patch.cells.iter().map(|c| c.ch).collect();
+        assert_eq!(chars, vec!['a', 'b', 'c', 'd', ' ', ' ']);
+    }
+
+    #[test]
+    fn from_external_text_crlf_matches_lf_exactly() {
+        let (crlf, d1) = CellPatch::from_external_text("x\r\nyz", Rgba::WHITE, Rgba::TRANSPARENT);
+        let (lf, d2) = CellPatch::from_external_text("x\nyz", Rgba::WHITE, Rgba::TRANSPARENT);
+        assert_eq!(d1, d2);
+        assert_eq!(crlf, lf);
     }
 
     #[test]

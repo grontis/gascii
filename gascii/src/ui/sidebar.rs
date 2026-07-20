@@ -333,29 +333,39 @@ pub(crate) fn palette(ui: &mut Ui, app: &mut GasciiApp, swatch: f32, glyph_px: f
         app.palette_scroll_target = Some(page);
     }
 
+    // Picks are deferred to the end of the frame (same pattern as inside swatch_row): the rows
+    // only need the active glyph and a `&[char]`, so no page names or glyph vecs get cloned per
+    // frame just to route around a borrow conflict.
+    let active_glyph = app.active_glyph;
+    let mut picked: Option<char> = None;
     if !app.recent_glyphs.is_empty() {
         widgets::micro_label(ui, "RECENT");
-        let recent = app.recent_glyphs.clone();
-        swatch_row(ui, app, &recent, swatch, glyph_px);
+        picked = swatch_row(ui, active_glyph, &app.recent_glyphs, swatch, glyph_px);
     }
 
-    // Cloned up front: swatch_row takes &mut app (it calls app.pick_glyph), so an immutable
-    // borrow of app.pages can't survive the loop below.
-    let sections: Vec<(String, Vec<char>)> =
-        app.pages.iter().map(|p| (p.name.to_string(), p.glyphs.clone())).collect();
+    let scroll_target = app.palette_scroll_target;
+    let mut scrolled = false;
     egui::ScrollArea::vertical()
         .max_height(scroll_h)
         .auto_shrink([false, true])
         .show(ui, |ui| {
-            for (i, (name, glyphs)) in sections.iter().enumerate() {
-                let header = widgets::micro_label_response(ui, page_label(name));
-                if app.palette_scroll_target == Some(i) {
+            for (i, p) in app.pages.iter().enumerate() {
+                let header = widgets::micro_label_response(ui, page_label(p.name));
+                if scroll_target == Some(i) {
                     header.scroll_to_me(Some(egui::Align::TOP));
-                    app.palette_scroll_target = None;
+                    scrolled = true;
                 }
-                swatch_row(ui, app, glyphs, swatch, glyph_px);
+                if let Some(ch) = swatch_row(ui, active_glyph, &p.glyphs, swatch, glyph_px) {
+                    picked = Some(ch);
+                }
             }
         });
+    if scrolled {
+        app.palette_scroll_target = None;
+    }
+    if let Some(ch) = picked {
+        app.pick_glyph(ch);
+    }
 }
 
 /// How many swatches fit per row at the given available width and swatch size, floored at
@@ -366,22 +376,22 @@ fn swatch_cols(avail: f32, swatch: f32) -> usize {
     cols.clamp(SWATCH_COLS_MIN as i32, SWATCH_COLS_MAX as i32) as usize
 }
 
-/// A wrapped grid of glyph swatches, reflowing to the sidebar's current width.
-fn swatch_row(ui: &mut Ui, app: &mut GasciiApp, glyphs: &[char], swatch: f32, glyph_px: f32) {
+/// A wrapped grid of glyph swatches, reflowing to the sidebar's current width. Returns the glyph
+/// clicked this frame, if any — the caller applies the pick, so rows can render off shared
+/// borrows of the app's own glyph lists.
+fn swatch_row(ui: &mut Ui, active_glyph: char, glyphs: &[char], swatch: f32, glyph_px: f32) -> Option<char> {
     let mut picked: Option<char> = None;
     let cols = swatch_cols(ui.available_width(), swatch);
     ui.spacing_mut().item_spacing = Vec2::splat(SWATCH_GAP);
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(swatch * cols as f32 + SWATCH_GAP * (cols - 1) as f32);
         for &ch in glyphs {
-            if widgets::glyph_swatch(ui, ch, app.active_glyph == ch, swatch, glyph_px).clicked() {
+            if widgets::glyph_swatch(ui, ch, active_glyph == ch, swatch, glyph_px).clicked() {
                 picked = Some(ch);
             }
         }
     });
-    if let Some(ch) = picked {
-        app.pick_glyph(ch);
-    }
+    picked
 }
 
 /// ANSI 16-color presets offered as a picking aid alongside the truecolor picker. Colors are always

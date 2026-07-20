@@ -105,7 +105,7 @@ fn resize_layer(old: &Layer, old_w: u16, old_h: u16, new_w: u16, new_h: u16, dx:
             cells[dst] = old_cells[src];
         }
     }
-    Layer::from_cells(cells)
+    Layer::from_cells(cells, new_w, new_h)
 }
 
 #[cfg(test)]
@@ -330,6 +330,32 @@ mod tests {
         assert_eq!(doc.cell(0, 0, 0), Some(&Cell::BLANK));
         assert_eq!(doc.cell(0, 2, 0), Some(&Cell::BLANK));
         assert_eq!(doc.cell(0, 3, 0), Some(&Cell::BLANK));
+    }
+
+    /// The shrink counterpart of the odd-delta grow pin above. With a negative odd delta the
+    /// truncation flips direction (`-3/2 == -1`, toward zero) but the *bias* stays consistent:
+    /// the extra cropped cell comes off the end side, mirroring grow's extra padded cell landing
+    /// on the end side.
+    #[test]
+    fn center_anchor_with_an_odd_delta_shrink_crops_the_extra_cell_from_the_end() {
+        // 5x1 -> 2x1: delta -3, (-3)/2 == -1 (truncated toward zero), so offset is -1: kept
+        // columns are [1,2] of [a,b,c,d,e] — one cell cropped from the start, two from the end.
+        let mut doc = Document::new(5, 1);
+        for (x, ch) in ['a', 'b', 'c', 'd', 'e'].into_iter().enumerate() {
+            doc.set_cell(0, x as u16, 0, cell(ch));
+        }
+        let anchor = ResizeAnchor { h: AxisAnchor::Center, v: AxisAnchor::Start };
+        let edit = resize_document(&doc, 2, 1, anchor).unwrap().unwrap();
+        let mut history = History::new();
+        history.apply(&mut doc, edit);
+        assert_eq!(doc.cell(0, 0, 0), Some(&cell('b')), "kept region starts at old column 1");
+        assert_eq!(doc.cell(0, 1, 0), Some(&cell('c')));
+
+        // And the round trip restores every cropped cell byte-exact.
+        assert!(history.undo(&mut doc));
+        for (x, ch) in ['a', 'b', 'c', 'd', 'e'].into_iter().enumerate() {
+            assert_eq!(doc.cell(0, x as u16, 0), Some(&cell(ch)));
+        }
     }
 
     #[test]

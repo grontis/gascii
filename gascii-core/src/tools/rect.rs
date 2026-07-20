@@ -8,6 +8,9 @@ use crate::model::{Cell, Document};
 #[derive(Default)]
 pub struct Rectangle {
     anchor: Option<(u16, u16)>,
+    /// Latest Press/Drag cursor plus a snapshot of its `ToolCtx` — same contract as `Line::cur`:
+    /// lets `resync` re-run `recompute` when the document changes underneath the gesture.
+    cur: Option<((u16, u16), ToolCtx)>,
     pending: Vec<PendingCell>,
 }
 
@@ -78,10 +81,12 @@ impl Tool for Rectangle {
         match ev {
             ToolEvent::Press { x, y } => {
                 self.anchor = Some((x, y));
+                self.cur = Some(((x, y), ctx.clone()));
                 self.recompute((x, y), ctx, doc);
                 ToolResponse::Active
             }
             ToolEvent::Drag { x, y } => {
+                self.cur = Some(((x, y), ctx.clone()));
                 self.recompute((x, y), ctx, doc);
                 ToolResponse::Active
             }
@@ -89,10 +94,12 @@ impl Tool for Rectangle {
                 let edit = diff_pending(&self.pending, doc, ctx.layer);
                 self.pending.clear();
                 self.anchor = None;
+                self.cur = None;
                 ToolResponse::Commit(edit)
             }
             ToolEvent::Cancel => {
                 self.anchor = None;
+                self.cur = None;
                 self.pending.clear();
                 ToolResponse::Idle
             }
@@ -102,6 +109,12 @@ impl Tool for Rectangle {
 
     fn pending(&self) -> &[PendingCell] {
         &self.pending
+    }
+
+    fn resync(&mut self, doc: &Document, layer: usize) {
+        let Some((cur, mut ctx)) = self.cur.clone() else { return };
+        ctx.layer = layer;
+        self.recompute(cur, &ctx, doc);
     }
 }
 
@@ -189,6 +202,33 @@ mod tests {
         assert_eq!(chars[&(5, 2)], '┼');
         // (5,8) is a non-corner bottom-edge cell, same crossing.
         assert_eq!(chars[&(5, 8)], '┼');
+    }
+
+    /// Mirror of `Line`'s resync test: a mutation between the final Drag and Release must be
+    /// picked up by `resync`, never re-imposed by the Release commit.
+    #[test]
+    fn resync_after_external_clear_recomputes_joins_against_the_mutated_document() {
+        let mut doc = Document::new(10, 10);
+        for y in 0..10u16 {
+            doc.set_cell(0, 5, y, Cell { ch: '│', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        }
+        let tctx = ctx(PlaneMask::ALL, '#');
+        let mut rect = drag(&doc, &tctx, (2, 2), (8, 8));
+        assert!(rect.pending().iter().any(|p| p.cell.ch == '┼'), "contact cells join pre-mutation");
+
+        // Simulate a Clear landing after the final Drag.
+        for y in 0..10u16 {
+            doc.set_cell(0, 5, y, Cell::BLANK);
+        }
+        rect.resync(&doc, 0);
+
+        let resp = rect.update(ToolEvent::Release, &tctx, &doc);
+        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
+            panic!("expected a committed edit");
+        };
+        let chars = chars_at(&cells);
+        assert_eq!(chars[&(5, 2)], '─', "the vanished vertical run must not leave a stale '┼' join");
+        assert_eq!(chars[&(5, 8)], '─');
     }
 
     #[test]

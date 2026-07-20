@@ -18,6 +18,12 @@ ctrlc = "3"
 fontdue = "0.9"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
+# Arithmetic overflow panics loudly in release builds too, instead of wrapping silently — the
+# codebase leans on overflow panics to surface index-math bugs, and the cost is negligible for
+# this workload.
+[profile.release]
+overflow-checks = true
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

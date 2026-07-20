@@ -69,6 +69,13 @@ fn apply_backward(doc: &mut Document, edit: &Edit) {
 /// mask) is never represented here — only committed `Edit`s. Every applied edit is tagged with a
 /// monotonically increasing id (`next_id`), used to identify *which* edit currently sits on top of
 /// the undo stack — see `top_edit_id`.
+///
+/// The stacks are deliberately unbounded and `Edit::Cells` is an uncompressed per-cell diff: a
+/// full-canvas fill at the 1024×1024 cap is ~1M `CellEdit`s (~tens of MB) held for the session.
+/// Acceptable at current extents — depth-capping would silently discard undo steps and
+/// compression would complicate the choke point for a problem no real document yet has. Revisit
+/// (byte-budget with oldest-entry eviction, or region/RLE encoding) before raising
+/// `MAX_WIDTH`/`MAX_HEIGHT` or shipping long-session multi-layer workflows.
 #[derive(Default)]
 pub struct History {
     undo_stack: Vec<(u64, Edit)>,
@@ -143,6 +150,33 @@ mod tests {
             fg: Rgba::WHITE,
             bg: Rgba::TRANSPARENT,
         }
+    }
+
+    /// Watched characteristic, not a behavior: a full-canvas edit stores one uncompressed
+    /// `CellEdit` per touched cell — the deliberate unbounded-history tradeoff documented on
+    /// `History`. If this assertion ever breaks (an entry stops being ~cell-count-sized, or
+    /// `CellEdit` grows), the memory math in that tradeoff needs re-deriving.
+    #[test]
+    fn a_full_canvas_edit_costs_one_cell_edit_per_cell() {
+        let doc = Document::new(64, 64);
+        let edit = crate::clear::clear_document(&{
+            let mut d = doc.clone();
+            for y in 0..64u16 {
+                for x in 0..64u16 {
+                    d.set_cell(0, x, y, cell('#'));
+                }
+            }
+            d
+        })
+        .expect("a fully painted canvas must clear to an edit");
+        let Edit::Cells(cells) = &edit else { panic!("expected an Edit::Cells") };
+        assert_eq!(cells.len(), 64 * 64, "one CellEdit per touched cell, no dedup/compression");
+        let entry_bytes = cells.len() * std::mem::size_of::<CellEdit>();
+        assert!(
+            entry_bytes < 1 << 20,
+            "a 64x64 full-canvas entry should stay well under 1 MB; at the 1024x1024 cap the same \
+             edit is 256x this — the documented tens-of-MB ceiling ({entry_bytes} bytes here)"
+        );
     }
 
     #[test]
@@ -507,7 +541,7 @@ mod tests {
             cells[0] = cell('a');
             cells
         };
-        let after_layer = Layer::from_cells(after_cells);
+        let after_layer = Layer::from_cells(after_cells, 8, 8);
         let after = DocSnapshot { extent: DocExtent { width: 8, height: 8 }, layers: vec![after_layer] };
 
         let mut history = History::new();

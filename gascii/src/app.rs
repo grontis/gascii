@@ -378,6 +378,12 @@ pub struct GasciiApp {
     pub(crate) hovered_cell: Option<(u16, u16)>,
     pub(crate) renderer: Box<dyn CanvasRenderer>,
     pub(crate) pending_fit: bool,
+    /// Deferred `+`/`-` zoom request (sign = direction, 0 = none) from the keyboard chords, the
+    /// View menu, or the status bar — none of which have the canvas geometry an anchored zoom
+    /// needs. `canvas::show` applies it through the same cursor-anchored `zoom_at` path as the
+    /// wheel (pointer if hovering, else viewport center), so a mid-stroke zoom can't remap the
+    /// still pointer to a different cell.
+    pub(crate) pending_step_zoom: i32,
     /// The canvas area size `fit_to_window` last ran against while fullscreen — kiosk's "auto"
     /// continuous fit (re-fits only when this stops matching `ui.available_size()`, rather than
     /// unconditionally every frame). `None` outside fullscreen, so re-entering kiosk later always
@@ -606,6 +612,7 @@ impl GasciiApp {
             // Fit on the first frame: a document pinned to the top-left corner of the desk is not
             // "the star", and the viewport's default pan of zero puts it there.
             pending_fit: true,
+            pending_step_zoom: 0,
             kiosk_last_fit_size: None,
             startup_fullscreen: None,
             history: History::new(),
@@ -874,9 +881,17 @@ impl GasciiApp {
     /// Flushing before undo is correct here: it turns "Undo mid-session" into "undo the very edit
     /// that was just committed" (the same edit the flush just committed), matching ordinary
     /// editor conventions.
+    ///
+    /// The undo mutates `self.doc` behind both slots' backs, exactly like `request_redo`'s redo —
+    /// so both re-pin afterward. Today the resync is belt-and-braces (the `flush_all` just
+    /// emptied every session's pending state, and the mid-stroke gates in `handle_keys`/the menu
+    /// keep a live stroke out), but stating it locally means this path's safety no longer hangs
+    /// on two guards defined elsewhere staying exactly as they are.
     pub(crate) fn request_undo(&mut self) {
         self.flush_all();
-        self.history.undo(&mut self.doc);
+        if self.history.undo(&mut self.doc) {
+            self.resync_slots(None);
+        }
     }
 
     /// Redoes the most recently undone edit. Deliberately does *not* flush a pending text burst or
@@ -1000,22 +1015,34 @@ impl GasciiApp {
         self.keyboard_owner = None;
     }
 
-    /// Tool-select (`P`/`E`/`I`/`T`/`F`/`R`/`L`/`S`), undo/redo, and Ctrl+C copy keys. Undo/redo/
-    /// Copy are `Ctrl`-modified chords and stay global (they won't collide with typing into the
-    /// color picker's hex field); the single-letter tool keys are guarded on no widget having
-    /// focus *and* not being mid-text-edit so typing into that hex field, or into the canvas in
-    /// text mode, doesn't get swallowed as a tool switch.
+    /// Tool-select (`P`/`E`/`I`/`T`/`F`/`R`/`L`/`S`), undo/redo, and Ctrl+C copy keys. The
+    /// single-letter tool keys are guarded on no widget having focus *and* not being
+    /// mid-text-edit so typing into the color picker's hex field, or into the canvas in text
+    /// mode, doesn't get swallowed as a tool switch. The undo/redo chords are guarded on widget
+    /// focus alone: a focused `TextEdit` (that hex field lives in a popup, outside
+    /// `modal_open()`'s coverage) runs its own undoer against the same event list `consume_key`
+    /// removes from, so consuming Ctrl+Z here would silently undo a canvas edit instead of the
+    /// field's typo. A canvas text session sets no widget focus, so its Ctrl+Z still reaches the
+    /// document. The remaining chords (save/copy/export/fit) don't collide with `TextEdit`'s
+    /// editing keys and stay global.
     fn handle_keys(&mut self, ui: &mut egui::Ui) {
         let owner_kind = self.keyboard_owner().map(|b| self.slot(b).kind);
-        let focused = ui.memory(|m| m.focused().is_some()) || suppresses_tool_shortcuts(owner_kind);
+        let widget_focused = ui.memory(|m| m.focused().is_some());
+        let focused = widget_focused || suppresses_tool_shortcuts(owner_kind);
         let is_fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
         let (redo_shift, undo, redo_y, save, copy_all, copy, export_dialog, fit) = ui.input_mut(|i| {
             // Cmd/Ctrl+Shift+Z must be consumed before the plain Cmd/Ctrl+Z pattern, since
             // `matches_logically` ignores extra Shift/Alt — checking undo first would swallow
             // the redo shortcut's Z key press. Same reasoning for Ctrl+Shift+C vs plain Ctrl+C.
-            let redo_shift = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z);
-            let undo = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
-            let redo_y = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y);
+            let (redo_shift, undo, redo_y) = if widget_focused {
+                (false, false, false)
+            } else {
+                (
+                    i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y),
+                )
+            };
             let save = i.consume_key(egui::Modifiers::COMMAND, egui::Key::S);
             let copy_all = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::C);
             let copy = i.consume_key(egui::Modifiers::COMMAND, egui::Key::C);
@@ -1334,12 +1361,12 @@ impl GasciiApp {
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!is_fs));
     }
 
-    /// Zooms by one step, keeping the viewport's own centring (there is no pointer to anchor to
-    /// from a menu item, a keyboard chord, or the status bar's buttons — all three call this).
+    /// Requests a one-step zoom (menu item, keyboard chord, status bar — all three call this).
+    /// Deferred to `canvas::show` via `pending_step_zoom`, which has the geometry to anchor it on
+    /// the pointer like the wheel path; applying it here by bumping `zoom_step` directly would
+    /// remap the pointer to a different cell mid-stroke.
     pub(crate) fn step_zoom(&mut self, dir: i32) {
-        let next = (self.viewport.zoom_step as i32 + dir)
-            .clamp(0, crate::viewport::ZOOM_SCALES.len() as i32 - 1);
-        self.viewport.zoom_step = next as usize;
+        self.pending_step_zoom += dir;
     }
 
     fn open_export_dialog(&mut self) {
@@ -1555,7 +1582,13 @@ impl GasciiApp {
                                 egui::Vec2::new(100.0, 20.0),
                                 egui::Slider::new(&mut bg.export_opacity, 0.0..=1.0).show_value(false),
                             );
-                            changed |= slider.changed();
+                            // Not `slider.changed()` alone: every bump invalidates
+                            // `ExportPreviewKey`, which re-rasterizes the whole document and
+                            // re-uploads a texture — per mid-drag frame, a reproducible stutter
+                            // on large documents. The preview refreshes when the drag ends; a
+                            // discrete click/keyboard change refreshes immediately; the % readout
+                            // tracks live either way.
+                            changed |= slider.drag_stopped() || (slider.changed() && !slider.dragged());
                             ui.label(
                                 egui::RichText::new(format!("{:.0}%", bg.export_opacity * 100.0))
                                     .font(fonts::mono_id(fonts::size::LABEL))
@@ -1698,7 +1731,7 @@ impl GasciiApp {
                 } else {
                     export_text_untrimmed(&self.doc)
                 };
-                match std::fs::write(&path, text) {
+                match write_atomic(&path, text.as_bytes()) {
                     Ok(()) => {
                         self.last_error = None;
                         self.close_export_dialog();
@@ -1713,7 +1746,7 @@ impl GasciiApp {
                 let opaque_bg = (!self.export.transparent).then_some(self.doc.background);
                 let bg_image = self.image_bg.as_ref().filter(|b| b.use_in_export).map(|b| (&b.pixels, b.export_opacity));
                 match png_export::export_png(&self.doc, self.export.cell_px(), opaque_bg, bg_image) {
-                    Ok(bytes) => match std::fs::write(&path, bytes) {
+                    Ok(bytes) => match write_atomic(&path, &bytes) {
                         Ok(()) => {
                             self.last_error = None;
                             self.close_export_dialog();
@@ -3073,19 +3106,19 @@ mod tests {
         }
     }
 
-    /// `step_zoom` clamps at both ends of `ZOOM_SCALES` rather than panicking or wrapping —
-    /// exercised via the same method the View menu, the keyboard chords, and the status bar's
-    /// buttons all now share.
+    /// `step_zoom` is a deferred request — it accumulates into `pending_step_zoom` for
+    /// `canvas::show` to apply through the anchored `zoom_at` path (whose end-of-scale clamping
+    /// the viewport tests cover). Mutating `zoom_step` directly here would bypass both the
+    /// anchoring and the mid-stroke gate.
     #[test]
-    fn step_zoom_clamps_at_both_ends_of_the_scale_list() {
+    fn step_zoom_defers_into_pending_step_zoom_without_touching_the_viewport() {
         let mut app = GasciiApp::headless();
-        app.viewport.zoom_step = 0;
-        app.step_zoom(-1);
-        assert_eq!(app.viewport.zoom_step, 0, "must not go below the smallest step");
-
-        app.viewport.zoom_step = crate::viewport::ZOOM_SCALES.len() - 1;
+        let before = app.viewport.zoom_step;
         app.step_zoom(1);
-        assert_eq!(app.viewport.zoom_step, crate::viewport::ZOOM_SCALES.len() - 1, "must not exceed the largest step");
+        app.step_zoom(1);
+        app.step_zoom(-1);
+        assert_eq!(app.pending_step_zoom, 1, "requests accumulate by sign");
+        assert_eq!(app.viewport.zoom_step, before, "the viewport itself must be untouched until canvas::show applies it");
     }
 
     /// `modal_open()` is the one gate `canvas.rs`'s raw-input polling relies on — it must report
