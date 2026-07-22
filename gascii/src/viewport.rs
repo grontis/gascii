@@ -225,6 +225,18 @@ impl Viewport {
     }
 }
 
+/// Thin delegation to `Viewport`'s own inherent methods — the two facts a plugin's `CanvasRenderer`
+/// needs, without handing it the rest of `Viewport`'s app-only surface.
+impl gascii_plugin_api::CellGrid for Viewport {
+    fn cell_to_screen(&self, x: u16, y: u16, cell: Vec2, origin: Pos2) -> Pos2 {
+        Viewport::cell_to_screen(self, x, y, cell, origin)
+    }
+
+    fn font_px(&self) -> f32 {
+        Viewport::font_px(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +257,19 @@ mod tests {
         let vp = Viewport::default();
         assert_eq!(vp.scale(), 1.0);
         assert_eq!(vp.font_px(), 16.0);
+    }
+
+    /// The `CellGrid` impl must be pure delegation — a plugin's renderer calling through the trait
+    /// object must see exactly what `gascii`'s own code sees calling the inherent methods directly.
+    #[test]
+    fn viewport_cell_grid_impl_matches_its_inherent_methods() {
+        use gascii_plugin_api::CellGrid;
+
+        let vp = Viewport { zoom_step: 2, pan: Vec2::new(12.0, -7.0), ..Viewport::default() };
+        let grid: &dyn CellGrid = &vp;
+
+        assert_eq!(grid.font_px(), vp.font_px());
+        assert_eq!(grid.cell_to_screen(5, 9, cell(), origin()), vp.cell_to_screen(5, 9, cell(), origin()));
     }
 
     #[test]

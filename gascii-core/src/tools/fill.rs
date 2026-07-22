@@ -33,7 +33,7 @@ impl Tool for FloodFill {
                 if !doc.in_bounds(x, y) {
                     return ToolResponse::Active;
                 }
-                let target = doc.cell(ctx.layer, x, y).copied().unwrap_or(Cell::BLANK);
+                let target = doc.cell_at(ctx.frame, ctx.layer, x, y).copied().unwrap_or(Cell::BLANK);
                 let proposed = Cell { ch: ctx.glyph, fg: ctx.fg, bg: ctx.bg };
                 self.source = Some((proposed, ctx.mask));
 
@@ -44,7 +44,7 @@ impl Tool for FloodFill {
                 worklist.push_back((x, y));
                 visited.insert((x, y));
                 while let Some((cx, cy)) = worklist.pop_front() {
-                    let cell = doc.cell(ctx.layer, cx, cy).copied().unwrap_or(Cell::BLANK);
+                    let cell = doc.cell_at(ctx.frame, ctx.layer, cx, cy).copied().unwrap_or(Cell::BLANK);
                     self.pending.push(PendingCell { x: cx, y: cy, cell: mask_apply(cell, proposed, ctx.mask) });
 
                     let mut neighbors: [Option<(u16, u16)>; 4] = [None; 4];
@@ -64,7 +64,7 @@ impl Tool for FloodFill {
                         if !visited.insert(n) {
                             continue;
                         }
-                        let ncell = doc.cell(ctx.layer, n.0, n.1).copied().unwrap_or(Cell::BLANK);
+                        let ncell = doc.cell_at(ctx.frame, ctx.layer, n.0, n.1).copied().unwrap_or(Cell::BLANK);
                         if ncell == target {
                             worklist.push_back(n);
                         }
@@ -74,7 +74,7 @@ impl Tool for FloodFill {
             }
             ToolEvent::Drag { .. } => ToolResponse::Active, // fill is instant on Press; drag previews nothing new
             ToolEvent::Release => {
-                let edit = diff_pending(&self.pending, doc, ctx.layer);
+                let edit = diff_pending(&self.pending, doc, ctx.frame, ctx.layer);
                 self.pending.clear();
                 self.source = None;
                 ToolResponse::Commit(edit)
@@ -96,10 +96,10 @@ impl Tool for FloodFill {
     /// landing between Press and Release (Clear, undo/redo, the other binding's commit) leaves
     /// the Press-time composition in `pending`, and Release's `diff_pending` would commit it
     /// wholesale — re-imposing the superseded content, on masked-off planes especially.
-    fn resync(&mut self, doc: &Document, layer: usize) {
+    fn resync(&mut self, doc: &Document, frame: usize, layer: usize) {
         let Some((proposed, mask)) = self.source else { return };
         for p in &mut self.pending {
-            let current = doc.cell(layer, p.x, p.y).copied().unwrap_or(Cell::BLANK);
+            let current = doc.cell_at(frame, layer, p.x, p.y).copied().unwrap_or(Cell::BLANK);
             p.cell = mask_apply(current, proposed, mask);
         }
     }
@@ -113,6 +113,7 @@ mod tests {
 
     fn ctx(mask: PlaneMask, glyph: char, fg: Rgba, bg: Rgba) -> ToolCtx {
         ToolCtx {
+            frame: 0,
             layer: 0,
             glyph,
             fg,
@@ -249,6 +250,32 @@ mod tests {
         }
     }
 
+    /// `Press`'s flood-fill reads (`target`/`cell`/`ncell`) must consult `ctx.frame`, not `doc`'s
+    /// active frame. A single cell whose bg differs only between frames, masked off so the read
+    /// frame's bg survives into `after`, is what makes the defect visible: with identical or
+    /// blank content on both frames the wrong-frame read is indistinguishable from the right one.
+    #[test]
+    fn press_reads_the_flood_region_and_composition_from_ctx_frame_not_the_documents_active_frame() {
+        let mut doc = Document::new(1, 1);
+        doc.set_cell(0, 0, 0, Cell { ch: ' ', fg: Rgba::WHITE, bg: Rgba(1, 1, 1, 255) });
+        let edit = crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(1, 1)).unwrap();
+        let mut history = crate::edit::History::new();
+        history.apply(&mut doc, edit);
+        doc.set_cell_at(1, 0, 0, 0, Cell { ch: ' ', fg: Rgba::WHITE, bg: Rgba(2, 2, 2, 255) });
+        assert_eq!(doc.active_frame(), 0, "doc's active frame stays 0; only ctx.frame targets frame 1");
+
+        let mask = PlaneMask { glyph: true, bg: false };
+        let mut tctx = ctx(mask, '#', Rgba(9, 9, 9, 255), Rgba(9, 9, 9, 255));
+        tctx.frame = 1;
+        let mut fill = FloodFill::new();
+        fill.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &doc);
+        assert_eq!(
+            fill.pending()[0].cell.bg,
+            Rgba(2, 2, 2, 255),
+            "the masked-off bg plane must carry frame 1's content, not frame 0's active-frame content"
+        );
+    }
+
     #[test]
     fn press_out_of_bounds_yields_an_empty_fill() {
         let doc = Document::new(5, 5);
@@ -282,7 +309,7 @@ mod tests {
         for x in 0..3u16 {
             doc.set_cell(0, x, 0, Cell::BLANK);
         }
-        fill.resync(&doc, 0);
+        fill.resync(&doc, 0, 0);
 
         let resp = fill.update(ToolEvent::Release, &tctx, &doc);
         let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
@@ -310,7 +337,7 @@ mod tests {
 
         // The wall vanishes mid-gesture (e.g. an undo); the region must stay as previewed.
         doc.set_cell(0, 2, 0, Cell::BLANK);
-        fill.resync(&doc, 0);
+        fill.resync(&doc, 0, 0);
         assert_eq!(fill.pending().len(), 2, "resync recomposes, never re-floods");
         let resp = fill.update(ToolEvent::Release, &tctx, &doc);
         let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {

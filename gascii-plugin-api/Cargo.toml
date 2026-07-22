@@ -1,0 +1,14 @@
+[package]
+name = "gascii-plugin-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gascii-core = { path = "../gascii-core" }
+egui = { workspace = true }
+# NOTE: no eframe/winit/wgpu — a plugin never touches the window, only the document/tool model
+# and egui's widget/paint types.
+
+[lints]
+workspace = true

@@ -55,7 +55,7 @@ impl DensityBrush {
             if self.prev_fp.contains(&(fx, fy)) {
                 continue;
             }
-            let current = self.stroke.current(fx, fy, doc, ctx.layer);
+            let current = self.stroke.current(fx, fy, doc, ctx.frame, ctx.layer);
             let current_ramp_index = ctx.ramp.iter().position(|&c| c == current.ch);
             let sample =
                 StrokeSample { position: (fx, fy), timing, current_ramp_index, ramp_len: ctx.ramp.len() };
@@ -68,7 +68,7 @@ impl DensityBrush {
             let idx = intensity_to_index(intensity, ctx.ramp.len());
             let ch = ctx.ramp.get(idx).copied().unwrap_or(ctx.glyph); // defensive: empty-ramp fallback
             let proposed = Cell { ch, fg: ctx.fg, bg: ctx.bg };
-            self.stroke.stamp(fx, fy, proposed, ctx.mask, doc, ctx.layer);
+            self.stroke.stamp(fx, fy, proposed, ctx.mask, doc, ctx.frame, ctx.layer);
         }
         self.prev_fp.clear();
         self.prev_fp.extend(fp.iter().copied());
@@ -103,7 +103,7 @@ impl Tool for DensityBrush {
                 ToolResponse::Active
             }
             ToolEvent::Release => {
-                let edit = self.stroke.finish(doc, ctx.layer);
+                let edit = self.stroke.finish(doc, ctx.frame, ctx.layer);
                 self.last = None;
                 self.prev_fp.clear();
                 self.started = None;
@@ -124,8 +124,8 @@ impl Tool for DensityBrush {
         self.stroke.pending()
     }
 
-    fn resync(&mut self, doc: &Document, layer: usize) {
-        self.stroke.resync(doc, layer);
+    fn resync(&mut self, doc: &Document, frame: usize, layer: usize) {
+        self.stroke.resync(doc, frame, layer);
     }
 }
 
@@ -138,6 +138,7 @@ mod tests {
 
     fn ctx(density: DensityMode, ramp: &str) -> ToolCtx {
         ToolCtx {
+            frame: 0,
             layer: 0,
             glyph: '#',
             fg: Rgba::WHITE,

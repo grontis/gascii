@@ -30,7 +30,7 @@ impl Tool for Pencil {
                 self.stroke.drag(x, y, proposed, ctx, doc);
                 ToolResponse::Active
             }
-            ToolEvent::Release => ToolResponse::Commit(self.stroke.finish(doc, ctx.layer)),
+            ToolEvent::Release => ToolResponse::Commit(self.stroke.finish(doc, ctx.frame, ctx.layer)),
             ToolEvent::Cancel => {
                 self.stroke.cancel();
                 ToolResponse::Idle
@@ -43,8 +43,8 @@ impl Tool for Pencil {
         self.stroke.pending()
     }
 
-    fn resync(&mut self, doc: &Document, layer: usize) {
-        self.stroke.resync(doc, layer);
+    fn resync(&mut self, doc: &Document, frame: usize, layer: usize) {
+        self.stroke.resync(doc, frame, layer);
     }
 }
 
@@ -56,6 +56,7 @@ mod tests {
 
     fn ctx(mask: PlaneMask) -> ToolCtx {
         ToolCtx {
+            frame: 0,
             layer: 0,
             glyph: '#',
             fg: Rgba(1, 2, 3, 255),
@@ -241,5 +242,27 @@ mod tests {
         let resp = pencil.update(ToolEvent::Cancel, &ctx, &doc);
         assert!(matches!(resp, ToolResponse::Idle));
         assert!(pencil.pending().is_empty());
+    }
+
+    /// The undo-safety property Solution 2 exists for: a stroke bound against a non-active frame
+    /// (`ctx.frame`) must produce a `CellEdit` carrying *that* frame, not whatever happens to be
+    /// `doc.active_frame()`.
+    #[test]
+    fn a_stroke_tools_committed_cell_edit_carries_the_ctx_frame_it_was_drawn_against() {
+        let mut doc = Document::new(10, 10);
+        let mut history = crate::edit::History::new();
+        let edit = crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(10, 10)).unwrap();
+        history.apply(&mut doc, edit);
+
+        let mut tctx = ctx(PlaneMask::ALL);
+        tctx.frame = 1;
+        let mut pencil = Pencil::new();
+        pencil.update(ToolEvent::Press { x: 2, y: 2 }, &tctx, &doc);
+        let resp = pencil.update(ToolEvent::Release, &tctx, &doc);
+
+        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
+            panic!("expected a committed edit");
+        };
+        assert!(cells.iter().all(|c| c.frame == 1), "every CellEdit must carry the frame it was drawn against");
     }
 }

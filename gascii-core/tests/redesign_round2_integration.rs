@@ -14,6 +14,7 @@ use gascii_core::{
 
 fn sized_ctx(glyph: char, size: u16, shape: BrushShape) -> ToolCtx {
     ToolCtx {
+        frame: 0,
         layer: 0,
         glyph,
         fg: Rgba::WHITE,

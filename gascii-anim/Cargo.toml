@@ -1,0 +1,14 @@
+[package]
+name = "gascii-anim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+gascii-core = { path = "../gascii-core" }
+gascii-plugin-api = { path = "../gascii-plugin-api" }
+egui = { workspace = true }
+# NOTE: no eframe — this plugin stays windowing-free too, matching gascii-density-brush.
+
+[lints]
+workspace = true

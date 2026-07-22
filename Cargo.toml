@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["gascii-core", "gascii"]
+members = ["gascii-core", "gascii", "gascii-plugin-api", "gascii-density-brush", "gascii-anim"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,11 +12,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 unicode-width = "0.2.2"
 eframe = { version = "0.35", features = ["persistence"] }
+egui = "0.35"
 rfd = "0.17"
 arboard = "3"
 ctrlc = "3"
 fontdue = "0.9"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 
 # Arithmetic overflow panics loudly in release builds too, instead of wrapping silently — the
 # codebase leans on overflow panics to surface index-math bugs, and the cost is negligible for

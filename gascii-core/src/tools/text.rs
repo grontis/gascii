@@ -24,11 +24,12 @@ pub(crate) struct TextBurst {
 }
 
 impl TextBurst {
-    fn write(&mut self, x: u16, y: u16, proposed: Cell, mask: PlaneMask, doc: &Document, layer: usize) {
+    #[allow(clippy::too_many_arguments)]
+    fn write(&mut self, x: u16, y: u16, proposed: Cell, mask: PlaneMask, doc: &Document, frame: usize, layer: usize) {
         if !doc.in_bounds(x, y) {
             return;
         }
-        let doc_before = doc.cell(layer, x, y).copied().unwrap_or(Cell::BLANK);
+        let doc_before = doc.cell_at(frame, layer, x, y).copied().unwrap_or(Cell::BLANK);
         // mask_apply always references doc_before (the pre-burst value), never a prior in-burst
         // write, so a masked-off plane shows the untouched original regardless of how many times
         // the unmasked plane(s) get overwritten within one burst.
@@ -44,14 +45,14 @@ impl TextBurst {
         }
     }
 
-    fn finish(&mut self, layer: usize) -> Option<Edit> {
+    fn finish(&mut self, frame: usize, layer: usize) -> Option<Edit> {
         let mut cell_edits = Vec::with_capacity(self.pending.len());
         for p in &self.pending {
             let before = self.before[&(p.x, p.y)];
             if before == p.cell {
                 continue;
             }
-            cell_edits.push(CellEdit { layer, x: p.x, y: p.y, before, after: p.cell });
+            cell_edits.push(CellEdit { frame, layer, x: p.x, y: p.y, before, after: p.cell });
         }
         self.pending.clear();
         self.index.clear();
@@ -68,8 +69,8 @@ impl TextBurst {
     /// pending result — see `resync_pending` for why the recompose half is load-bearing. Must be
     /// called whenever `doc` changes underneath this burst via a path other than the burst's own
     /// writes (a redo, or another binding's commit or flush).
-    fn resync(&mut self, doc: &Document, layer: usize) {
-        super::resync_pending(&mut self.before, &self.index, &mut self.pending, &self.sources, doc, layer);
+    fn resync(&mut self, doc: &Document, frame: usize, layer: usize) {
+        super::resync_pending(&mut self.before, &self.index, &mut self.pending, &self.sources, doc, frame, layer);
     }
 }
 
@@ -98,7 +99,7 @@ impl Tool for TextTool {
                 if !doc.in_bounds(x, y) {
                     return ToolResponse::Active;
                 }
-                let edit = self.burst.finish(ctx.layer); // flush any prior session in the same call
+                let edit = self.burst.finish(ctx.frame, ctx.layer); // flush any prior session in the same call
                 self.cursor = Some((x, y));
                 self.start_x = x;
                 ToolResponse::Commit(edit)
@@ -112,7 +113,7 @@ impl Tool for TextTool {
                     return ToolResponse::Active; // stopped at right edge, no wrap
                 }
                 let proposed = Cell { ch, fg: ctx.fg, bg: ctx.bg };
-                self.burst.write(cx, cy, proposed, ctx.mask, doc, ctx.layer);
+                self.burst.write(cx, cy, proposed, ctx.mask, doc, ctx.frame, ctx.layer);
                 self.cursor = Some((cx + 1, cy));
                 ToolResponse::Active
             }
@@ -122,7 +123,7 @@ impl Tool for TextTool {
                     return ToolResponse::Active; // anchor column or left edge: no-op
                 }
                 let nx = cx - 1;
-                self.burst.write(nx, cy, Cell::BLANK, ctx.mask, doc, ctx.layer);
+                self.burst.write(nx, cy, Cell::BLANK, ctx.mask, doc, ctx.frame, ctx.layer);
                 self.cursor = Some((nx, cy));
                 ToolResponse::Active
             }
@@ -145,7 +146,7 @@ impl Tool for TextTool {
                 });
                 ToolResponse::Active // pure navigation — never touches the burst
             }
-            ToolEvent::Commit => ToolResponse::Commit(self.burst.finish(ctx.layer)), // cursor unchanged, tool stays active
+            ToolEvent::Commit => ToolResponse::Commit(self.burst.finish(ctx.frame, ctx.layer)), // cursor unchanged, tool stays active
             ToolEvent::Cancel => {
                 self.burst = TextBurst::default();
                 self.cursor = None;
@@ -159,8 +160,8 @@ impl Tool for TextTool {
         self.burst.pending()
     }
 
-    fn resync(&mut self, doc: &Document, layer: usize) {
-        self.burst.resync(doc, layer);
+    fn resync(&mut self, doc: &Document, frame: usize, layer: usize) {
+        self.burst.resync(doc, frame, layer);
     }
 
     fn caret(&self) -> Option<(u16, u16)> {
@@ -175,6 +176,7 @@ mod tests {
 
     fn ctx(mask: PlaneMask) -> ToolCtx {
         ToolCtx {
+            frame: 0,
             layer: 0,
             glyph: '#',
             fg: Rgba(1, 2, 3, 255),
@@ -467,7 +469,7 @@ mod tests {
         // bypassing the burst entirely.
         let externally_written = Cell { ch: 'Z', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) };
         doc.set_cell(0, 5, 5, externally_written);
-        tool.resync(&doc, 0);
+        tool.resync(&doc, 0, 0);
 
         let resp = tool.update(ToolEvent::Commit, &tctx, &doc);
         let edit = commit_edit(resp).unwrap();
@@ -488,7 +490,7 @@ mod tests {
         tool.update(ToolEvent::Char('a'), &tctx, &doc); // touches only (5,5)
 
         doc.set_cell(0, 6, 6, Cell { ch: 'Z', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
-        tool.resync(&doc, 0); // must not start tracking (6,6)
+        tool.resync(&doc, 0, 0); // must not start tracking (6,6)
 
         let resp = tool.update(ToolEvent::Commit, &tctx, &doc);
         let edit = commit_edit(resp).unwrap();

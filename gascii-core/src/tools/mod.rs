@@ -129,6 +129,7 @@ pub fn footprint(center: (u16, u16), size: u16, shape: BrushShape, out: &mut Vec
 /// every other tool ignores them).
 #[derive(Clone, Debug)]
 pub struct ToolCtx {
+    pub frame: usize,
     pub layer: usize,
     pub glyph: char,
     pub fg: Rgba,
@@ -240,7 +241,7 @@ pub trait Tool {
     /// `resync_pending` — or its eventual commit writes the superseded content back over whatever
     /// mutated underneath it. Default no-op, correct only for tools with no cross-call pinned
     /// state (`SelectionTool` reads `before` from the document at drop time).
-    fn resync(&mut self, _doc: &Document, _layer: usize) {}
+    fn resync(&mut self, _doc: &Document, _frame: usize, _layer: usize) {}
     /// Inject a floating stamp (paste) at `at`. Default no-op; only `SelectionTool` overrides it —
     /// mirrors `resync`'s precedent of a default-no-op hook taking non-`Copy` args that serves a
     /// single implementor.
@@ -262,7 +263,7 @@ pub trait Tool {
 /// already matches the document (so a no-op gesture yields no empty undo entry). Shared by every
 /// tool whose commit is "diff the pending overlay against the current document" — fill,
 /// rectangle, line.
-pub(crate) fn diff_pending(pending: &[PendingCell], doc: &Document, layer: usize) -> Option<Edit> {
+pub(crate) fn diff_pending(pending: &[PendingCell], doc: &Document, frame: usize, layer: usize) -> Option<Edit> {
     let mut cell_edits = Vec::with_capacity(pending.len());
     for p in pending {
         // The document can shrink between stamp and commit (a resize applied while a right-click
@@ -271,11 +272,11 @@ pub(crate) fn diff_pending(pending: &[PendingCell], doc: &Document, layer: usize
         if !doc.in_bounds(p.x, p.y) {
             continue;
         }
-        let before = doc.cell(layer, p.x, p.y).copied().unwrap_or(Cell::BLANK);
+        let before = doc.cell_at(frame, layer, p.x, p.y).copied().unwrap_or(Cell::BLANK);
         if before == p.cell {
             continue;
         }
-        cell_edits.push(CellEdit { layer, x: p.x, y: p.y, before, after: p.cell });
+        cell_edits.push(CellEdit { frame, layer, x: p.x, y: p.y, before, after: p.cell });
     }
     (!cell_edits.is_empty()).then_some(Edit::Cells(cell_edits))
 }
@@ -357,14 +358,15 @@ impl FreehandStroke {
     /// old first-write-wins dedup for a constant `proposed` (pencil/eraser: overwriting with the
     /// same masked result is a no-op); load-bearing for a `proposed` that varies per revisit
     /// (the density brush). Returns whether `(x, y)` was in-bounds.
-    fn stamp(&mut self, x: u16, y: u16, proposed: Cell, mask: PlaneMask, doc: &Document, layer: usize) -> bool {
+    #[allow(clippy::too_many_arguments)]
+    fn stamp(&mut self, x: u16, y: u16, proposed: Cell, mask: PlaneMask, doc: &Document, frame: usize, layer: usize) -> bool {
         if !doc.in_bounds(x, y) {
             return false;
         }
         let before = *self
             .before
             .entry((x, y))
-            .or_insert_with(|| doc.cell(layer, x, y).copied().unwrap_or(Cell::BLANK));
+            .or_insert_with(|| doc.cell_at(frame, layer, x, y).copied().unwrap_or(Cell::BLANK));
         let after = mask_apply(before, proposed, mask);
         match self.index.get(&(x, y)) {
             Some(&i) => {
@@ -383,11 +385,11 @@ impl FreehandStroke {
     /// The stroke's in-progress value for `(x,y)`: the pending overlay's value if touched already
     /// this stroke, else the document's untouched value. What `Buildup` reads to know "one step
     /// higher than what."
-    pub(crate) fn current(&self, x: u16, y: u16, doc: &Document, layer: usize) -> Cell {
+    pub(crate) fn current(&self, x: u16, y: u16, doc: &Document, frame: usize, layer: usize) -> Cell {
         self.index
             .get(&(x, y))
             .map(|&i| self.pending[i].cell)
-            .unwrap_or_else(|| doc.cell(layer, x, y).copied().unwrap_or(Cell::BLANK))
+            .unwrap_or_else(|| doc.cell_at(frame, layer, x, y).copied().unwrap_or(Cell::BLANK))
     }
 
     /// Stamps the full `ctx.size`/`ctx.shape` footprint around `(x, y)` — the sized-tool
@@ -396,7 +398,7 @@ impl FreehandStroke {
         let mut fp = std::mem::take(&mut self.fp);
         footprint((x, y), ctx.size, ctx.shape, &mut fp);
         for &(fx, fy) in fp.iter() {
-            self.stamp(fx, fy, proposed, ctx.mask, doc, ctx.layer);
+            self.stamp(fx, fy, proposed, ctx.mask, doc, ctx.frame, ctx.layer);
         }
         self.fp = fp;
     }
@@ -426,18 +428,18 @@ impl FreehandStroke {
 
     /// Finishes the stroke: cells whose masked result equals the pre-stroke value are dropped, so
     /// a no-op stroke (re-painting identical content) yields `None` (no empty undo entry).
-    pub(crate) fn finish(&mut self, doc: &Document, layer: usize) -> Option<Edit> {
+    pub(crate) fn finish(&mut self, doc: &Document, frame: usize, layer: usize) -> Option<Edit> {
         let mut cell_edits = Vec::with_capacity(self.pending.len());
         for p in &self.pending {
             // Same shrink-between-stamp-and-commit guard as `diff_pending`.
             if !doc.in_bounds(p.x, p.y) {
                 continue;
             }
-            let before = doc.cell(layer, p.x, p.y).copied().unwrap_or(Cell::BLANK);
+            let before = doc.cell_at(frame, layer, p.x, p.y).copied().unwrap_or(Cell::BLANK);
             if before == p.cell {
                 continue;
             }
-            cell_edits.push(CellEdit { layer, x: p.x, y: p.y, before, after: p.cell });
+            cell_edits.push(CellEdit { frame, layer, x: p.x, y: p.y, before, after: p.cell });
         }
         self.pending.clear();
         self.index.clear();
@@ -471,8 +473,8 @@ impl FreehandStroke {
     /// from composition time, and `finish` commits pending cells as-is — so without the recompose,
     /// a cell touched before the external mutation and never revisited would commit the superseded
     /// content back over it, on exactly the planes the mask promised not to write.
-    pub(crate) fn resync(&mut self, doc: &Document, layer: usize) {
-        resync_pending(&mut self.before, &self.index, &mut self.pending, &self.sources, doc, layer);
+    pub(crate) fn resync(&mut self, doc: &Document, frame: usize, layer: usize) {
+        resync_pending(&mut self.before, &self.index, &mut self.pending, &self.sources, doc, frame, layer);
     }
 }
 
@@ -486,10 +488,11 @@ pub(crate) fn resync_pending(
     pending: &mut [PendingCell],
     sources: &[(Cell, PlaneMask)],
     doc: &Document,
+    frame: usize,
     layer: usize,
 ) {
     for (&(x, y), b) in before.iter_mut() {
-        *b = doc.cell(layer, x, y).copied().unwrap_or(Cell::BLANK);
+        *b = doc.cell_at(frame, layer, x, y).copied().unwrap_or(Cell::BLANK);
         if let Some(&i) = index.get(&(x, y)) {
             let (proposed, mask) = sources[i];
             pending[i].cell = mask_apply(*b, proposed, mask);
@@ -656,6 +659,7 @@ mod tests {
 
     fn sized_ctx() -> ToolCtx {
         ToolCtx {
+            frame: 0,
             layer: 0,
             glyph: '#',
             fg: Rgba::WHITE,
@@ -677,11 +681,35 @@ mod tests {
         let mut stroke = FreehandStroke::new();
         stroke.press(2, 2, proposed, &ctx, &big);
         stroke.drag(8, 2, proposed, &ctx, &big);
-        let edit = stroke.finish(&small, 0).expect("in-bounds cells still commit");
+        let edit = stroke.finish(&small, 0, 0).expect("in-bounds cells still commit");
         let Edit::Cells(cells) = edit else { panic!("expected Edit::Cells") };
         assert!(cells.iter().all(|e| e.x < 5 && e.y < 5), "no phantom out-of-bounds edits");
         let xs: Vec<u16> = cells.iter().map(|e| e.x).collect();
         assert_eq!(xs.len(), 3, "only the surviving columns 2..=4 commit");
+    }
+
+    /// `diff_pending`'s `before` read must consult the passed-in `frame`, not `doc`'s active frame.
+    /// Distinguishing content per frame (frame 0 keeps 'A', frame 1 is overwritten to 'B') is
+    /// load-bearing: with two blank frames the defect is invisible, since either read yields the
+    /// same `Cell::BLANK`.
+    #[test]
+    fn diff_pending_reads_before_from_the_explicit_frame_not_the_documents_active_frame() {
+        let mut doc = Document::new(3, 3);
+        doc.set_cell(0, 1, 1, c('A', Rgba::WHITE, Rgba::TRANSPARENT));
+        let edit = crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(3, 3)).unwrap();
+        let mut history = crate::edit::History::new();
+        history.apply(&mut doc, edit);
+        doc.set_cell_at(1, 0, 1, 1, c('B', Rgba::WHITE, Rgba::TRANSPARENT));
+        assert_eq!(doc.active_frame(), 0, "doc's active frame stays 0; only the `frame` argument targets frame 1");
+
+        let pending = vec![PendingCell { x: 1, y: 1, cell: c('C', Rgba::WHITE, Rgba::TRANSPARENT) }];
+        let edit = diff_pending(&pending, &doc, 1, 0).expect("the cell differs from frame 1's content");
+        let Edit::Cells(cells) = edit else { panic!("expected Edit::Cells") };
+        assert_eq!(
+            cells[0].before,
+            c('B', Rgba::WHITE, Rgba::TRANSPARENT),
+            "before must read frame 1's content ('B'), not frame 0's active-frame content ('A')"
+        );
     }
 
     #[test]
@@ -691,7 +719,7 @@ mod tests {
             PendingCell { x: 2, y: 2, cell: c('#', Rgba::WHITE, Rgba::TRANSPARENT) },
             PendingCell { x: 8, y: 2, cell: c('#', Rgba::WHITE, Rgba::TRANSPARENT) },
         ];
-        let edit = diff_pending(&pending, &small, 0).expect("the in-bounds cell still commits");
+        let edit = diff_pending(&pending, &small, 0, 0).expect("the in-bounds cell still commits");
         let Edit::Cells(cells) = edit else { panic!("expected Edit::Cells") };
         assert_eq!(cells.len(), 1);
         assert_eq!((cells[0].x, cells[0].y), (2, 2));
@@ -823,9 +851,9 @@ mod tests {
         // bypassing the stroke entirely.
         let externally_written = c('Z', Rgba(9, 9, 9, 255), Rgba(8, 8, 8, 255));
         doc.set_cell(0, 5, 5, externally_written);
-        stroke.resync(&doc, 0);
+        stroke.resync(&doc, 0, 0);
 
-        let edit = stroke.finish(&doc, 0).expect("expected a committed edit");
+        let edit = stroke.finish(&doc, 0, 0).expect("expected a committed edit");
         let Edit::Cells(cells) = edit else { panic!("expected Edit::Cells") };
         let touched = cells.iter().find(|e| (e.x, e.y) == (5, 5)).expect("(5,5) must still commit");
         assert_eq!(touched.before, externally_written, "resync must re-pin before to doc's post-mutation value");
@@ -834,5 +862,34 @@ mod tests {
             "the masked-off glyph plane must carry the externally-written content, not the stale pre-mutation Blank"
         );
         assert_eq!(touched.after.bg, Rgba(1, 2, 3, 255), "the masked bg plane still carries the stroke's own write");
+    }
+
+    /// A stroke bound against a non-active frame must resync (re-pin `before`) against *that*
+    /// frame, never frame 0 — the same undo-safety property `CellEdit.frame` closes for commit.
+    #[test]
+    fn resync_repins_before_against_the_edited_frame_not_frame_zero() {
+        let mut doc = Document::new(10, 10);
+        let mut history = crate::edit::History::new();
+        let edit = crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(10, 10)).unwrap();
+        history.apply(&mut doc, edit);
+
+        let ctx = sized_ctx();
+        let proposed = c('#', Rgba::WHITE, Rgba::TRANSPARENT);
+        let mut stroke = FreehandStroke::new();
+        stroke.press(3, 3, proposed, &ctx, &doc);
+
+        // External mutation lands on frame 1 (the stroke's target), frame 0 stays untouched.
+        let externally_written = c('Z', Rgba::WHITE, Rgba::TRANSPARENT);
+        doc.set_cell_at(1, 0, 3, 3, externally_written);
+        stroke.resync(&doc, 1, 0);
+
+        let edit = stroke.finish(&doc, 1, 0).expect("expected a committed edit");
+        let Edit::Cells(cells) = edit else { panic!("expected Edit::Cells") };
+        let touched = cells.iter().find(|e| (e.x, e.y) == (3, 3)).expect("(3,3) must still commit");
+        assert_eq!(touched.frame, 1);
+        assert_eq!(
+            touched.before, externally_written,
+            "resync must re-pin before against frame 1 (the stroke's own frame), not frame 0"
+        );
     }
 }

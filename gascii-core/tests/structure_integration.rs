@@ -10,7 +10,7 @@ use gascii_core::{
 };
 
 fn ctx(mask: PlaneMask, glyph: char, fg: Rgba, bg: Rgba) -> ToolCtx {
-    ToolCtx { layer: 0, glyph, fg, bg, mask, density: DensityMode::Fixed(Fixed(1.0)), ramp: Vec::new(), size: 1, shape: BrushShape::Square }
+    ToolCtx { frame: 0, layer: 0, glyph, fg, bg, mask, density: DensityMode::Fixed(Fixed(1.0)), ramp: Vec::new(), size: 1, shape: BrushShape::Square }
 }
 
 /// Drives a full press -> drag(...) -> release gesture, committing the result (if any) into
@@ -157,7 +157,7 @@ fn fill_on_a_1024x1024_document_from_a_corner_is_exactly_one_undo_entry_and_roun
     let edit = commit_edit(resp).expect("a full-canvas fill from a blank corner must commit an edit");
     history.apply(&mut doc, edit);
 
-    assert!(doc.layers[0].cells().iter().all(|c| c.ch == '#'), "the whole canvas must be filled");
+    assert!(doc.layers()[0].cells().iter().all(|c| c.ch == '#'), "the whole canvas must be filled");
     assert!(history.can_undo());
     assert!(!history.can_redo());
 
@@ -166,7 +166,7 @@ fn fill_on_a_1024x1024_document_from_a_corner_is_exactly_one_undo_entry_and_roun
     assert!(!history.can_undo(), "a full-canvas fill must be exactly one undo entry");
 
     assert!(history.redo(&mut doc));
-    assert!(doc.layers[0].cells().iter().all(|c| c.ch == '#'));
+    assert!(doc.layers()[0].cells().iter().all(|c| c.ch == '#'));
 }
 
 #[test]

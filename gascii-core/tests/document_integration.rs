@@ -106,14 +106,14 @@ fn out_of_bounds_layer_index_degrades_gracefully_not_panics() {
     assert!(!doc.set_cell(1, 0, 0, glyph('x')));
     assert!(!doc.set_cell(99, 5, 5, glyph('x')));
     assert!(doc.cell(0, 0, 0).unwrap().is_blank());
-    assert!(doc.layers[0].cells().iter().all(Cell::is_blank));
+    assert!(doc.layers()[0].cells().iter().all(Cell::is_blank));
 }
 
 #[test]
 fn default_document_and_new_1x1_document_are_both_well_formed() {
     let default_doc = Document::default_document();
     assert_eq!(default_doc.extent(), DocExtent { width: 80, height: 25 });
-    assert_eq!(default_doc.layers.len(), 1);
+    assert_eq!(default_doc.layers().len(), 1);
 
     let mut tiny = Document::new(1, 1);
     assert_eq!(tiny.extent(), DocExtent { width: 1, height: 1 });

@@ -1,3 +1,4 @@
+mod anim_export;
 mod app;
 mod canvas;
 mod font_coverage;

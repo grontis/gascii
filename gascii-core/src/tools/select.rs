@@ -66,7 +66,7 @@ impl FloatingStamp {
     /// rather than revealing whatever was underneath, matching how an ordinary stroke's Blank
     /// write also replaces rather than composites. `before` is read from `doc` right now — a
     /// mid-float external mutation is reflected automatically, with nothing to resync.
-    fn to_edit(&self, doc: &Document, layer: usize) -> Option<Edit> {
+    fn to_edit(&self, doc: &Document, frame: usize, layer: usize) -> Option<Edit> {
         let mut touched: HashMap<(u16, u16), (Cell, Cell)> = HashMap::new();
 
         for row in 0..self.patch.height {
@@ -79,7 +79,7 @@ impl FloatingStamp {
                 let (x, y) = (dx as u16, dy as u16);
                 let idx = row as usize * self.patch.width as usize + col as usize;
                 let after = self.patch.cells[idx];
-                let before = doc.cell(layer, x, y).copied().unwrap_or(Cell::BLANK);
+                let before = doc.cell_at(frame, layer, x, y).copied().unwrap_or(Cell::BLANK);
                 touched.insert((x, y), (before, after));
             }
         }
@@ -89,7 +89,7 @@ impl FloatingStamp {
                     // A destination write already claimed this cell (an overlap) — it wins over
                     // the source's blank, per the drop's overlap-merge contract.
                     touched.entry((x, y)).or_insert_with(|| {
-                        let before = doc.cell(layer, x, y).copied().unwrap_or(Cell::BLANK);
+                        let before = doc.cell_at(frame, layer, x, y).copied().unwrap_or(Cell::BLANK);
                         (before, Cell::BLANK)
                     });
                 }
@@ -99,7 +99,7 @@ impl FloatingStamp {
         let mut cell_edits: Vec<CellEdit> = touched
             .into_iter()
             .filter(|&(_, (before, after))| before != after)
-            .map(|((x, y), (before, after))| CellEdit { layer, x, y, before, after })
+            .map(|((x, y), (before, after))| CellEdit { frame, layer, x, y, before, after })
             .collect();
         cell_edits.sort_by_key(|c| (c.y, c.x));
         (!cell_edits.is_empty()).then_some(Edit::Cells(cell_edits))
@@ -137,15 +137,15 @@ impl SelectionTool {
         self.pending = self.float.as_ref().map(FloatingStamp::pending_cells).unwrap_or_default();
     }
 
-    fn blank_region(doc: &Document, layer: usize, rect: CellRect) -> Option<Edit> {
+    fn blank_region(doc: &Document, frame: usize, layer: usize, rect: CellRect) -> Option<Edit> {
         let mut cell_edits = Vec::new();
         for y in rect.y0..=rect.y1 {
             for x in rect.x0..=rect.x1 {
-                let before = doc.cell(layer, x, y).copied().unwrap_or(Cell::BLANK);
+                let before = doc.cell_at(frame, layer, x, y).copied().unwrap_or(Cell::BLANK);
                 if before == Cell::BLANK {
                     continue;
                 }
-                cell_edits.push(CellEdit { layer, x, y, before, after: Cell::BLANK });
+                cell_edits.push(CellEdit { frame, layer, x, y, before, after: Cell::BLANK });
             }
         }
         (!cell_edits.is_empty()).then_some(Edit::Cells(cell_edits))
@@ -170,7 +170,7 @@ impl Tool for SelectionTool {
                     }
                     // Click away from the float: drop it now, then start a fresh marquee at the
                     // click — mirrors TextTool::Press's same-call flush-then-relocate.
-                    let edit = self.float.take().and_then(|f| f.to_edit(doc, ctx.layer));
+                    let edit = self.float.take().and_then(|f| f.to_edit(doc, ctx.frame, ctx.layer));
                     self.mode = DragMode::Marquee { anchor: (x, y) };
                     self.selection = Some(CellRect::from_corners((x, y), (x, y)));
                     self.rebuild_pending();
@@ -221,7 +221,7 @@ impl Tool for SelectionTool {
             ToolEvent::Commit => {
                 let edit = if let Some(float) = self.float.take() {
                     let rect = float.rect();
-                    let edit = float.to_edit(doc, ctx.layer);
+                    let edit = float.to_edit(doc, ctx.frame, ctx.layer);
                     self.selection = Some(rect); // marquee stays at the stamp's final position
                     edit
                 } else {
@@ -238,9 +238,9 @@ impl Tool for SelectionTool {
                     let source = float.source;
                     self.selection = source;
                     self.rebuild_pending();
-                    ToolResponse::Commit(source.and_then(|src| Self::blank_region(doc, ctx.layer, src)))
+                    ToolResponse::Commit(source.and_then(|src| Self::blank_region(doc, ctx.frame, ctx.layer, src)))
                 } else if let Some(sel) = self.selection {
-                    ToolResponse::Commit(Self::blank_region(doc, ctx.layer, sel))
+                    ToolResponse::Commit(Self::blank_region(doc, ctx.frame, ctx.layer, sel))
                 } else {
                     ToolResponse::Commit(None)
                 };
@@ -292,6 +292,7 @@ mod tests {
 
     fn ctx() -> ToolCtx {
         ToolCtx {
+            frame: 0,
             layer: 0,
             glyph: '#',
             fg: Rgba::WHITE,

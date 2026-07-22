@@ -3,7 +3,7 @@
 //! only thing it contributes is `validate_png_dimensions`, which this module treats as the sole
 //! authority on whether a pixel buffer may be allocated at all.
 
-use gascii_core::{composite, validate_png_dimensions, Document, Rgba};
+use gascii_core::{composite, composite_frame, validate_png_dimensions, Cell, Document, Rgba};
 
 #[derive(Debug)]
 pub enum PngExportAppError {
@@ -62,7 +62,7 @@ fn blend_pixel(img: &mut image::RgbaImage, x: u32, y: u32, color: Rgba) {
 
 use crate::image_bg::{premultiply, unpremultiply};
 
-/// Rasterizes `doc`'s composited cells at `cell_px` pixels per cell into a straight-alpha RGBA8
+/// Rasterizes an already-composited grid at `cell_px` pixels per cell into a straight-alpha RGBA8
 /// pixel buffer (row-major, `4 * width * height` bytes) plus its `(width, height)`. `opaque_bg`
 /// pre-fills every pixel with that color before compositing cell content over it (`None` keeps the
 /// buffer transparent, so a cell's own transparent bg stays transparent in the result). `bg_image`
@@ -72,18 +72,18 @@ use crate::image_bg::{premultiply, unpremultiply};
 /// `premultiply`/`unpremultiply`) so a translucent source's soft edges don't fringe. `None` skips it
 /// entirely (today's export, unchanged).
 ///
-/// The pure pixel-math half of PNG export, split out from encoding so the export dialog's live
-/// preview can upload these bytes straight into an egui texture without a PNG encode/decode round
-/// trip.
-pub fn rasterize_rgba8(
+/// The pure pixel-math half of PNG export, parameterized by an explicit composited grid so both
+/// the active-frame (`rasterize_rgba8`) and frame-explicit (`rasterize_frame_rgba8`) entry points
+/// share one glyph/background blending loop.
+fn rasterize_composited(
     doc: &Document,
+    composited: &[Vec<Cell>],
     cell_px: u32,
     opaque_bg: Option<Rgba>,
     bg_image: Option<(&image::RgbaImage, f32)>,
 ) -> Result<(u32, u32, Vec<u8>), PngExportAppError> {
     let (px_w, px_h) = validate_png_dimensions(doc.width, doc.height, cell_px)
         .map_err(PngExportAppError::Dimensions)?;
-    let composited = composite(doc);
     let font = fontdue::Font::from_bytes(crate::fonts::CANVAS_FONT_BYTES, fontdue::FontSettings::default())
         .map_err(|e| PngExportAppError::Font(e.to_string()))?;
     let mut img = image::RgbaImage::new(px_w, px_h);
@@ -166,6 +166,34 @@ pub fn rasterize_rgba8(
     }
 
     Ok((px_w, px_h, img.into_raw()))
+}
+
+/// Rasterizes `doc`'s active-frame composited cells at `cell_px` pixels per cell. See
+/// `rasterize_composited` for the pixel-math contract; this is the active-frame convenience
+/// wrapper the export dialog's live preview and single-frame PNG export both use.
+pub fn rasterize_rgba8(
+    doc: &Document,
+    cell_px: u32,
+    opaque_bg: Option<Rgba>,
+    bg_image: Option<(&image::RgbaImage, f32)>,
+) -> Result<(u32, u32, Vec<u8>), PngExportAppError> {
+    rasterize_composited(doc, &composite(doc), cell_px, opaque_bg, bg_image)
+}
+
+/// Frame-explicit analog of `rasterize_rgba8`, for a caller that already needs cross-frame
+/// awareness (GIF/spritesheet export) rather than the active frame. `frame` is always a valid
+/// index for every caller in this crate (`0..doc.frame_count()`), so an out-of-range index is an
+/// internal invariant violation, not a user-facing error.
+pub fn rasterize_frame_rgba8(
+    doc: &Document,
+    frame: usize,
+    cell_px: u32,
+    opaque_bg: Option<Rgba>,
+    bg_image: Option<(&image::RgbaImage, f32)>,
+) -> Result<(u32, u32, Vec<u8>), PngExportAppError> {
+    let composited =
+        composite_frame(doc, frame).expect("frame is always in 0..doc.frame_count() for every caller in this crate");
+    rasterize_composited(doc, &composited, cell_px, opaque_bg, bg_image)
 }
 
 /// Rasterizes `doc`'s composited cells at `cell_px` pixels per cell into PNG bytes. Blank cells
@@ -263,6 +291,19 @@ mod tests {
     /// `rasterize_rgba8`'s dimensions and pixel count must agree with `validate_png_dimensions` and
     /// its own declared buffer length — the export dialog's preview builds an `egui::ColorImage`
     /// straight from these bytes with no further validation.
+    /// `rasterize_frame_rgba8(doc, doc.active_frame(), ...)` must agree byte-for-byte with
+    /// `rasterize_rgba8(doc, ...)` on the same document — proves the two entry points agree on the
+    /// active-frame case after `rasterize_composited`'s extraction, mirroring `io/mod.rs`'s own
+    /// `composite_matches_composite_frame_of_the_active_frame_index` precedent.
+    #[test]
+    fn rasterize_frame_rgba8_of_the_active_frame_matches_rasterize_rgba8() {
+        let mut doc = doc_with(3, 2);
+        doc.set_cell(0, 0, 0, Cell { ch: 'z', fg: Rgba(9, 8, 7, 255), bg: Rgba(1, 2, 3, 200) });
+        let whole = rasterize_rgba8(&doc, 6, None, None).unwrap();
+        let explicit = rasterize_frame_rgba8(&doc, doc.active_frame(), 6, None, None).unwrap();
+        assert_eq!(whole, explicit);
+    }
+
     #[test]
     fn rasterize_rgba8_returns_a_buffer_sized_exactly_width_times_height_times_4() {
         let doc = doc_with(5, 3);

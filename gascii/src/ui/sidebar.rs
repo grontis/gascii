@@ -4,9 +4,10 @@ use eframe::egui::{self, Sense, Stroke, Ui, Vec2};
 
 use super::widgets::{self, Bound};
 use super::theme;
-use crate::app::{sized_slot, tool_def, Binding, GasciiApp, ToolDef, ToolKind, TOOLS};
+use crate::app::{sized_slot, tool_def, tools, Binding, GasciiApp, ToolDef, ToolKind};
 use crate::fonts;
-use gascii_core::{BrushShape, Buildup, DensityMode, Fixed, MAX_TOOL_SIZE};
+use gascii_core::{BrushShape, MAX_TOOL_SIZE};
+use gascii_plugin_api::OptionsGeom;
 
 /// The panel's default width; it is resizable (see `app.rs`'s `Panel::left` builder), so this is
 /// no longer the only width the sidebar's own content math has to hold up at — `swatch_row`'s
@@ -42,14 +43,6 @@ fn page_label(page_name: &str) -> &str {
     }
 }
 
-/// Short display names for the brush ramps, same rule as `page_label`.
-pub(crate) fn ramp_label(name: &str) -> &str {
-    match name {
-        "ASCII shading" => "ASCII",
-        "Block shades" => "Blocks",
-        other => other,
-    }
-}
 
 /// The stamp shape segment, shared with kiosk so both chrome modes name the shapes identically.
 pub(crate) const SHAPE_OPTIONS: [(BrushShape, &str); 3] = [
@@ -57,6 +50,15 @@ pub(crate) const SHAPE_OPTIONS: [(BrushShape, &str); 3] = [
     (BrushShape::Square, "Square"),
     (BrushShape::Circle, "Circle"),
 ];
+
+/// The normal sidebar's own geometry.
+const SIDEBAR_GEOM: OptionsGeom = OptionsGeom {
+    stepper_h: widgets::STEPPER_H,
+    shape_indent: 0.0,
+    item_spacing_y: Some(6.0),
+    wrap_brush_mode: false,
+    brush_slider_h: 20.0,
+};
 
 pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
     let t = theme::current(ui.ctx());
@@ -158,23 +160,37 @@ pub(crate) fn tool_grid(ui: &mut Ui, app: &mut GasciiApp, tools: &[ToolDef], col
 /// MacPaint-style 3-column grid: cells butt together and the 1px gaps are the grid's own border
 /// showing through, so the whole block reads as one object rather than nine buttons.
 fn toolbox(ui: &mut Ui, app: &mut GasciiApp) {
-    tool_grid(ui, app, &TOOLS, TOOL_COLS, widgets::TOOL_CELL);
+    tool_grid(ui, app, tools(), TOOL_COLS, widgets::TOOL_CELL);
 }
 
-/// Per-binding tool options: `L <tool> [− n +]` with the shape segment beneath, and — when that
-/// binding holds the Brush — the ramp/intensity/pressure block nested right under it, rather than
-/// floating below both rows. A rule divides each binding's block from the next, so L's and R's
-/// options read as two distinct sections instead of one undifferentiated list. Brush's controls
-/// are app-global state shared by both bindings (see `brush_options`'s own doc), so in the rare
-/// case both L and R hold Brush the block is shown once, nested under L. Both bindings' rows show
-/// at once — there is no focus segment; the `[`/`]` keys follow `options_focus` instead. Unsized
-/// tools get a dash where the stepper would be, so the rows always double as an L/R legend.
-/// `kiosk::binding_options` is this same block at touch geometry.
+/// Per-binding tool options at the normal sidebar's own geometry (`SIDEBAR_GEOM`) — see
+/// `binding_options_geom` for the shared per-tool layout both chrome modes render through.
 fn binding_options(ui: &mut Ui, app: &mut GasciiApp) {
+    binding_options_geom(ui, app, SIDEBAR_GEOM);
+}
+
+/// Per-binding tool options: `L <tool> [− n +]` with the shape segment beneath, and — for a kind
+/// owned by a plugin with tool options of its own (Brush's ramp/intensity/pressure block) — that
+/// block nested right under it, rather than floating below both rows. A rule divides each binding's
+/// block from the next, so L's and R's options read as two distinct sections instead of one
+/// undifferentiated list. A plugin's `options_ui` state is app-global (per-plugin-instance, not
+/// per-binding), so in the rare case both L and R hold a kind owned by the same plugin, the block is
+/// shown once, nested under L (deduped by plugin-instance index — see `shown` below). Both bindings'
+/// rows show at once — there is no focus segment; the `[`/`]` keys follow `options_focus` instead.
+/// Unsized tools get a dash where the stepper would be, so the rows always double as an L/R
+/// legend. Kiosk renders this same block through its own `binding_options`, which builds `geom` at
+/// touch scale and delegates here — the per-tool layout is written once.
+pub(crate) fn binding_options_geom(ui: &mut Ui, app: &mut GasciiApp, geom: OptionsGeom) {
     let t = theme::current(ui.ctx());
     widgets::micro_label(ui, "OPTIONS");
-    ui.spacing_mut().item_spacing.y = 6.0;
-    let mut brush_shown = false;
+    if let Some(y) = geom.item_spacing_y {
+        ui.spacing_mut().item_spacing.y = y;
+    }
+    // Guards against invoking the same plugin's options_ui twice in one frame if both bindings
+    // happen to hold a kind owned by the same plugin instance — dedup by plugin-instance index,
+    // not function-pointer identity (the old `fn_addr_eq` guard this replaced had a latent
+    // identical-code-folding risk once a second `options_ui` producer existed).
+    let mut shown: Vec<usize> = Vec::new();
     for (i, &b) in Binding::ALL.iter().enumerate() {
         let kind = app.slot(b).kind;
         ui.horizontal(|ui| {
@@ -192,7 +208,7 @@ fn binding_options(ui: &mut Ui, app: &mut GasciiApp) {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(slot) = sized_slot(kind) {
                     let mut size = app.slots[b.ix()].stamps[slot].size;
-                    if widgets::stepper(ui, &mut size, 1, MAX_TOOL_SIZE, widgets::STEPPER_H) {
+                    if widgets::stepper(ui, &mut size, 1, MAX_TOOL_SIZE, geom.stepper_h) {
                         app.slots[b.ix()].stamps[slot].size = size;
                     }
                 } else {
@@ -205,66 +221,40 @@ fn binding_options(ui: &mut Ui, app: &mut GasciiApp) {
             });
         });
         if let Some(slot) = sized_slot(kind) {
-            widgets::micro_label(ui, "SHAPE");
-            let mut shape = app.slots[b.ix()].stamps[slot].shape;
-            if widgets::segmented(ui, &mut shape, &SHAPE_OPTIONS, false) {
-                app.slots[b.ix()].stamps[slot].shape = shape;
+            if geom.shape_indent > 0.0 {
+                // Indented to sit under the tool name, clear of the L/R gutter.
+                ui.horizontal(|ui| {
+                    ui.add_space(geom.shape_indent);
+                    widgets::micro_label(ui, "SHAPE");
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(geom.shape_indent);
+                    let mut shape = app.slots[b.ix()].stamps[slot].shape;
+                    if widgets::segmented(ui, &mut shape, &SHAPE_OPTIONS, false) {
+                        app.slots[b.ix()].stamps[slot].shape = shape;
+                    }
+                });
+            } else {
+                widgets::micro_label(ui, "SHAPE");
+                let mut shape = app.slots[b.ix()].stamps[slot].shape;
+                if widgets::segmented(ui, &mut shape, &SHAPE_OPTIONS, false) {
+                    app.slots[b.ix()].stamps[slot].shape = shape;
+                }
             }
         }
-        if kind == ToolKind::Brush && !brush_shown {
-            ui.add_space(2.0);
-            brush_options(ui, app);
-            brush_shown = true;
+        if let Some(i) = tool_def(kind).plugin_slot {
+            if !shown.contains(&i) {
+                ui.add_space(2.0);
+                let (stylus_detected, bound) = crate::app::host_context(app);
+                let host = crate::app::host_facts(&app.doc, stylus_detected, bound);
+                app.plugins[i].options_ui(tool_def(kind).name, ui, geom, &host);
+                shown.push(i);
+            }
         }
         if i + 1 < Binding::ALL.len() {
             ui.add_space(2.0);
             rule(ui, t.border_soft);
         }
-    }
-}
-
-/// Ramp, intensity mode/level and the pressure toggle — app-global state both bindings' brushes
-/// share, shown once whichever binding holds the Brush.
-fn brush_options(ui: &mut Ui, app: &mut GasciiApp) {
-    let t = theme::current(ui.ctx());
-    widgets::micro_label(ui, "BRUSH");
-    let mut ramp = app.active_ramp;
-    let names: Vec<(usize, &str)> = app.ramps.iter().enumerate().map(|(i, r)| (i, ramp_label(r.name))).collect();
-    if widgets::segmented(ui, &mut ramp, &names, false) {
-        app.active_ramp = ramp;
-    }
-    let mut buildup = matches!(app.density_mode, DensityMode::Buildup(_));
-    let modes = [(false, "Fixed"), (true, "Buildup")];
-    let changed = widgets::segmented(ui, &mut buildup, &modes, false);
-    if buildup {
-        if changed {
-            app.density_mode = DensityMode::Buildup(Buildup);
-        }
-    } else {
-        let mut level = match app.density_mode {
-            DensityMode::Fixed(Fixed(l)) => l,
-            DensityMode::Buildup(_) => 1.0,
-        };
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            let slider = ui.add_sized(
-                Vec2::new(100.0, 20.0),
-                egui::Slider::new(&mut level, 0.0..=1.0).show_value(false),
-            );
-            if slider.changed() || changed {
-                app.density_mode = DensityMode::Fixed(Fixed(level));
-            }
-            ui.label(
-                egui::RichText::new(format!("{:.0}%", level * 100.0))
-                    .font(fonts::mono_id(fonts::size::LABEL))
-                    .color(t.fg_secondary),
-            );
-        });
-    }
-    // Only shown once a stylus contact has actually been observed this session — no point
-    // offering a pressure toggle before there is any pressure signal to drive it.
-    if app.stylus_detected {
-        widgets::checkbox(ui, &mut app.brush_pressure, "Pressure");
     }
 }
 
@@ -521,6 +511,7 @@ fn write_toggles(ui: &mut Ui, app: &mut GasciiApp) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gascii_core::{Buildup, DensityMode};
 
     /// `swatch_cols` is the pure math behind the sidebar's resizable-width reflow (`WS6a`'s own
     /// "checked by formula, not rendered" note) — this exercises it directly rather than only by
@@ -753,5 +744,81 @@ mod tests {
         let bg = app.image_bg.as_ref().expect("a no-input render must not clear the loaded image");
         assert!(bg.show_as_trace, "a no-input render must not change trace visibility");
         assert!((bg.trace_opacity - 0.5).abs() < f32::EPSILON, "a no-input render must not change opacity");
+    }
+
+    /// The pre-refactor code had two separate `binding_options`/`brush_options` bodies (sidebar's
+    /// and kiosk's); this pins that only ONE now exists, by rendering the same app's state through
+    /// kiosk's own `OptionsGeom` and then through the normal sidebar's `OptionsGeom` in the same
+    /// test and confirming the stamp size/shape and the brush's ramp/mode are unchanged across
+    /// both — the exact way a resurrected per-surface shadow copy (rather than a shared read of
+    /// `app.slots`/the one live `BrushPlugin` instance) would fail: a shadow copy rendered at its
+    /// own geometry would show its own stale default rather than the value the other surface's
+    /// render (or, in production, the other surface's own widget interaction) had already set.
+    /// Doubles as the `Vec<usize>` plugin-slot dedup's regression coverage: `binding_options_geom`
+    /// is called twice below (once per geometry) and must call the owning plugin's `options_ui` at
+    /// most once per call, never resetting state between them.
+    #[test]
+    fn kiosk_and_sidebar_geometries_render_the_same_underlying_stamp_and_brush_state() {
+        let mut app = crate::app::GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Brush);
+        let slot = sized_slot(ToolKind::Brush).expect("Brush is sized");
+        app.slots[Binding::L.ix()].stamps[slot].size = 6;
+        app.slots[Binding::L.ix()].stamps[slot].shape = BrushShape::Circle;
+        app.brush_plugin_mut().set_active_ramp(1);
+        app.brush_plugin_mut().set_density_mode(DensityMode::Buildup(Buildup));
+
+        // Kiosk's own geometry (`kiosk::binding_options`'s literal params, mirrored here since
+        // `kiosk.rs` is a separate module this test must not depend on for compilation ordering).
+        let kiosk_geom = OptionsGeom {
+            stepper_h: 36.0,
+            shape_indent: 18.0,
+            item_spacing_y: None,
+            wrap_brush_mode: true,
+            brush_slider_h: 24.0,
+        };
+
+        let ctx = egui::Context::default();
+        fonts::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            binding_options_geom(ui, &mut app, kiosk_geom);
+        });
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            binding_options(ui, &mut app); // the normal sidebar's own SIDEBAR_GEOM
+        });
+
+        assert_eq!(app.slots[Binding::L.ix()].stamps[slot].size, 6, "size must survive both renders unchanged");
+        assert_eq!(
+            app.slots[Binding::L.ix()].stamps[slot].shape, BrushShape::Circle,
+            "shape must survive both renders unchanged"
+        );
+        assert_eq!(app.brush_plugin_mut().active_ramp(), 1, "the brush ramp is app-global; neither render may reset it");
+        assert!(
+            matches!(app.brush_plugin_mut().density_mode(), DensityMode::Buildup(_)),
+            "the brush's density mode is app-global; neither render may reset it"
+        );
+    }
+
+    /// The options block's plugin-slot dedup must resolve correctly even when Brush is bound to R
+    /// alone (L holds an unrelated tool) — every other render test in this suite binds Brush to L,
+    /// which never exercises the `Binding::ALL` loop's second iteration finding the plugin-owned
+    /// row first. Rendering must neither panic nor reset the live plugin state.
+    #[test]
+    fn binding_options_geom_renders_and_preserves_brush_state_when_brush_is_bound_only_to_r() {
+        let mut app = crate::app::GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Pencil);
+        app.bind(Binding::R, ToolKind::Brush);
+        app.brush_plugin_mut().set_active_ramp(1);
+
+        let ctx = egui::Context::default();
+        fonts::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            binding_options_geom(ui, &mut app, SIDEBAR_GEOM);
+        });
+
+        assert_eq!(
+            app.brush_plugin_mut().active_ramp(),
+            1,
+            "rendering the options block must not reset Brush's state when it's bound to R only"
+        );
     }
 }

@@ -32,7 +32,7 @@ impl Tool for Eraser {
                 self.stroke.drag(x, y, proposed, ctx, doc);
                 ToolResponse::Active
             }
-            ToolEvent::Release => ToolResponse::Commit(self.stroke.finish(doc, ctx.layer)),
+            ToolEvent::Release => ToolResponse::Commit(self.stroke.finish(doc, ctx.frame, ctx.layer)),
             ToolEvent::Cancel => {
                 self.stroke.cancel();
                 ToolResponse::Idle
@@ -45,8 +45,8 @@ impl Tool for Eraser {
         self.stroke.pending()
     }
 
-    fn resync(&mut self, doc: &Document, layer: usize) {
-        self.stroke.resync(doc, layer);
+    fn resync(&mut self, doc: &Document, frame: usize, layer: usize) {
+        self.stroke.resync(doc, frame, layer);
     }
 }
 
@@ -58,6 +58,7 @@ mod tests {
 
     fn ctx(mask: PlaneMask) -> ToolCtx {
         ToolCtx {
+            frame: 0,
             layer: 0,
             glyph: '#',
             fg: Rgba(1, 2, 3, 255),

@@ -2,18 +2,35 @@
 //! colors run-length-encoded within each row (never across row boundaries, so a single row's
 //! edit never ripples the encoding of unrelated rows). Cell access always goes through
 //! `Document`'s public API — this module never reaches into `Layer`'s private cell storage.
+//!
+//! Two envelope shapes coexist: `FileEnvelope` (v1, byte-for-byte unchanged from before frames
+//! existed — a flat `layers` array) and `FileEnvelopeV2` (a `frames` array plus playback
+//! defaults). `save_string` writes v1 whenever `doc.frame_count() == 1` — fps/loop-playback are
+//! only ever meaningful, and only ever serialized, once a document actually has more than one
+//! frame — so a plain single-frame drawing round-trips through exactly the same bytes older
+//! builds already understand.
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Cell, Document, Layer, Rgba};
+use crate::model::{Cell, Document, Frame, Layer, Rgba};
 use crate::palette::{validate_width, WidthReject};
 
-pub const CURRENT_VERSION: u32 = 1;
+/// Highest version this build can *read*. `save_string` may still choose to *write* v1 (see the
+/// module doc) — this constant means "understood," not "always emitted."
+pub const CURRENT_VERSION: u32 = 2;
 
 /// Matches `Document`'s own default so a pre-existing file without this field loads identically to
 /// how the app already rendered it (a hardcoded opaque black canvas surface).
 fn default_background() -> Rgba {
     Rgba(0, 0, 0, 255)
+}
+
+/// Reads just `version` up front, tolerating (ignoring) every other field — the same
+/// no-`deny_unknown_fields` leniency the full envelope structs already rely on — so `load_str`
+/// can decide which envelope shape to parse the rest of the document as.
+#[derive(Deserialize)]
+struct VersionProbe {
+    version: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -26,6 +43,27 @@ struct FileEnvelope {
     /// keeps those files loading unchanged rather than becoming a rejected/unsupported version.
     #[serde(default = "default_background")]
     background: Rgba,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FileEnvelopeV2 {
+    version: u32,
+    width: u16,
+    height: u16,
+    #[serde(default = "default_background")]
+    background: Rgba,
+    #[serde(default = "Document::default_frame_duration_ms")]
+    frame_duration_ms: u32,
+    #[serde(default = "Document::default_loop_playback")]
+    loop_playback: bool,
+    frames: Vec<FileFrame>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FileFrame {
+    layers: Vec<FileLayer>,
+    #[serde(default)]
+    duration_override: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -45,18 +83,32 @@ pub enum LoadError {
     /// sized by these fields happens — a file's raw, unvalidated `u16` extent could otherwise
     /// drive a single multi-gigabyte `Document::new` allocation.
     ExtentTooLarge { width: u16, height: u16, max_width: u16, max_height: u16 },
-    /// `layers.len()` exceeds `Document::MAX_LAYERS`. Checked before any per-layer allocation, for
-    /// the same reason as `ExtentTooLarge` — an unbounded declared layer count is an independent
-    /// amplification vector even at a modest width/height.
-    TooManyLayers { found: usize, max: usize },
-    /// The layer's `glyphs`/`fg`/`bg` arrays don't all have `expected` (the document's declared
+    /// A v2 envelope's `frames` array is empty. Distinct from `NoLayers` (a *frame* with zero
+    /// layers) — a document with zero frames must stay unreachable.
+    NoFrames,
+    /// `frames.len()` exceeds `Document::MAX_FRAMES`. Checked before any per-frame allocation, for
+    /// the same reason as `ExtentTooLarge`/`TooManyLayers` — an unbounded declared frame count is
+    /// an independent amplification vector even at a modest width/height/layer count.
+    TooManyFrames { found: usize, max: usize },
+    /// `layers.len()` exceeds `Document::MAX_LAYERS` for the named frame. Checked before any
+    /// per-layer allocation, for the same reason as `ExtentTooLarge` — an unbounded declared layer
+    /// count is an independent amplification vector even at a modest width/height.
+    TooManyLayers { frame: usize, found: usize, max: usize },
+    /// The joint `width x height x (total layers across every frame)` budget
+    /// (`Document::MAX_TOTAL_CELLS`) is exceeded, even though every individual frame's layer count
+    /// and the frame count itself each stayed under their own per-axis cap. Computed from
+    /// already-parsed `Vec::len()`s only, before any `Layer::blank` allocation.
+    TotalCellBudgetExceeded { total_cells: u128, max: usize },
+    /// The frame's `glyphs`/`fg`/`bg` arrays don't all have `expected` (the document's declared
     /// `height`) rows. Carries each array's actual row count so the message doesn't have to guess
     /// which one is wrong (or misleadingly imply row 0 specifically is at fault).
-    LayerRowCountMismatch { layer: usize, expected: usize, glyph_rows: usize, fg_rows: usize, bg_rows: usize },
-    ShapeMismatch { layer: usize, row: usize },
-    MalformedRuns { layer: usize, row: usize, expected: u16, got: usize },
-    InvalidGlyph { layer: usize, row: usize, col: u16, reason: WidthReject },
-    NoLayers,
+    LayerRowCountMismatch { frame: usize, layer: usize, expected: usize, glyph_rows: usize, fg_rows: usize, bg_rows: usize },
+    ShapeMismatch { frame: usize, layer: usize, row: usize },
+    MalformedRuns { frame: usize, layer: usize, row: usize, expected: u16, got: usize },
+    InvalidGlyph { frame: usize, layer: usize, row: usize, col: u16, reason: WidthReject },
+    /// A frame declares zero layers. A v1 file's implicit single frame is always reported as
+    /// `frame: 0`.
+    NoLayers { frame: usize },
 }
 
 impl std::fmt::Display for LoadError {
@@ -72,28 +124,37 @@ impl std::fmt::Display for LoadError {
                 f,
                 "document {width}x{height} exceeds the maximum supported size {max_width}x{max_height}"
             ),
-            LoadError::TooManyLayers { found, max } => {
-                write!(f, "document has {found} layers, exceeding the maximum supported {max}")
+            LoadError::NoFrames => write!(f, "document has no frames"),
+            LoadError::TooManyFrames { found, max } => {
+                write!(f, "document has {found} frames, exceeding the maximum supported {max}")
             }
-            LoadError::LayerRowCountMismatch { layer, expected, glyph_rows, fg_rows, bg_rows } => write!(
+            LoadError::TooManyLayers { frame, found, max } => {
+                write!(f, "frame {frame} has {found} layers, exceeding the maximum supported {max}")
+            }
+            LoadError::TotalCellBudgetExceeded { total_cells, max } => write!(
                 f,
-                "layer {layer}: expected {expected} rows, found glyphs={glyph_rows}, fg={fg_rows}, bg={bg_rows}"
+                "document's total cell budget ({total_cells} cells across every frame's layers) exceeds the maximum supported {max}"
             ),
-            LoadError::ShapeMismatch { layer, row } => {
-                write!(f, "layer {layer}, row {row} does not match the document's declared width")
+            LoadError::LayerRowCountMismatch { frame, layer, expected, glyph_rows, fg_rows, bg_rows } => write!(
+                f,
+                "frame {frame}, layer {layer}: expected {expected} rows, found glyphs={glyph_rows}, fg={fg_rows}, bg={bg_rows}"
+            ),
+            LoadError::ShapeMismatch { frame, layer, row } => {
+                write!(f, "frame {frame}, layer {layer}, row {row} does not match the document's declared width")
             }
-            LoadError::MalformedRuns { layer, row, expected, got } => {
-                write!(f, "layer {layer}, row {row}: color runs total {got} cells, expected {expected}")
-            }
-            LoadError::InvalidGlyph { layer, row, col, reason } => {
+            LoadError::MalformedRuns { frame, layer, row, expected, got } => write!(
+                f,
+                "frame {frame}, layer {layer}, row {row}: color runs total {got} cells, expected {expected}"
+            ),
+            LoadError::InvalidGlyph { frame, layer, row, col, reason } => {
                 let why = match reason {
                     WidthReject::Control => "a control character",
                     WidthReject::ZeroWidth => "a zero-width or combining character",
                     WidthReject::DoubleWidth => "a double-width character",
                 };
-                write!(f, "layer {layer}, row {row}, column {col}: glyph is {why}, not single-width")
+                write!(f, "frame {frame}, layer {layer}, row {row}, column {col}: glyph is {why}, not single-width")
             }
-            LoadError::NoLayers => write!(f, "document has no layers"),
+            LoadError::NoLayers { frame } => write!(f, "frame {frame} has no layers"),
         }
     }
 }
@@ -101,10 +162,19 @@ impl std::fmt::Display for LoadError {
 impl std::error::Error for LoadError {}
 
 /// Serializes `doc` to a compact JSON string. Never fails: every `Document` is representable.
+/// Writes the v1 envelope shape whenever `doc.frame_count() == 1` — see the module doc.
 pub fn save_string(doc: &Document) -> String {
-    let layers = (0..doc.layers.len()).map(|i| encode_layer(doc, i)).collect();
+    if doc.frame_count() == 1 {
+        save_v1(doc)
+    } else {
+        save_v2(doc)
+    }
+}
+
+fn save_v1(doc: &Document) -> String {
+    let layers = (0..doc.layers().len()).map(|i| encode_layer_at(doc, 0, i)).collect();
     let envelope = FileEnvelope {
-        version: CURRENT_VERSION,
+        version: 1,
         width: doc.width,
         height: doc.height,
         layers,
@@ -113,16 +183,42 @@ pub fn save_string(doc: &Document) -> String {
     serde_json::to_string(&envelope).expect("Document -> FileEnvelope is always serializable")
 }
 
+fn save_v2(doc: &Document) -> String {
+    let frames = (0..doc.frame_count())
+        .map(|f| FileFrame {
+            layers: (0..doc.frame_layers(f).map(|l| l.len()).unwrap_or(0)).map(|i| encode_layer_at(doc, f, i)).collect(),
+            duration_override: doc.frame(f).and_then(|fr| fr.duration_override),
+        })
+        .collect();
+    let envelope = FileEnvelopeV2 {
+        version: CURRENT_VERSION,
+        width: doc.width,
+        height: doc.height,
+        background: doc.background,
+        frame_duration_ms: doc.frame_duration_ms,
+        loop_playback: doc.loop_playback,
+        frames,
+    };
+    serde_json::to_string(&envelope).expect("Document -> FileEnvelopeV2 is always serializable")
+}
+
 /// Parses a `.gascii` JSON string into a `Document`, rejecting malformed or unsupported-version
 /// input with a specific `LoadError` rather than panicking.
 pub fn load_str(s: &str) -> Result<Document, LoadError> {
-    let envelope: FileEnvelope = serde_json::from_str(s).map_err(LoadError::Json)?;
-    if envelope.version > CURRENT_VERSION {
-        return Err(LoadError::UnsupportedVersion {
-            found: envelope.version,
-            max_supported: CURRENT_VERSION,
-        });
+    let probe: VersionProbe = serde_json::from_str(s).map_err(LoadError::Json)?;
+    if probe.version > CURRENT_VERSION {
+        return Err(LoadError::UnsupportedVersion { found: probe.version, max_supported: CURRENT_VERSION });
     }
+    match probe.version {
+        // `0` preserves the pre-existing tolerance: today's loader never rejected an
+        // unwritten-but-hypothetical version 0, only versions *above* `CURRENT_VERSION`.
+        0 | 1 => load_v1(s),
+        _ => load_v2(s),
+    }
+}
+
+fn load_v1(s: &str) -> Result<Document, LoadError> {
+    let envelope: FileEnvelope = serde_json::from_str(s).map_err(LoadError::Json)?;
     // Must reject before Document::new, which asserts on zero extent.
     if envelope.width == 0 || envelope.height == 0 {
         return Err(LoadError::EmptyExtent);
@@ -139,22 +235,79 @@ pub fn load_str(s: &str) -> Result<Document, LoadError> {
         });
     }
     if envelope.layers.is_empty() {
-        return Err(LoadError::NoLayers);
+        return Err(LoadError::NoLayers { frame: 0 });
     }
     // Must reject before the per-layer Layer::blank(width, height) loop below: an unbounded
     // declared layer count is an independent amplification vector even at a capped width/height.
     if envelope.layers.len() > Document::MAX_LAYERS {
-        return Err(LoadError::TooManyLayers { found: envelope.layers.len(), max: Document::MAX_LAYERS });
+        return Err(LoadError::TooManyLayers { frame: 0, found: envelope.layers.len(), max: Document::MAX_LAYERS });
     }
 
     let mut doc = Document::new(envelope.width, envelope.height);
-    doc.layers.clear();
+    doc.layers_mut().clear();
     for file_layer in &envelope.layers {
-        let idx = doc.layers.len();
-        doc.layers.push(Layer::blank(envelope.width, envelope.height));
-        decode_layer_into(&mut doc, idx, file_layer)?;
+        let idx = doc.layers().len();
+        doc.layers_mut().push(Layer::blank(envelope.width, envelope.height));
+        decode_layer_into(&mut doc, 0, idx, file_layer)?;
     }
     doc.background = envelope.background;
+    Ok(doc)
+}
+
+fn load_v2(s: &str) -> Result<Document, LoadError> {
+    let envelope: FileEnvelopeV2 = serde_json::from_str(s).map_err(LoadError::Json)?;
+    if envelope.width == 0 || envelope.height == 0 {
+        return Err(LoadError::EmptyExtent);
+    }
+    if envelope.width > Document::MAX_WIDTH || envelope.height > Document::MAX_HEIGHT {
+        return Err(LoadError::ExtentTooLarge {
+            width: envelope.width,
+            height: envelope.height,
+            max_width: Document::MAX_WIDTH,
+            max_height: Document::MAX_HEIGHT,
+        });
+    }
+    if envelope.frames.is_empty() {
+        return Err(LoadError::NoFrames);
+    }
+    // Must reject before any per-frame Layer::blank loop runs: an unbounded declared frame count
+    // is an independent amplification vector even at a capped width/height.
+    if envelope.frames.len() > Document::MAX_FRAMES {
+        return Err(LoadError::TooManyFrames { found: envelope.frames.len(), max: Document::MAX_FRAMES });
+    }
+    for (i, file_frame) in envelope.frames.iter().enumerate() {
+        if file_frame.layers.is_empty() {
+            return Err(LoadError::NoLayers { frame: i });
+        }
+        if file_frame.layers.len() > Document::MAX_LAYERS {
+            return Err(LoadError::TooManyLayers { frame: i, found: file_frame.layers.len(), max: Document::MAX_LAYERS });
+        }
+    }
+    // The joint budget: computed from already-parsed Vec::len()s only, before any Layer::blank
+    // call — a new multiplicative axis (frame count) on top of the existing width/height/layer
+    // caps, closing the ~1TB worst case three independent per-axis caps alone would still permit.
+    let total_layers: usize = envelope.frames.iter().map(|f| f.layers.len()).sum();
+    let total_cells = total_layers as u128 * envelope.width as u128 * envelope.height as u128;
+    if total_cells > Document::MAX_TOTAL_CELLS as u128 {
+        return Err(LoadError::TotalCellBudgetExceeded { total_cells, max: Document::MAX_TOTAL_CELLS });
+    }
+
+    let mut doc = Document::new(envelope.width, envelope.height);
+    doc.frames.clear();
+    for (fi, file_frame) in envelope.frames.iter().enumerate() {
+        doc.frames.push(Frame::blank(envelope.width, envelope.height));
+        doc.frames[fi].layers.clear();
+        for file_layer in &file_frame.layers {
+            let idx = doc.frames[fi].layers.len();
+            doc.frames[fi].layers.push(Layer::blank(envelope.width, envelope.height));
+            decode_layer_into(&mut doc, fi, idx, file_layer)?;
+        }
+        doc.frames[fi].duration_override = file_frame.duration_override;
+    }
+    doc.active_frame = 0;
+    doc.background = envelope.background;
+    doc.frame_duration_ms = envelope.frame_duration_ms;
+    doc.loop_playback = envelope.loop_playback;
     Ok(doc)
 }
 
@@ -170,7 +323,7 @@ fn push_run(runs: &mut Vec<(u16, Rgba)>, color: Rgba) {
     runs.push((1, color));
 }
 
-fn encode_layer(doc: &Document, layer: usize) -> FileLayer {
+fn encode_layer_at(doc: &Document, frame: usize, layer: usize) -> FileLayer {
     let mut glyphs = Vec::with_capacity(doc.height as usize);
     let mut fg = Vec::with_capacity(doc.height as usize);
     let mut bg = Vec::with_capacity(doc.height as usize);
@@ -179,7 +332,7 @@ fn encode_layer(doc: &Document, layer: usize) -> FileLayer {
         let mut row_fg = Vec::new();
         let mut row_bg = Vec::new();
         for x in 0..doc.width {
-            let cell = doc.cell(layer, x, y).copied().unwrap_or(Cell::BLANK);
+            let cell = doc.cell_at(frame, layer, x, y).copied().unwrap_or(Cell::BLANK);
             row_glyphs.push(cell.ch);
             push_run(&mut row_fg, cell.fg);
             push_run(&mut row_bg, cell.bg);
@@ -201,36 +354,37 @@ fn encode_layer(doc: &Document, layer: usize) -> FileLayer {
 /// force a multi-gigabyte allocation before the mismatch is ever noticed. Bailing out the moment
 /// the accumulated length would exceed `width` caps the allocation at `width` cells, regardless
 /// of how large or numerous the declared runs are.
-fn expand_runs(runs: &[(u16, Rgba)], width: u16, layer: usize, row: usize) -> Result<Vec<Rgba>, LoadError> {
+fn expand_runs(runs: &[(u16, Rgba)], width: u16, frame: usize, layer: usize, row: usize) -> Result<Vec<Rgba>, LoadError> {
     let width = width as usize;
     let mut out = Vec::with_capacity(width);
     let mut total: usize = 0;
     for &(len, color) in runs {
         total = total.saturating_add(len as usize);
         if total > width {
-            return Err(LoadError::MalformedRuns { layer, row, expected: width as u16, got: total });
+            return Err(LoadError::MalformedRuns { frame, layer, row, expected: width as u16, got: total });
         }
         out.resize(total, color);
     }
     if out.len() != width {
-        return Err(LoadError::MalformedRuns { layer, row, expected: width as u16, got: out.len() });
+        return Err(LoadError::MalformedRuns { frame, layer, row, expected: width as u16, got: out.len() });
     }
     Ok(out)
 }
 
-/// Decodes one file layer's glyphs/colors into `doc`'s layer `layer`. Every loaded glyph is
-/// routed through `validate_width` — the same choke point every other character-entry path
-/// (`TextTool`, pencil's page-constrained glyphs) already goes through — so a well-formed-shaped
-/// but adversarial file can't inject a double-width/zero-width/control character that the app's
-/// own renderer assumes never happens (one glyph per fixed-size cell). Width is a structural
-/// invariant, enforced on every loaded glyph.
-fn decode_layer_into(doc: &mut Document, layer: usize, file_layer: &FileLayer) -> Result<(), LoadError> {
+/// Decodes one file layer's glyphs/colors into `doc`'s frame `frame`, layer `layer`. Every loaded
+/// glyph is routed through `validate_width` — the same choke point every other character-entry
+/// path (`TextTool`, pencil's page-constrained glyphs) already goes through — so a well-formed-
+/// shaped but adversarial file can't inject a double-width/zero-width/control character that the
+/// app's own renderer assumes never happens (one glyph per fixed-size cell). Width is a
+/// structural invariant, enforced on every loaded glyph.
+fn decode_layer_into(doc: &mut Document, frame: usize, layer: usize, file_layer: &FileLayer) -> Result<(), LoadError> {
     let (width, height) = (doc.width, doc.height);
     if file_layer.glyphs.len() != height as usize
         || file_layer.fg.len() != height as usize
         || file_layer.bg.len() != height as usize
     {
         return Err(LoadError::LayerRowCountMismatch {
+            frame,
             layer,
             expected: height as usize,
             glyph_rows: file_layer.glyphs.len(),
@@ -242,19 +396,19 @@ fn decode_layer_into(doc: &mut Document, layer: usize, file_layer: &FileLayer) -
         let row = y as usize;
         let glyph_row: Vec<char> = file_layer.glyphs[row].chars().collect();
         if glyph_row.len() != width as usize {
-            return Err(LoadError::ShapeMismatch { layer, row });
+            return Err(LoadError::ShapeMismatch { frame, layer, row });
         }
         for (x, &ch) in glyph_row.iter().enumerate() {
             if let Err(reason) = validate_width(ch) {
-                return Err(LoadError::InvalidGlyph { layer, row, col: x as u16, reason });
+                return Err(LoadError::InvalidGlyph { frame, layer, row, col: x as u16, reason });
             }
         }
-        let fg_row = expand_runs(&file_layer.fg[row], width, layer, row)?;
-        let bg_row = expand_runs(&file_layer.bg[row], width, layer, row)?;
+        let fg_row = expand_runs(&file_layer.fg[row], width, frame, layer, row)?;
+        let bg_row = expand_runs(&file_layer.bg[row], width, frame, layer, row)?;
         for x in 0..width {
             let xi = x as usize;
             let cell = Cell { ch: glyph_row[xi], fg: fg_row[xi], bg: bg_row[xi] };
-            doc.set_cell(layer, x, y, cell);
+            doc.set_cell_at(frame, layer, x, y, cell);
         }
     }
     Ok(())
@@ -320,14 +474,189 @@ mod tests {
     #[test]
     fn round_trips_a_manually_constructed_multi_layer_document() {
         let mut doc = Document::new(4, 4);
-        doc.layers.push(Layer::blank(4, 4));
+        doc.layers_mut().push(Layer::blank(4, 4));
         doc.set_cell(0, 1, 1, cell('a', Rgba::WHITE, Rgba::TRANSPARENT));
         doc.set_cell(1, 2, 2, cell('b', Rgba(9, 9, 9, 255), Rgba(8, 8, 8, 255)));
         let back = load_str(&save_string(&doc)).unwrap();
         assert_eq!(doc, back);
-        assert_eq!(back.layers.len(), 2);
+        assert_eq!(back.layers().len(), 2);
     }
 
+    // --- frame substrate: v1/v2 dispatch and multi-frame round trips ---
+
+    #[test]
+    fn single_frame_documents_still_save_as_the_v1_envelope_shape() {
+        let doc = Document::default_document();
+        let value: serde_json::Value = serde_json::from_str(&save_string(&doc)).unwrap();
+        assert!(value.get("frames").is_none(), "a single-frame document must not emit a frames key");
+        assert!(value.get("layers").is_some(), "a single-frame document keeps the plain v1 layers key");
+    }
+
+    #[test]
+    fn round_trips_a_two_frame_document_through_v2() {
+        let mut doc = Document::new(4, 3);
+        doc.set_cell(0, 0, 0, cell('a', Rgba::WHITE, Rgba::TRANSPARENT));
+        let mut history = crate::edit::History::new();
+        let edit = crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(4, 3)).unwrap();
+        history.apply(&mut doc, edit);
+        assert!(doc.set_active_frame(1));
+        doc.set_cell(0, 2, 2, cell('b', Rgba(1, 2, 3, 255), Rgba(4, 5, 6, 255)));
+        assert!(doc.set_active_frame(0));
+
+        let json = save_string(&doc);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value.get("frames").is_some(), "a multi-frame document must save as v2");
+
+        let back = load_str(&json).unwrap();
+        assert_eq!(doc, back);
+        assert_eq!(back.frame_count(), 2);
+    }
+
+    #[test]
+    fn round_trips_per_frame_duration_overrides_and_the_document_level_default() {
+        let mut doc = Document::new(3, 3);
+        doc.frame_duration_ms = 250;
+        doc.loop_playback = false;
+        let mut history = crate::edit::History::new();
+        let edit = crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(3, 3)).unwrap();
+        history.apply(&mut doc, edit);
+        let dur_edit = crate::frame_ops::set_frame_duration(&doc, 1, Some(50)).unwrap().unwrap();
+        history.apply(&mut doc, dur_edit);
+
+        let back = load_str(&save_string(&doc)).unwrap();
+        assert_eq!(back.frame_duration_ms, 250);
+        assert!(!back.loop_playback);
+        assert_eq!(back.resolved_frame_duration_ms(0), Some(250), "frame 0 has no override, falls back to the document default");
+        assert_eq!(back.resolved_frame_duration_ms(1), Some(50), "frame 1's override round-trips");
+    }
+
+    #[test]
+    fn a_v1_file_with_no_frames_field_loads_as_a_single_frame_document() {
+        let doc = Document::new(2, 2);
+        let json = save_string(&doc);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value.get("frames").is_none(), "sanity: this fixture is a plain v1 file");
+        let back = load_str(&json).unwrap();
+        assert_eq!(back.frame_count(), 1);
+    }
+
+    // --- v2 loader hardening: expand-before-validate, one test per new axis ---
+
+    /// A minimally-shaped `FileLayer` — empty `glyphs`/`fg`/`bg` arrays parse successfully (so the
+    /// fixture reaches this module's own cap checks) without needing any real row data, since every
+    /// cap below is checked from `Vec::len()`s alone, before any per-row decode ever runs.
+    fn empty_layer_json() -> serde_json::Value {
+        serde_json::json!({ "glyphs": [], "fg": [], "bg": [] })
+    }
+    fn frame_json(num_layers: usize) -> serde_json::Value {
+        let layers: Vec<_> = (0..num_layers).map(|_| empty_layer_json()).collect();
+        serde_json::json!({ "layers": layers })
+    }
+
+    #[test]
+    fn v2_frame_count_over_max_frames_is_rejected_before_allocating_any_frame() {
+        let frames: Vec<_> = (0..=Document::MAX_FRAMES).map(|_| frame_json(1)).collect();
+        let value = serde_json::json!({ "version": 2, "width": 2, "height": 2, "frames": frames });
+        let json = serde_json::to_string(&value).unwrap();
+
+        let started = std::time::Instant::now();
+        let result = load_str(&json);
+        assert!(started.elapsed() < std::time::Duration::from_millis(200), "must reject before allocating, not after");
+        match result {
+            Err(LoadError::TooManyFrames { found, max }) => {
+                assert_eq!(found, Document::MAX_FRAMES + 1);
+                assert_eq!(max, Document::MAX_FRAMES);
+            }
+            other => panic!("expected TooManyFrames, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v2_per_frame_layer_count_over_max_layers_is_rejected_before_allocating_that_frames_layers() {
+        let value = serde_json::json!({
+            "version": 2, "width": 2, "height": 2,
+            "frames": [frame_json(Document::MAX_LAYERS + 1)],
+        });
+        let json = serde_json::to_string(&value).unwrap();
+
+        let started = std::time::Instant::now();
+        let result = load_str(&json);
+        assert!(started.elapsed() < std::time::Duration::from_millis(200), "must reject before allocating, not after");
+        match result {
+            Err(LoadError::TooManyLayers { frame, found, max }) => {
+                assert_eq!(frame, 0);
+                assert_eq!(found, Document::MAX_LAYERS + 1);
+                assert_eq!(max, Document::MAX_LAYERS);
+            }
+            other => panic!("expected TooManyLayers, got {other:?}"),
+        }
+    }
+
+    /// The joint-cap regression: two frames, each declaring exactly `MAX_LAYERS` layers (at, not
+    /// over, the per-frame cap) against the maximal `MAX_WIDTH x MAX_HEIGHT` extent — every
+    /// individual axis stays within its own cap, but the product exceeds `MAX_TOTAL_CELLS`. Proves
+    /// the joint budget actually closes the ~1TB corner three independent per-axis caps alone would
+    /// still permit, not just that it's discussed.
+    #[test]
+    fn v2_total_cell_budget_exceeded_by_many_frames_each_individually_under_cap_is_rejected_before_any_layer_allocation() {
+        let frames: Vec<_> = (0..2).map(|_| frame_json(Document::MAX_LAYERS)).collect();
+        let value = serde_json::json!({
+            "version": 2, "width": Document::MAX_WIDTH, "height": Document::MAX_HEIGHT, "frames": frames,
+        });
+        let json = serde_json::to_string(&value).unwrap();
+
+        let started = std::time::Instant::now();
+        let result = load_str(&json);
+        assert!(started.elapsed() < std::time::Duration::from_millis(200), "must reject before allocating, not after");
+        match result {
+            Err(LoadError::TotalCellBudgetExceeded { total_cells, max }) => {
+                assert_eq!(max, Document::MAX_TOTAL_CELLS);
+                assert!(total_cells > max as u128);
+            }
+            other => panic!("expected TotalCellBudgetExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v2_huge_declared_extent_with_a_minimal_frames_array_is_rejected_before_any_allocation() {
+        let value = serde_json::json!({
+            "version": 2, "width": u16::MAX, "height": u16::MAX, "frames": [frame_json(1)],
+        });
+        let json = serde_json::to_string(&value).unwrap();
+
+        let started = std::time::Instant::now();
+        let result = load_str(&json);
+        assert!(started.elapsed() < std::time::Duration::from_millis(200), "must reject before allocating, not after");
+        match result {
+            Err(LoadError::ExtentTooLarge { width, height, max_width, max_height }) => {
+                assert_eq!(width, u16::MAX);
+                assert_eq!(height, u16::MAX);
+                assert_eq!(max_width, Document::MAX_WIDTH);
+                assert_eq!(max_height, Document::MAX_HEIGHT);
+            }
+            other => panic!("expected ExtentTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v2_empty_frames_array_is_rejected_as_no_frames() {
+        let value = serde_json::json!({ "version": 2, "width": 2, "height": 2, "frames": [] });
+        let json = serde_json::to_string(&value).unwrap();
+        assert!(matches!(load_str(&json), Err(LoadError::NoFrames)));
+    }
+
+    #[test]
+    fn v2_a_frame_with_zero_layers_is_rejected_as_no_layers_for_that_frame() {
+        let value = serde_json::json!({
+            "version": 2, "width": 2, "height": 2,
+            "frames": [frame_json(1), frame_json(0)],
+        });
+        let json = serde_json::to_string(&value).unwrap();
+        match load_str(&json) {
+            Err(LoadError::NoLayers { frame }) => assert_eq!(frame, 1, "the second frame (index 1) is the empty one"),
+            other => panic!("expected NoLayers, got {other:?}"),
+        }
+    }
 
     #[test]
     fn version_too_new_is_rejected() {
@@ -399,7 +728,8 @@ mod tests {
         value["layers"][0]["fg"][0] = serde_json::json!([[1, "#FFFFFFFF"]]);
         let json = serde_json::to_string(&value).unwrap();
         match load_str(&json) {
-            Err(LoadError::MalformedRuns { layer, row, expected, got }) => {
+            Err(LoadError::MalformedRuns { frame, layer, row, expected, got }) => {
+                assert_eq!(frame, 0);
                 assert_eq!(layer, 0);
                 assert_eq!(row, 0);
                 assert_eq!(expected, 3);
@@ -421,7 +751,8 @@ mod tests {
         value["layers"][0]["fg"][0] = serde_json::json!([[u16::MAX, "#FFFFFFFF"]]);
         let json = serde_json::to_string(&value).unwrap();
         match load_str(&json) {
-            Err(LoadError::MalformedRuns { layer, row, expected, got }) => {
+            Err(LoadError::MalformedRuns { frame, layer, row, expected, got }) => {
+                assert_eq!(frame, 0);
                 assert_eq!(layer, 0);
                 assert_eq!(row, 0);
                 assert_eq!(expected, 3);
@@ -443,7 +774,7 @@ mod tests {
         let json = serde_json::to_string(&value).unwrap();
         assert!(matches!(
             load_str(&json),
-            Err(LoadError::MalformedRuns { layer: 0, row: 0, expected: 4, .. })
+            Err(LoadError::MalformedRuns { frame: 0, layer: 0, row: 0, expected: 4, .. })
         ));
     }
 
@@ -454,7 +785,8 @@ mod tests {
         value["layers"][0]["bg"][0] = serde_json::json!([[5, "#00000000"]]);
         let json = serde_json::to_string(&value).unwrap();
         match load_str(&json) {
-            Err(LoadError::MalformedRuns { layer, row, expected, got }) => {
+            Err(LoadError::MalformedRuns { frame, layer, row, expected, got }) => {
+                assert_eq!(frame, 0);
                 assert_eq!(layer, 0);
                 assert_eq!(row, 0);
                 assert_eq!(expected, 3);
@@ -473,7 +805,8 @@ mod tests {
         value["layers"][0]["glyphs"][1] = serde_json::json!("xx"); // row 1: 2 chars, want 3
         let json = serde_json::to_string(&value).unwrap();
         match load_str(&json) {
-            Err(LoadError::ShapeMismatch { layer, row }) => {
+            Err(LoadError::ShapeMismatch { frame, layer, row }) => {
+                assert_eq!(frame, 0);
                 assert_eq!(layer, 0);
                 assert_eq!(row, 1);
             }
@@ -492,7 +825,8 @@ mod tests {
         value["layers"][0]["glyphs"][0] = serde_json::json!("a你b"); // '你' is double-width
         let json = serde_json::to_string(&value).unwrap();
         match load_str(&json) {
-            Err(LoadError::InvalidGlyph { layer, row, col, reason }) => {
+            Err(LoadError::InvalidGlyph { frame, layer, row, col, reason }) => {
+                assert_eq!(frame, 0);
                 assert_eq!(layer, 0);
                 assert_eq!(row, 0);
                 assert_eq!(col, 1);
@@ -526,7 +860,8 @@ mod tests {
         glyphs.pop();
         let json = serde_json::to_string(&value).unwrap();
         match load_str(&json) {
-            Err(LoadError::LayerRowCountMismatch { layer, expected, glyph_rows, fg_rows, bg_rows }) => {
+            Err(LoadError::LayerRowCountMismatch { frame, layer, expected, glyph_rows, fg_rows, bg_rows }) => {
+                assert_eq!(frame, 0);
                 assert_eq!(layer, 0);
                 assert_eq!(expected, 3);
                 assert_eq!(glyph_rows, 2);
@@ -589,7 +924,8 @@ mod tests {
         value["layers"] = serde_json::json!(layers);
         let json = serde_json::to_string(&value).unwrap();
         match load_str(&json) {
-            Err(LoadError::TooManyLayers { found, max }) => {
+            Err(LoadError::TooManyLayers { frame, found, max }) => {
+                assert_eq!(frame, 0);
                 assert_eq!(found, Document::MAX_LAYERS + 1);
                 assert_eq!(max, Document::MAX_LAYERS);
             }
@@ -603,7 +939,7 @@ mod tests {
         let mut value: serde_json::Value = serde_json::from_str(&save_string(&doc)).unwrap();
         value["layers"] = serde_json::json!([]);
         let json = serde_json::to_string(&value).unwrap();
-        assert!(matches!(load_str(&json), Err(LoadError::NoLayers)));
+        assert!(matches!(load_str(&json), Err(LoadError::NoLayers { frame: 0 })));
     }
 
     #[test]
@@ -630,7 +966,7 @@ mod tests {
             json.push(']');
         }
         json.push('}');
-        assert!(matches!(load_str(&json), Err(LoadError::NoLayers)));
+        assert!(matches!(load_str(&json), Err(LoadError::NoLayers { frame: 0 })));
     }
 
     /// A literal, hand-written JSON string (not built via `serde_json::Value`, which would already

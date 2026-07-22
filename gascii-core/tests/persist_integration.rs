@@ -10,7 +10,7 @@ use gascii_core::{
 };
 
 fn ctx(mask: PlaneMask, glyph: char, fg: Rgba, bg: Rgba) -> ToolCtx {
-    ToolCtx { layer: 0, glyph, fg, bg, mask, density: DensityMode::Fixed(Fixed(1.0)), ramp: Vec::new(), size: 1, shape: BrushShape::Square }
+    ToolCtx { frame: 0, layer: 0, glyph, fg, bg, mask, density: DensityMode::Fixed(Fixed(1.0)), ramp: Vec::new(), size: 1, shape: BrushShape::Square }
 }
 
 fn stroke(tool: &mut dyn Tool, history: &mut History, doc: &mut Document, tctx: &ToolCtx, path: &[(u16, u16)]) {
@@ -154,7 +154,7 @@ fn interleaved_non_overlapping_text_bursts_survive_a_full_undo_redo_round_trip_t
     assert!(history.undo(&mut doc));
     assert_eq!(doc, s1, "first undo must revert only burst 2");
     assert!(history.undo(&mut doc));
-    assert!(doc.layers[0].cells().iter().all(Cell::is_blank), "second undo must revert burst 1, restoring a fully blank document");
+    assert!(doc.layers()[0].cells().iter().all(Cell::is_blank), "second undo must revert burst 1, restoring a fully blank document");
     assert!(!history.can_undo());
 
     // Redo walks forward through the same intermediate states.
@@ -185,7 +185,7 @@ fn export_text_composites_across_multiple_layers_before_trimming() {
     let mut doc = Document::new(4, 2);
     doc.set_cell(0, 0, 0, Cell { ch: 'a', fg: Rgba::WHITE, bg: Rgba(1, 1, 1, 255) });
     doc.set_cell(0, 1, 0, Cell { ch: 'b', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
-    doc.layers.push(gascii_core::Layer::blank(4, 2));
+    doc.layers_mut().push(gascii_core::Layer::blank(4, 2));
     // Top layer fully replaces (0,0) (opaque bg) but leaves (1,0) untouched (Blank on top).
     doc.set_cell(1, 0, 0, Cell { ch: 'X', fg: Rgba::WHITE, bg: Rgba(2, 2, 2, 255) });
 

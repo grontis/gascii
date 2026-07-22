@@ -4,12 +4,16 @@
 //! already uses rather than mutating `Document` directly.
 
 use crate::edit::{DocSnapshot, Edit};
-use crate::model::{Cell, Document, DocExtent, Layer};
+use crate::model::{Cell, Document, DocExtent, Frame, Layer};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ResizeError {
     ZeroExtent,
     TooLarge { width: u16, height: u16, max_width: u16, max_height: u16 },
+    /// The joint `frame_count x layers-per-frame x new_width x new_height` budget
+    /// `Document::MAX_TOTAL_CELLS` bounds — mirrors `frame_ops::FrameOpError::TotalCellBudgetExceeded`,
+    /// the resize-time counterpart of the same check.
+    TotalCellBudgetExceeded { total_cells: u128, max: usize },
 }
 
 /// Where existing content lands on one axis when that axis's extent changes. `Start` is the
@@ -42,13 +46,22 @@ fn axis_offset(anchor: AxisAnchor, old: u16, new: u16) -> i32 {
     }
 }
 
+/// Sum of every existing frame's layer count, times the *new* `width x height` — the joint budget
+/// `Document::MAX_TOTAL_CELLS` bounds. `u128` to stay overflow-free against worst-case `u16` extents
+/// and `usize` counts multiplied together, mirroring `frame_ops::total_cells`.
+fn total_cells_at(doc: &Document, new_width: u16, new_height: u16) -> u128 {
+    let layers_total: usize = doc.frames.iter().map(|f| f.layers.len()).sum();
+    layers_total as u128 * new_width as u128 * new_height as u128
+}
+
 /// Builds the `Edit::Resize` for growing/shrinking `doc` to `new_width x new_height`, anchored per
 /// `anchor` (grow pads Blank on the side(s) opposite the anchor; shrink crops from the side(s)
-/// opposite the anchor). Validates the requested extent against `Document::MAX_WIDTH`/`MAX_HEIGHT`
-/// *before* allocating anything sized by it — the same untrusted-size discipline the `.gascii`
-/// loader and paste already apply, even though this particular size originates from the app's own
-/// resize dialog (belt-and-suspenders). Returns `Ok(None)` for a same-size no-op (no empty undo
-/// entry).
+/// opposite the anchor). Validates the requested extent against `Document::MAX_WIDTH`/`MAX_HEIGHT`,
+/// then the joint `frame_count x layers-per-frame x new_width x new_height` budget against
+/// `Document::MAX_TOTAL_CELLS` — both *before* allocating anything sized by it, the same
+/// untrusted-size discipline the `.gascii` loader and `frame_ops::add_frame` already apply, even
+/// though this particular size originates from the app's own resize dialog (belt-and-suspenders).
+/// Returns `Ok(None)` for a same-size no-op (no empty undo entry).
 pub fn resize_document(
     doc: &Document,
     new_width: u16,
@@ -69,17 +82,28 @@ pub fn resize_document(
     if new_width == doc.width && new_height == doc.height {
         return Ok(None);
     }
+    let total = total_cells_at(doc, new_width, new_height);
+    if total > Document::MAX_TOTAL_CELLS as u128 {
+        return Err(ResizeError::TotalCellBudgetExceeded { total_cells: total, max: Document::MAX_TOTAL_CELLS });
+    }
     let dx = axis_offset(anchor.h, doc.width, new_width);
     let dy = axis_offset(anchor.v, doc.height, new_height);
-    let before = DocSnapshot { extent: doc.extent(), layers: doc.layers.clone() };
-    let after_layers = doc
-        .layers
+    let before = DocSnapshot { extent: doc.extent(), frames: doc.frames.clone() };
+    let after_frames = doc
+        .frames
         .iter()
-        .map(|l| resize_layer(l, doc.width, doc.height, new_width, new_height, dx, dy))
+        .map(|f| Frame {
+            layers: f
+                .layers
+                .iter()
+                .map(|l| resize_layer(l, doc.width, doc.height, new_width, new_height, dx, dy))
+                .collect(),
+            duration_override: f.duration_override,
+        })
         .collect();
     let after = DocSnapshot {
         extent: DocExtent { width: new_width, height: new_height },
-        layers: after_layers,
+        frames: after_frames,
     };
     Ok(Some(Edit::Resize { before, after }))
 }
@@ -219,6 +243,24 @@ mod tests {
         );
     }
 
+    /// Mirrors `over_cap_dimension_is_rejected_before_allocating_and_returns_promptly`: a document
+    /// with more layers than fit `MAX_TOTAL_CELLS` at the *new* extent (but comfortably under budget
+    /// at its current tiny extent, so it was never rejected on the way in) must be rejected before
+    /// `resize_document` allocates any resized layer.
+    #[test]
+    fn resize_toward_the_extent_cap_is_rejected_before_allocating_when_the_joint_budget_would_be_exceeded() {
+        let mut doc = Document::new(2, 2);
+        for _ in 0..Document::MAX_LAYERS {
+            doc.layers_mut().push(Layer::blank(2, 2));
+        }
+        assert_eq!(doc.layers().len(), Document::MAX_LAYERS + 1, "one layer over MAX_LAYERS, cheap at this tiny extent");
+
+        let started = std::time::Instant::now();
+        let result = resize_document(&doc, Document::MAX_WIDTH, Document::MAX_HEIGHT, start());
+        assert!(started.elapsed() < std::time::Duration::from_millis(200), "must reject before allocating, not after");
+        assert!(matches!(result, Err(ResizeError::TotalCellBudgetExceeded { .. })));
+    }
+
     #[test]
     fn width_or_height_exactly_at_the_cap_is_accepted() {
         let doc = Document::new(10, 10);
@@ -228,17 +270,17 @@ mod tests {
     #[test]
     fn multi_layer_document_resizes_every_layer_consistently() {
         let mut doc = Document::new(3, 3);
-        doc.layers.push(Layer::blank(3, 3));
+        doc.layers_mut().push(Layer::blank(3, 3));
         doc.set_cell(0, 0, 0, cell('a'));
         doc.set_cell(1, 0, 0, cell('b'));
         let edit = resize_document(&doc, 5, 5, start()).unwrap().unwrap();
         let mut history = History::new();
         history.apply(&mut doc, edit);
-        assert_eq!(doc.layers.len(), 2);
+        assert_eq!(doc.layers().len(), 2);
         assert_eq!(doc.cell(0, 0, 0), Some(&cell('a')));
         assert_eq!(doc.cell(1, 0, 0), Some(&cell('b')));
-        assert_eq!(doc.layers[0].cells().len(), 25);
-        assert_eq!(doc.layers[1].cells().len(), 25);
+        assert_eq!(doc.layers()[0].cells().len(), 25);
+        assert_eq!(doc.layers()[1].cells().len(), 25);
     }
 
     #[test]
@@ -386,5 +428,28 @@ mod tests {
         assert_ne!(doc, before);
         assert!(history.undo(&mut doc));
         assert_eq!(doc, before);
+    }
+
+    /// Extends `every_anchor_places_content_where_promised_on_an_asymmetric_grow`'s single-frame
+    /// coverage across frames: resize is a document-wide invariant, so a second frame's content
+    /// must land exactly where the same anchor rules promise, not just the active frame's.
+    #[test]
+    fn resize_document_resizes_every_frame_not_just_the_active_one() {
+        let mut doc = Document::new(2, 2);
+        doc.set_cell(0, 0, 0, cell('a')); // frame 0, top-left
+
+        let mut history = History::new();
+        let edit = crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(2, 2)).unwrap();
+        history.apply(&mut doc, edit);
+        assert!(doc.set_active_frame(1));
+        doc.set_cell(0, 1, 1, cell('z')); // frame 1, bottom-right
+        assert!(doc.set_active_frame(0));
+
+        let edit = resize_document(&doc, 6, 4, start()).unwrap().unwrap();
+        history.apply(&mut doc, edit);
+
+        assert_eq!(doc.cell_at(0, 0, 0, 0), Some(&cell('a')), "frame 0's content stays top-left anchored");
+        assert_eq!(doc.cell_at(1, 0, 1, 1), Some(&cell('z')), "frame 1 must be resized too, not left at its old extent");
+        assert_eq!(doc.frame_layers(1).unwrap()[0].cells().len(), 24, "frame 1 must be resized to the new 6x4 extent");
     }
 }

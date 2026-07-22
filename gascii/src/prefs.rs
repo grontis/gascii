@@ -12,7 +12,7 @@ use eframe::egui;
 use gascii_core::BrushShape;
 use serde::{Deserialize, Serialize};
 
-use crate::app::{tool_def, Binding, ExportFormat, ExportSettings, GasciiApp, ToolKind, SIZED_TOOL_COUNT, TOOLS};
+use crate::app::{tool_def, tools, Binding, ExportFormat, ExportSettings, GasciiApp, ToolKind, SIZED_TOOL_COUNT};
 
 const KEY: &str = "gascii_prefs";
 
@@ -46,7 +46,7 @@ fn tool_kind_to_str(kind: ToolKind) -> &'static str {
 }
 
 fn tool_kind_from_str(s: &str) -> Option<ToolKind> {
-    TOOLS.iter().find(|d| d.name == s).map(|d| d.kind)
+    tools().iter().find(|d| d.name == s).map(|d| d.kind)
 }
 
 fn shape_to_u8(shape: BrushShape) -> u8 {
@@ -72,12 +72,22 @@ fn format_to_str(format: ExportFormat) -> &'static str {
     match format {
         ExportFormat::Text => "text",
         ExportFormat::Png => "png",
+        ExportFormat::Gif => "gif",
+        ExportFormat::SpriteSheet => "spritesheet",
+        ExportFormat::TextFrames => "text_frames",
     }
 }
 
+/// Unknown values (a file written by a future version, or a multi-frame-only format persisted
+/// from a document that's since dropped to one frame — `export_dialog`'s own guard snaps that
+/// case back to `Text` on reopen) fall back to `Text`, matching this module's own established
+/// precedent.
 fn format_from_str(s: &str) -> ExportFormat {
     match s {
         "png" => ExportFormat::Png,
+        "gif" => ExportFormat::Gif,
+        "spritesheet" => ExportFormat::SpriteSheet,
+        "text_frames" => ExportFormat::TextFrames,
         _ => ExportFormat::Text,
     }
 }
@@ -217,7 +227,7 @@ mod tests {
 
     #[test]
     fn tool_kind_round_trips_through_its_str_mapping_for_every_kind() {
-        for def in TOOLS.iter() {
+        for def in tools().iter() {
             assert_eq!(tool_kind_from_str(tool_kind_to_str(def.kind)), Some(def.kind));
         }
     }
@@ -229,7 +239,13 @@ mod tests {
 
     #[test]
     fn export_format_round_trips_through_its_str_mapping() {
-        for format in [ExportFormat::Text, ExportFormat::Png] {
+        for format in [
+            ExportFormat::Text,
+            ExportFormat::Png,
+            ExportFormat::Gif,
+            ExportFormat::SpriteSheet,
+            ExportFormat::TextFrames,
+        ] {
             assert_eq!(format_from_str(format_to_str(format)), format);
         }
     }
@@ -268,6 +284,29 @@ mod tests {
         assert_eq!(restored.recent_files, vec![PathBuf::from("a.gascii"), PathBuf::from("b.gascii")]);
         assert_eq!(restored.export, ExportSettings { format: ExportFormat::Png, scale: 2, transparent: true, trim: false });
         assert!(restored.show_grid);
+    }
+
+    /// The plugin-backed name resolution (`tool_kind_from_str`/`tool_kind_to_str`, both keyed off
+    /// the tool registry's `.name`, unchanged by the plugin migration) must round-trip Brush
+    /// correctly regardless of which binding it's stored under — every other prefs test in this
+    /// module only ever binds Brush to L. Binding it to BOTH L and R at once is the case most
+    /// likely to expose a stale index/position assumption, since it's the one configuration where
+    /// the plugin-owned row appears in `Prefs::slots` twice.
+    #[test]
+    fn prefs_round_trip_resolves_brush_through_the_plugin_backed_row_on_either_binding() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Brush);
+        app.bind(Binding::R, ToolKind::Brush);
+
+        let prefs = Prefs::from_app(&app);
+        let json = serde_json::to_string(&prefs).unwrap();
+        let back: Prefs = serde_json::from_str(&json).unwrap();
+
+        let mut restored = GasciiApp::headless();
+        back.apply_to(&mut restored);
+
+        assert_eq!(restored.slot(Binding::L).kind, ToolKind::Brush, "L must resolve back through the plugin-backed row");
+        assert_eq!(restored.slot(Binding::R).kind, ToolKind::Brush, "R must resolve back through the plugin-backed row too");
     }
 
     #[test]
@@ -384,16 +423,18 @@ mod tests {
     }
 
     /// Acceptance criterion: "fullscreen state is never persisted" (and the same for the stylus
-    /// session fields). `Prefs::from_app` simply never reads `app.stylus_detected`/
-    /// `app.brush_pressure`/`app.pinch_zoom_accum`/`app.kiosk_last_fit_size`/
-    /// `app.pressure_stamp_size`, and there is no `fullscreen` field on `Prefs` at all — pinned at
-    /// the serialization boundary so a future accidental `#[derive(Serialize)]` field addition
-    /// would break this test rather than silently start persisting session-only state.
+    /// session fields, plus Brush's plugin-owned pressure opt-in — never on `GasciiApp` at all
+    /// since the plugin-api migration, and still not persisted). `Prefs::from_app` simply never
+    /// reads `app.stylus_detected`/`app.pinch_zoom_accum`/`app.kiosk_last_fit_size`/
+    /// `app.pressure_stamp_size`, and there is no `fullscreen`/`brush_pressure` field on `Prefs` at
+    /// all — pinned at the serialization boundary so a future accidental `#[derive(Serialize)]`
+    /// field addition would break this test rather than silently start persisting session-only
+    /// state.
     #[test]
     fn saved_prefs_json_never_mentions_fullscreen_or_any_stylus_session_field() {
         let mut app = GasciiApp::headless();
         app.stylus_detected = true;
-        app.brush_pressure = true;
+        app.brush_plugin_mut().set_pressure_enabled(true);
         app.pinch_zoom_accum = 1.4;
 
         let json = serde_json::to_string(&Prefs::from_app(&app)).unwrap();
@@ -435,11 +476,17 @@ mod tests {
         let prefs: Prefs =
             serde_json::from_str(&json).expect("unknown extra fields must not fail to parse");
         let mut app = GasciiApp::headless();
-        assert!(!app.stylus_detected && !app.brush_pressure, "sanity: session defaults are off");
+        assert!(
+            !app.stylus_detected && !app.brush_plugin_mut().pressure_enabled(),
+            "sanity: session defaults are off"
+        );
 
         prefs.apply_to(&mut app);
 
         assert!(!app.stylus_detected, "apply_to must never set stylus_detected — it isn't a prefs field");
-        assert!(!app.brush_pressure, "apply_to must never set brush_pressure — it isn't a prefs field");
+        assert!(
+            !app.brush_plugin_mut().pressure_enabled(),
+            "apply_to must never set Brush's pressure opt-in — it isn't a prefs field"
+        );
     }
 }

@@ -5,11 +5,11 @@
 
 use eframe::egui::{self, Align2, Pos2, Rect, Ui, UiBuilder, Vec2};
 
-use super::sidebar::{self, color_picker_body, palette, ramp_label, rule, tool_grid, SHAPE_OPTIONS};
+use super::sidebar::{self, color_picker_body, palette, rule, tool_grid};
 use super::{theme, widgets};
-use crate::app::{sized_slot, tool_def, Binding, GasciiApp, ToolKind, TOOLS};
+use crate::app::{tools, GasciiApp};
 use crate::fonts;
-use gascii_core::{Buildup, DensityMode, Fixed, MAX_TOOL_SIZE};
+use gascii_plugin_api::OptionsGeom;
 
 pub const TOP_H: f32 = 44.0;
 pub const SIDEBAR_W: f32 = 340.0;
@@ -120,15 +120,16 @@ pub fn top_bar(ui: &mut Ui, app: &mut GasciiApp, ctx: &egui::Context) {
     }
 }
 
-/// The sidebar's tool grid: every `TOOLS` entry except Text. Kiosk has no keyboard-driven session
-/// UI, so a binding parked on Text here would have no cell to highlight — see
-/// `crate::app::tool_shortcut_reachable`, which keeps the `T` shortcut from reaching Text while
-/// fullscreen for the same reason. A binding already on Text when fullscreen is entered is left
-/// alone by both; `tool_grid`'s equality-based highlight simply shows no cell selected in that
-/// case, never panics or paints a phantom badge (pinned by `kiosk_sidebars_tool_list_excludes_text`
-/// and `tool_grid_renders_without_panicking_when_a_binding_holds_a_tool_absent_from_its_list`).
+/// The sidebar's tool grid: every registry entry with `kiosk_visible` set (every tool but Text).
+/// Kiosk has no keyboard-driven session UI, so a binding parked on Text here would have no cell to
+/// highlight — see `crate::app::tool_shortcut_reachable`, which keeps the `T` shortcut from
+/// reaching Text while fullscreen for the same reason (the same `kiosk_visible` fact). A binding
+/// already on Text when fullscreen is entered is left alone by both; `tool_grid`'s equality-based
+/// highlight simply shows no cell selected in that case, never panics or paints a phantom badge
+/// (pinned by `kiosk_sidebars_tool_list_excludes_text` and
+/// `tool_grid_renders_without_panicking_when_a_binding_holds_a_tool_absent_from_its_list`).
 fn kiosk_tools() -> Vec<crate::app::ToolDef> {
-    TOOLS.iter().copied().filter(|d| d.kind != ToolKind::Text).collect()
+    tools().iter().copied().filter(|d| d.kiosk_visible).collect()
 }
 
 /// The sidebar: a 4×2 tool grid (Text excluded), both bindings' tool options, the glyph palette
@@ -161,114 +162,24 @@ pub fn sidebar(ui: &mut Ui, app: &mut GasciiApp) {
     });
 }
 
-/// Per-binding tool options: `L <tool> [− n +]` with the shape segment beneath, and — when that
-/// binding holds the Brush — the ramp/intensity/pressure block nested right under it rather than
-/// floating below both rows, divided from the next binding's block by a rule. The same structure
-/// the normal sidebar shows (see its own `binding_options` doc for the shared-state rationale),
-/// at touch geometry. Unsized tools get a dash where the stepper would be, so the rows always
-/// double as an L/R legend.
+/// Per-binding tool options at touch geometry — kiosk's own `OptionsGeom`, delegating the actual
+/// per-tool layout to `sidebar::binding_options_geom` (the same renderer the normal sidebar's own
+/// `binding_options` uses at its geometry) so the row/shape/options-callback structure is written
+/// once. Kiosk's deltas: a taller stepper, an 18px SHAPE indent (wrapped in its own `ui.horizontal`
+/// per row, clear of the L/R gutter), no vertical-spacing override (inherits `sidebar`'s own
+/// `item_spacing`), and Brush's Fixed/Buildup control sharing a row with its slider.
 fn binding_options(ui: &mut Ui, app: &mut GasciiApp, k: f32) {
-    let t = theme::current(ui.ctx());
-    widgets::micro_label(ui, "OPTIONS");
-    let mut brush_shown = false;
-    for (i, &b) in Binding::ALL.iter().enumerate() {
-        let kind = app.slot(b).kind;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            ui.label(
-                egui::RichText::new(if b == Binding::L { "L" } else { "R" })
-                    .font(fonts::mono_id(fonts::size::LABEL))
-                    .color(t.fg_secondary),
-            );
-            ui.label(
-                egui::RichText::new(tool_def(kind).name)
-                    .font(fonts::ui_medium_id(fonts::size::CONTROL))
-                    .color(t.fg_text),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(slot) = sized_slot(kind) {
-                    let mut size = app.slots[b.ix()].stamps[slot].size;
-                    if widgets::stepper(ui, &mut size, 1, MAX_TOOL_SIZE, SIZE_STEPPER_H * k) {
-                        app.slots[b.ix()].stamps[slot].size = size;
-                    }
-                } else {
-                    ui.label(
-                        egui::RichText::new("–")
-                            .font(fonts::mono_id(fonts::size::LABEL))
-                            .color(t.fg_secondary),
-                    );
-                }
-            });
-        });
-        if let Some(slot) = sized_slot(kind) {
-            ui.horizontal(|ui| {
-                // Indented to sit under the tool name, clear of the L/R gutter.
-                ui.add_space(18.0);
-                widgets::micro_label(ui, "SHAPE");
-            });
-            ui.horizontal(|ui| {
-                // Indented to sit under the tool name, clear of the L/R gutter.
-                ui.add_space(18.0);
-                let mut shape = app.slots[b.ix()].stamps[slot].shape;
-                if widgets::segmented(ui, &mut shape, &SHAPE_OPTIONS, false) {
-                    app.slots[b.ix()].stamps[slot].shape = shape;
-                }
-            });
-        }
-        if kind == ToolKind::Brush && !brush_shown {
-            ui.add_space(2.0);
-            brush_options(ui, app);
-            brush_shown = true;
-        }
-        if i + 1 < Binding::ALL.len() {
-            ui.add_space(2.0);
-            rule(ui, t.border_soft);
-        }
-    }
-}
-
-/// Ramp, intensity mode/level and the pressure toggle — the same app-global state the normal
-/// sidebar's BRUSH block edits, shown once regardless of which binding holds the Brush.
-fn brush_options(ui: &mut Ui, app: &mut GasciiApp) {
-    let t = theme::current(ui.ctx());
-    widgets::micro_label(ui, "BRUSH");
-    let mut ramp = app.active_ramp;
-    let names: Vec<(usize, &str)> = app.ramps.iter().enumerate().map(|(i, r)| (i, ramp_label(r.name))).collect();
-    if widgets::segmented(ui, &mut ramp, &names, false) {
-        app.active_ramp = ramp;
-    }
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        let mut buildup = matches!(app.density_mode, DensityMode::Buildup(_));
-        let modes = [(false, "Fixed"), (true, "Buildup")];
-        let changed = widgets::segmented(ui, &mut buildup, &modes, false);
-        if buildup {
-            if changed {
-                app.density_mode = DensityMode::Buildup(Buildup);
-            }
-        } else {
-            let mut level = match app.density_mode {
-                DensityMode::Fixed(Fixed(l)) => l,
-                DensityMode::Buildup(_) => 1.0,
-            };
-            let slider = ui.add_sized(
-                Vec2::new(100.0, 24.0),
-                egui::Slider::new(&mut level, 0.0..=1.0).show_value(false),
-            );
-            if slider.changed() || changed {
-                app.density_mode = DensityMode::Fixed(Fixed(level));
-            }
-            ui.label(
-                egui::RichText::new(format!("{:.0}%", level * 100.0))
-                    .font(fonts::mono_id(fonts::size::LABEL))
-                    .color(t.fg_secondary),
-            );
-        }
-    });
-    // Same gate as the normal sidebar: only offered once a pressure signal has been seen.
-    if app.stylus_detected {
-        widgets::checkbox(ui, &mut app.brush_pressure, "Pressure");
-    }
+    sidebar::binding_options_geom(
+        ui,
+        app,
+        OptionsGeom {
+            stepper_h: SIZE_STEPPER_H * k,
+            shape_indent: 18.0,
+            item_spacing_y: None,
+            wrap_brush_mode: true,
+            brush_slider_h: 24.0,
+        },
+    );
 }
 
 fn colors(ui: &mut Ui, app: &mut GasciiApp, k: f32) {
@@ -344,8 +255,8 @@ pub fn status_bar(ui: &mut Ui, app: &mut GasciiApp) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::Binding;
-    use gascii_core::BrushShape;
+    use crate::app::{Binding, ToolKind};
+    use gascii_core::{Buildup, BrushShape, DensityMode};
 
     /// Full size on tall panels, proportional shrink below `COMFORT_H`, floored at `SCALE_MIN` so
     /// touch targets never collapse on very short screens.
@@ -358,11 +269,11 @@ mod tests {
     }
 
     /// Kiosk's sidebar has no cell for Text (no keyboard-driven session UI) — its tool list must
-    /// never include it, and must otherwise stay in sync with `TOOLS`.
+    /// never include it, and must otherwise stay in sync with the tool registry.
     #[test]
     fn kiosk_sidebars_tool_list_excludes_text() {
         let tools = kiosk_tools();
-        assert_eq!(tools.len(), TOOLS.len() - 1, "every TOOLS entry except Text");
+        assert_eq!(tools.len(), crate::app::tools().len() - 1, "every registry entry except Text");
         assert!(!tools.iter().any(|d| d.kind == ToolKind::Text), "Text must not appear in the kiosk grid");
     }
 
@@ -425,8 +336,8 @@ mod tests {
     fn brush_block_renders_when_a_binding_holds_brush_without_mutating_brush_state() {
         let mut app = crate::app::GasciiApp::headless();
         app.bind(Binding::R, ToolKind::Brush);
-        app.density_mode = DensityMode::Buildup(Buildup);
-        let ramp_before = app.active_ramp;
+        app.brush_plugin_mut().set_density_mode(DensityMode::Buildup(Buildup));
+        let ramp_before = app.brush_plugin_mut().active_ramp();
 
         let ctx = egui::Context::default();
         fonts::install_fonts(&ctx);
@@ -435,10 +346,10 @@ mod tests {
         });
 
         assert!(
-            matches!(app.density_mode, DensityMode::Buildup(_)),
+            matches!(app.brush_plugin_mut().density_mode(), DensityMode::Buildup(_)),
             "a render pass with no input must not flip the density mode"
         );
-        assert_eq!(app.active_ramp, ramp_before, "a render pass with no input must not change the ramp");
+        assert_eq!(app.brush_plugin_mut().active_ramp(), ramp_before, "a render pass with no input must not change the ramp");
     }
 
     /// The colour block (wells + K1 well popups + quick-color row) must render without panicking,

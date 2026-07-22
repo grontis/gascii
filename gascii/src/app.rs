@@ -1,16 +1,21 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use eframe::egui;
 use gascii_core::{
-    builtin_pages, builtin_ramps, clear_document, composite, export_text, load_str, resize_document,
-    save_string, AxisAnchor, BrushShape, CellPatch, DensityBrush, DensityMode, Document,
-    Eraser, Fixed, FloodFill, History, Line, Page, Pencil, PlaneMask, Ramp, Rectangle, ResizeAnchor,
-    ResizeError, Rgba, SelectionTool, TextTool, Tool, ToolEvent, ToolResponse, WidthReject, MAX_TOOL_SIZE,
+    builtin_pages, clear_document, composite, composite_frame, duplicate_frame, export_text,
+    export_text_frames, load_str, resize_document, save_string, AxisAnchor, BrushShape, CellPatch,
+    Document, Eraser, FloodFill, FrameOpError, History, Line, Page, Pencil, PlaneMask, Rectangle,
+    ResizeAnchor, ResizeError, Rgba, SelectionTool, TextTool, Tool, ToolEvent, ToolResponse,
+    WidthReject, MAX_TOOL_SIZE,
 };
 
-use crate::canvas::{self, CanvasRenderer, NaiveRenderer};
+use gascii_plugin_api::{CanvasRenderer, Plugin};
+
+use crate::anim_export;
+use crate::canvas::{self, NaiveRenderer};
 use crate::fonts;
 use crate::image_bg;
 use crate::png_export;
@@ -63,6 +68,51 @@ fn export_text_untrimmed(doc: &Document) -> String {
         .join("\n")
 }
 
+/// The Export dialog's "Trim trailing spaces" *unchecked* path for `ExportFormat::TextFrames` —
+/// mirrors `export_text_untrimmed`'s exact asymmetric core/app split (untrimmed variants have
+/// always lived app-side) and `export_text_frames`'s own header/frame-separator format.
+fn export_text_frames_untrimmed(doc: &Document) -> String {
+    (0..doc.frame_count())
+        .map(|i| {
+            let body = composite_frame(doc, i)
+                .expect("i is always in 0..frame_count()")
+                .iter()
+                .map(|row| row.iter().map(|c| c.ch).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let dur = doc.resolved_frame_duration_ms(i).expect("i is always in 0..frame_count()");
+            format!("--- frame {} ({dur}ms) ---\n{body}", i + 1)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// A document that dropped to one frame while the dialog was closed (or between opens) must not
+/// reopen on a multi-frame-only format that's no longer offered — snaps back to `Text` in that
+/// case, a no-op otherwise. Pure, mirroring `export_dialog_formats`'s own testability rationale.
+fn snap_unavailable_export_format(format: ExportFormat, frame_count: usize) -> ExportFormat {
+    if frame_count == 1 && matches!(format, ExportFormat::Gif | ExportFormat::SpriteSheet | ExportFormat::TextFrames) {
+        ExportFormat::Text
+    } else {
+        format
+    }
+}
+
+/// The Export dialog's offered format list: Text/PNG always, with the three multi-frame formats
+/// (Gif/SpriteSheet/TextFrames) appended only when `doc.frame_count() > 1` — a single-frame
+/// document's list is byte-identical to what the dialog offered before this format ever existed.
+/// Pulled out as a pure function, mirroring `is_own_clipboard_text`/`edit_marker_differs`, so the
+/// gating is unit-testable without driving the dialog's own `egui::Context`-backed UI.
+fn export_dialog_formats(doc: &Document) -> Vec<(ExportFormat, &'static str)> {
+    let mut formats = vec![(ExportFormat::Text, "Text (.txt)"), (ExportFormat::Png, "PNG")];
+    if doc.frame_count() > 1 {
+        formats.push((ExportFormat::Gif, "Animated GIF"));
+        formats.push((ExportFormat::SpriteSheet, "PNG Spritesheet"));
+        formats.push((ExportFormat::TextFrames, "Text Frames (.txt)"));
+    }
+    formats
+}
+
 /// Whether the document has changed since the last save/load: true whenever the undo stack's
 /// current top-edit id doesn't match the id recorded at that save/load. Pulled out as a pure
 /// function, mirroring `is_own_clipboard_text`, so the comparison is unit-testable without a live
@@ -107,7 +157,7 @@ fn paste_target(l: ToolKind, r: ToolKind) -> Binding {
 /// falls through to its catch-all no-op — so suppressing shortcuts for any other owning kind
 /// makes the shortcuts dead weight for no correctness benefit.
 fn suppresses_tool_shortcuts(owner_kind: Option<ToolKind>) -> bool {
-    matches!(owner_kind, Some(ToolKind::Text))
+    owner_kind.is_some_and(|k| tool_def(k).suppresses_shortcuts)
 }
 
 /// Whether Escape's job this frame is "exit fullscreen" rather than something with higher
@@ -129,7 +179,7 @@ fn should_handle_escape_for_fullscreen(keyboard_owner: Option<Binding>, stroke_i
 /// never an existing Text binding's normal operation (its caret still shows, its session still
 /// works).
 fn tool_shortcut_reachable(kind: ToolKind, is_fullscreen: bool) -> bool {
-    !(is_fullscreen && kind == ToolKind::Text)
+    !is_fullscreen || tool_def(kind).kiosk_visible
 }
 
 /// Whether this kind can hold a cross-frame Session (uncommitted work outliving a single stroke —
@@ -137,7 +187,7 @@ fn tool_shortcut_reachable(kind: ToolKind, is_fullscreen: bool) -> bool {
 /// the document-swap reset, and the takeover in `begin_gesture` all consult it, so a future
 /// session-holding kind is a one-line change here rather than a four-site hunt.
 pub(crate) fn holds_session(kind: ToolKind) -> bool {
-    matches!(kind, ToolKind::Text | ToolKind::Selection)
+    tool_def(kind).holds_session
 }
 
 /// The order the two bindings commit, given which one (if any) the pointer is currently driving.
@@ -237,13 +287,7 @@ impl Default for StampSettings {
 
 /// Slot in `GasciiApp::tool_stamps` for a sized tool; `None` for tools without a footprint.
 pub(crate) fn sized_slot(kind: ToolKind) -> Option<usize> {
-    match kind {
-        ToolKind::Pencil => Some(0),
-        ToolKind::Eraser => Some(1),
-        ToolKind::Line => Some(2),
-        ToolKind::Brush => Some(3),
-        _ => None,
-    }
+    tool_def(kind).stamp_slot.map(|i| i as usize)
 }
 
 /// Number of sized tools — `tool_stamps`' length.
@@ -258,7 +302,7 @@ pub(crate) fn tool_is_sized(kind: ToolKind) -> bool {
 /// on. Selection is excluded — its press starts a marquee/move gesture, not a cell stamp, and a
 /// stamp-shaped marker would promise the wrong semantics.
 pub(crate) fn tool_shows_hover(kind: ToolKind) -> bool {
-    !matches!(kind, ToolKind::Selection)
+    tool_def(kind).shows_hover
 }
 
 /// Placeholder `Tool` for `ToolKind::Eyedropper`, the one kind that isn't one: it yields app color
@@ -278,11 +322,14 @@ impl Tool for InertTool {
     }
 }
 
-/// One tool: kind, display name, shortcut, hint, and constructor in a single row.
+/// One tool: kind, display name, shortcut, hint, constructor, and its static capability facts, in
+/// a single row. Every scattered per-kind `match` (sizing, sessions, hover, RECENT, shortcuts,
+/// kiosk visibility) collapses to a lookup into these fields, so a tool's whole behavior lives in
+/// one literal instead of a hunt across the file.
 ///
-/// `Clone, Copy`: every field already is (`ToolKind`, `&'static str`, `egui::Key`, a bare `fn`
-/// pointer), so this is purely additive — it lets kiosk filter `TOOLS` into an owned `Vec<ToolDef>`
-/// without borrowing games.
+/// `Clone, Copy`: every field already is (`ToolKind`, `&'static str`, `egui::Key`, bare `fn`
+/// pointers, `bool`/`Option<u8>`), so this is purely additive — it lets kiosk filter `TOOLS` into
+/// an owned `Vec<ToolDef>` without borrowing games.
 #[derive(Clone, Copy)]
 pub(crate) struct ToolDef {
     pub kind: ToolKind,
@@ -290,79 +337,259 @@ pub(crate) struct ToolDef {
     pub key: egui::Key,
     pub tip: &'static str,
     pub make: fn() -> Box<dyn Tool>,
+    /// Slot in a `ToolSlot`'s `stamps` array for this kind's size/shape footprint; `None` for
+    /// unsized kinds. `prefs.rs` persists stamps by this index, so it must stay stable per kind.
+    pub stamp_slot: Option<u8>,
+    /// Whether this kind can hold a cross-frame Session (a Text burst, a floating stamp).
+    pub holds_session: bool,
+    /// Whether this kind gets a hover marker previewing its next application.
+    pub shows_hover: bool,
+    /// Whether a stroke of this kind that stamped the glyph plane counts toward RECENT.
+    pub stamps_glyph: bool,
+    /// Whether an active session of this kind swallows the single-letter tool-select shortcuts.
+    pub suppresses_shortcuts: bool,
+    /// Whether this kind gets a cell in kiosk's touch sidebar grid, and is therefore reachable by
+    /// its shortcut while fullscreen.
+    pub kiosk_visible: bool,
+    /// The index into `plugin_factories()`/`GasciiApp::plugins` that owns this row, for a
+    /// plugin-sourced tool; `None` for every pure built-in row. This is how
+    /// `sidebar::binding_options_geom`'s dedup, `tool_ctx`'s extra-context injection, and the
+    /// pressure-override gate all find "which live plugin instance, if any, owns this bound row"
+    /// without a second lookup table.
+    pub plugin_slot: Option<usize>,
+    /// Whether a stylus-pressure stroke should override this kind's stamp size.
+    pub pressure_sizeable: bool,
+    /// Whether `tool_ctx` should ask the owning plugin (via `plugin_slot`) for extra `ToolCtx`
+    /// fields (density mode, ramp) while this kind is bound.
+    pub wants_extra_ctx: bool,
 }
 
-/// The nine tools, and the single source of truth for their names, shortcuts, hints, and
-/// constructors. The toolbox, the shortcut handler, the sidebar's option rows, and both bindings
-/// all read this one table, so a tool cannot be added to the UI and forgotten in the constructor.
-pub(crate) const TOOLS: [ToolDef; 9] = [
+/// The eight pure built-in tools (Brush's row is plugin-sourced — see `plugin_factories`), and the
+/// single source of truth for their names, shortcuts, hints, constructors, and capability facts.
+/// Feeds `tools()`, the registry every call site (the toolbox, the shortcut handler, the sidebar's
+/// option rows, both bindings, prefs) reads.
+fn build_tools() -> Vec<ToolDef> {
+    let mut rows = vec![
+        ToolDef {
+            kind: ToolKind::Pencil,
+            name: "Pencil",
+            key: egui::Key::P,
+            tip: "Draw the active glyph",
+            make: || Box::new(Pencil::new()),
+            stamp_slot: Some(0),
+            holds_session: false,
+            shows_hover: true,
+            stamps_glyph: true,
+            suppresses_shortcuts: false,
+            kiosk_visible: true,
+            plugin_slot: None,
+            pressure_sizeable: false,
+            wants_extra_ctx: false,
+        },
+        ToolDef {
+            kind: ToolKind::Eraser,
+            name: "Eraser",
+            key: egui::Key::E,
+            tip: "Erase cells to blank",
+            make: || Box::new(Eraser::new()),
+            stamp_slot: Some(1),
+            holds_session: false,
+            shows_hover: true,
+            stamps_glyph: false,
+            suppresses_shortcuts: false,
+            kiosk_visible: true,
+            plugin_slot: None,
+            pressure_sizeable: false,
+            wants_extra_ctx: false,
+        },
+        ToolDef {
+            kind: ToolKind::Text,
+            name: "Text",
+            key: egui::Key::T,
+            tip: "Click to place a cursor, then type",
+            make: || Box::new(TextTool::new()),
+            stamp_slot: None,
+            holds_session: true,
+            shows_hover: true,
+            stamps_glyph: false,
+            suppresses_shortcuts: true,
+            // Kiosk has no keyboard-driven session UI, so Text has no cell in its touch grid —
+            // and therefore its shortcut must not be reachable while fullscreen either.
+            kiosk_visible: false,
+            plugin_slot: None,
+            pressure_sizeable: false,
+            wants_extra_ctx: false,
+        },
+        ToolDef {
+            kind: ToolKind::Fill,
+            name: "Fill",
+            key: egui::Key::F,
+            tip: "Flood-fill a connected region",
+            make: || Box::new(FloodFill::new()),
+            stamp_slot: None,
+            holds_session: false,
+            shows_hover: true,
+            stamps_glyph: true,
+            suppresses_shortcuts: false,
+            kiosk_visible: true,
+            plugin_slot: None,
+            pressure_sizeable: false,
+            wants_extra_ctx: false,
+        },
+        ToolDef {
+            kind: ToolKind::Rectangle,
+            name: "Rectangle",
+            key: egui::Key::R,
+            tip: "Drag a box outline; joins box-drawing art",
+            make: || Box::new(Rectangle::new()),
+            stamp_slot: None,
+            holds_session: false,
+            shows_hover: true,
+            stamps_glyph: true,
+            suppresses_shortcuts: false,
+            kiosk_visible: true,
+            plugin_slot: None,
+            pressure_sizeable: false,
+            wants_extra_ctx: false,
+        },
+        ToolDef {
+            kind: ToolKind::Line,
+            name: "Line",
+            key: egui::Key::L,
+            tip: "Drag a straight line; joins box-drawing art",
+            make: || Box::new(Line::new()),
+            stamp_slot: Some(2),
+            holds_session: false,
+            shows_hover: true,
+            stamps_glyph: true,
+            suppresses_shortcuts: false,
+            kiosk_visible: true,
+            plugin_slot: None,
+            pressure_sizeable: false,
+            wants_extra_ctx: false,
+        },
+        ToolDef {
+            kind: ToolKind::Selection,
+            name: "Selection",
+            key: egui::Key::S,
+            tip: "Drag a region to move, copy, or delete",
+            make: || Box::new(SelectionTool::new()),
+            stamp_slot: None,
+            holds_session: true,
+            // A press starts a marquee/move gesture, not a cell stamp — a stamp-shaped hover
+            // marker would promise the wrong semantics.
+            shows_hover: false,
+            stamps_glyph: false,
+            suppresses_shortcuts: false,
+            kiosk_visible: true,
+            plugin_slot: None,
+            pressure_sizeable: false,
+            wants_extra_ctx: false,
+        },
+        ToolDef {
+            kind: ToolKind::Eyedropper,
+            name: "Eyedropper",
+            key: egui::Key::I,
+            tip: "Click a cell to pick up its text and background colors",
+            make: || Box::new(InertTool),
+            stamp_slot: None,
+            holds_session: false,
+            shows_hover: true,
+            stamps_glyph: false,
+            suppresses_shortcuts: false,
+            kiosk_visible: true,
+            plugin_slot: None,
+            pressure_sizeable: false,
+            wants_extra_ctx: false,
+        },
+    ];
+    for (i, factory) in plugin_factories().into_iter().enumerate() {
+        let scratch = factory();
+        for cap in scratch.register_tools() {
+            rows.push(merge_plugin_row(i, &cap));
+        }
+    }
+    rows
+}
+
+/// The fixed, ordered list of plugin constructors. Read by two independent consumers in the *same
+/// order*, which is the contract the whole plugin design leans on: `build_tools` constructs one
+/// throwaway instance per factory purely to harvest its static `register_tools()` description,
+/// while `GasciiApp::with_state`/`headless` construct one real, retained instance per factory into
+/// `GasciiApp::plugins`. A `ToolDef` row's `plugin_slot` is the index into both — so if a future
+/// edit ever iterates this list differently between the two call sites, every `plugin_slot`
+/// silently points at the wrong live instance. Never cache this in a `OnceLock`: a plugin may hold
+/// per-app state (`gascii-density-brush`'s `BrushPlugin` does), which must not be shared
+/// process-globally across two `GasciiApp` instances.
+fn plugin_factories() -> Vec<fn() -> Box<dyn Plugin>> {
+    vec![
+        || Box::new(gascii_density_brush::BrushPlugin::new()) as Box<dyn Plugin>,
+        || Box::new(gascii_anim::AnimPlugin::new()) as Box<dyn Plugin>,
+    ]
+}
+
+/// Folds every plugin's `wrap_renderer` over the host's own `NaiveRenderer`, innermost (the host's)
+/// first, in `plugins` order. A pure function of the plugin list — takes `&[Box<dyn Plugin>]`
+/// rather than `&GasciiApp` so it's testable against a synthetic plugin list with no live app.
+pub(crate) fn build_renderer(plugins: &[Box<dyn Plugin>]) -> Box<dyn CanvasRenderer> {
+    plugins.iter().fold(Box::new(NaiveRenderer) as Box<dyn CanvasRenderer>, |r, p| p.wrap_renderer(r))
+}
+
+/// Host-owned identity assignment for a plugin-sourced tool name — persistence-critical (see
+/// `stamp_slot_for_plugin_tool`), so never derived from plugin-registration order. Panics at
+/// startup (registration time, never a user-facing runtime path) on an unrecognized name rather
+/// than silently mis-mapping it.
+fn kind_for_plugin_tool(name: &str) -> ToolKind {
+    match name {
+        gascii_density_brush::BRUSH => ToolKind::Brush,
+        _ => panic!("plugin tool {name:?} has no reserved ToolKind — add one here"),
+    }
+}
+
+/// Host-owned stamp-slot assignment for a plugin-sourced sized tool. `prefs.rs` persists stamps by
+/// this index "in `sized_slot` order" — auto-deriving it from plugin-list position would silently
+/// break an existing `prefs.json`'s positionally-indexed `stamps` array on upgrade. Brush stays
+/// `3`, unchanged from its pre-migration literal row.
+fn stamp_slot_for_plugin_tool(name: &str) -> Option<u8> {
+    match name {
+        gascii_density_brush::BRUSH => Some(3),
+        _ => panic!("plugin tool {name:?} has no reserved stamp_slot — add one here"),
+    }
+}
+
+/// Merges one plugin-contributed capability bundle into a full `ToolDef` row: the host assigns
+/// identity (`ToolKind`) and, for a sized tool, the stamp-slot index; everything else carries over
+/// from the bundle as-is.
+fn merge_plugin_row(plugin_slot: usize, cap: &gascii_plugin_api::PluginToolCapabilities) -> ToolDef {
     ToolDef {
-        kind: ToolKind::Pencil,
-        name: "Pencil",
-        key: egui::Key::P,
-        tip: "Draw the active glyph",
-        make: || Box::new(Pencil::new()),
-    },
-    ToolDef {
-        kind: ToolKind::Eraser,
-        name: "Eraser",
-        key: egui::Key::E,
-        tip: "Erase cells to blank",
-        make: || Box::new(Eraser::new()),
-    },
-    ToolDef {
-        kind: ToolKind::Brush,
-        name: "Brush",
-        key: egui::Key::B,
-        tip: "Paint density ramps",
-        make: || Box::new(DensityBrush::new()),
-    },
-    ToolDef {
-        kind: ToolKind::Text,
-        name: "Text",
-        key: egui::Key::T,
-        tip: "Click to place a cursor, then type",
-        make: || Box::new(TextTool::new()),
-    },
-    ToolDef {
-        kind: ToolKind::Fill,
-        name: "Fill",
-        key: egui::Key::F,
-        tip: "Flood-fill a connected region",
-        make: || Box::new(FloodFill::new()),
-    },
-    ToolDef {
-        kind: ToolKind::Rectangle,
-        name: "Rectangle",
-        key: egui::Key::R,
-        tip: "Drag a box outline; joins box-drawing art",
-        make: || Box::new(Rectangle::new()),
-    },
-    ToolDef {
-        kind: ToolKind::Line,
-        name: "Line",
-        key: egui::Key::L,
-        tip: "Drag a straight line; joins box-drawing art",
-        make: || Box::new(Line::new()),
-    },
-    ToolDef {
-        kind: ToolKind::Selection,
-        name: "Selection",
-        key: egui::Key::S,
-        tip: "Drag a region to move, copy, or delete",
-        make: || Box::new(SelectionTool::new()),
-    },
-    ToolDef {
-        kind: ToolKind::Eyedropper,
-        name: "Eyedropper",
-        key: egui::Key::I,
-        tip: "Click a cell to pick up its text and background colors",
-        make: || Box::new(InertTool),
-    },
-];
+        kind: kind_for_plugin_tool(cap.name),
+        name: cap.name,
+        key: cap.key,
+        tip: cap.tip,
+        make: cap.make,
+        stamp_slot: if cap.sized { stamp_slot_for_plugin_tool(cap.name) } else { None },
+        holds_session: cap.holds_session,
+        shows_hover: cap.shows_hover,
+        stamps_glyph: cap.stamps_glyph,
+        suppresses_shortcuts: cap.suppresses_shortcuts,
+        kiosk_visible: cap.kiosk_visible,
+        plugin_slot: Some(plugin_slot),
+        pressure_sizeable: cap.pressure_sizeable,
+        wants_extra_ctx: cap.wants_extra_ctx,
+    }
+}
+
+/// The process-global tool registry: lazily built from `build_tools` on first read.
+static TOOL_REGISTRY: OnceLock<Vec<ToolDef>> = OnceLock::new();
+
+/// The tool registry every call site reads — the toolbox, the shortcut handler, the sidebar's
+/// option rows, both bindings, and prefs (persisted by `.name`, not by index or position).
+pub(crate) fn tools() -> &'static [ToolDef] {
+    TOOL_REGISTRY.get_or_init(build_tools)
+}
 
 pub(crate) fn tool_def(kind: ToolKind) -> &'static ToolDef {
-    TOOLS.iter().find(|d| d.kind == kind).expect("TOOLS covers every ToolKind")
+    tools().iter().find(|d| d.kind == kind).expect("tools() covers every ToolKind")
 }
 
 /// Builds a fresh instance for `kind`. Total over `ToolKind` — `tools_table_lists_every_kind_
@@ -371,12 +598,58 @@ pub(crate) fn make_tool(kind: ToolKind) -> Box<dyn Tool> {
     (tool_def(kind).make)()
 }
 
+/// A `PluginHost` snapshot, built fresh at each call site rather than implemented directly on
+/// `GasciiApp`. `options_ui`/`tick`/`panel` need `&mut self.plugins[i]` (or to iterate
+/// `self.plugins`) at the same call site that would otherwise need `&GasciiApp` too if `PluginHost`
+/// were implemented on the app type directly — a field-level double-borrow the compiler rejects.
+/// Now carries a live `&Document` alongside the two `Copy` facts it always had — built from
+/// individual field expressions (`&self.doc`, never `&GasciiApp` or `self` as a whole) so the
+/// borrow it holds is scoped to just `self.doc`, disjoint from `self.plugins`, which every one of
+/// this type's three call sites immediately borrows mutably afterward. Passing `&GasciiApp` here
+/// instead would tie the returned value's lifetime to the *whole* struct, conflicting with every
+/// one of those mutable borrows.
+pub(crate) struct HostFacts<'a> {
+    doc: &'a Document,
+    stylus_detected: bool,
+    bound: [&'static str; 2],
+}
+
+impl gascii_plugin_api::PluginHost for HostFacts<'_> {
+    fn stylus_detected(&self) -> bool {
+        self.stylus_detected
+    }
+
+    fn is_bound(&self, tool_name: &str) -> bool {
+        self.bound.contains(&tool_name)
+    }
+
+    fn document(&self) -> &Document {
+        self.doc
+    }
+}
+
+/// Builds a `HostFacts` from an explicit `&Document` plus the two `Copy` facts — never from
+/// `&GasciiApp` (see `HostFacts`'s own doc comment for why).
+pub(crate) fn host_facts<'a>(doc: &'a Document, stylus_detected: bool, bound: [&'static str; 2]) -> HostFacts<'a> {
+    HostFacts { doc, stylus_detected, bound }
+}
+
+/// The `stylus_detected`/`bound` half of `host_facts`'s arguments, computed from `app` in one
+/// place. Takes `&GasciiApp` and returns owned data only — its borrow of `app` ends the moment it
+/// returns, before the caller separately, disjointly borrows `app.doc`/`app.plugins`.
+pub(crate) fn host_context(app: &GasciiApp) -> (bool, [&'static str; 2]) {
+    (app.stylus_detected, [tool_def(app.slot(Binding::L).kind).name, tool_def(app.slot(Binding::R).kind).name])
+}
 
 pub struct GasciiApp {
     pub(crate) doc: Document,
     pub(crate) viewport: Viewport,
     pub(crate) hovered_cell: Option<(u16, u16)>,
     pub(crate) renderer: Box<dyn CanvasRenderer>,
+    /// One retained instance per `plugin_factories()` entry, in the same order — the live half of
+    /// the plugin split (`build_tools`'s own instances are throwaway, harvested once for their
+    /// static `register_tools()` description). A `ToolDef.plugin_slot` indexes into this.
+    pub(crate) plugins: Vec<Box<dyn Plugin>>,
     pub(crate) pending_fit: bool,
     /// Deferred `+`/`-` zoom request (sign = direction, 0 = none) from the keyboard chords, the
     /// View menu, or the status bar — none of which have the canvas geometry an anchored zoom
@@ -398,6 +671,26 @@ pub struct GasciiApp {
     pub(crate) active_fg: Rgba,
     pub(crate) active_bg: Rgba,
     pub(crate) mask: PlaneMask,
+    /// The layer every tool reads and writes: `tool_ctx`'s `ToolCtx.layer`, the eyedropper pick,
+    /// and `resync_slots`' resync target all source it from here. v1 documents have exactly one
+    /// layer, so this is always `0` with no UI to change it — the plumbing a future layers feature
+    /// would generalize, not the value.
+    pub(crate) active_layer: usize,
+    /// The frame every tool reads and writes: `tool_ctx`'s `ToolCtx.frame` and `resync_slots`'
+    /// resync target both source it from here, mirroring `active_layer` exactly. Always `0` today,
+    /// with no UI to change it yet.
+    ///
+    /// Kept in sync with `doc.active_frame()` at every `History` choke point, in both directions:
+    /// `apply_edit` seeds `doc`'s cursor from this field before every `History::apply` (app -> doc,
+    /// since a caller-built `Edit` targets a specific frame that must already be `doc`'s active one
+    /// before it applies), then reads it back afterward (doc -> app), because `AddFrame`/
+    /// `RemoveFrame`/`ReorderFrame` shift `doc`'s cursor as a side effect of applying — independent
+    /// of whatever was just seeded. `request_undo`/`request_redo` mutate `doc` directly (bypassing
+    /// `apply_edit`) and restore `doc.active_frame()` from the `Edit`'s own baked-in snapshot, so
+    /// they resync this field the same way afterward. `doc.active_frame()` is the ground truth;
+    /// this field only ever leads at the one seed point in `apply_edit`, and follows everywhere
+    /// else.
+    pub(crate) active_frame: usize,
     /// The two bindings, indexed by `Binding::ix`. Exactly one tool is bound to each at all times.
     pub(crate) slots: [ToolSlot; 2],
     /// Which binding the `[`/`]` size keys adjust: the one last drawn with or last bound.
@@ -442,12 +735,6 @@ pub struct GasciiApp {
     /// The last [`RECENT_GLYPHS`] glyphs used, most recent first. Fed by picking a swatch
     /// (`pick_glyph`) and by a committed stroke that stamped the active glyph (`note_glyph_drawn`).
     pub(crate) recent_glyphs: Vec<char>,
-    /// Built-in Ramps, populated at startup — the density brush's glyph sources.
-    pub(crate) ramps: Vec<Ramp>,
-    /// Index into `ramps`: the brush's currently active ramp.
-    pub(crate) active_ramp: usize,
-    /// The brush's active intensity source (Fixed level or Buildup).
-    pub(crate) density_mode: DensityMode,
     /// The chosen theme preference (persisted). Applied to the `egui::Context` once at startup
     /// (`GasciiApp::new`) and again on every change from the View ▸ Theme menu — never read back
     /// from the `Context` itself, so `Prefs::from_app`/`App::save` need no `Context` at all.
@@ -455,10 +742,10 @@ pub struct GasciiApp {
     /// Whether the canvas cell-grid overlay is drawn. Persisted, off by default.
     pub(crate) show_grid: bool,
     /// True once this session has observed a pressure-bearing `Event::Touch` (a stylus contact).
-    /// Session-only, never persisted — gates the Pressure toggle's visibility in Brush's options.
+    /// Session-only, never persisted. A device-capability fact, not Brush-owned state — it only
+    /// happens to gate the Pressure toggle's visibility in Brush's options block, exposed to
+    /// plugins read-only via `PluginHost::stylus_detected`.
     pub(crate) stylus_detected: bool,
-    /// User opt-in: while true and Brush is stroking with a stylus, pressure drives stamp size.
-    pub(crate) brush_pressure: bool,
     /// Accumulated multiplicative pinch-zoom delta since the last discrete zoom step fired.
     /// `multi_touch()`'s `zoom_delta` is a per-frame ratio (1.0 = no change), not a cumulative
     /// gesture magnitude, so this multiplies frame deltas together until they cross a threshold —
@@ -527,6 +814,12 @@ pub(crate) enum PendingConfirm {
 pub(crate) enum ExportFormat {
     Text,
     Png,
+    /// Animated GIF — offered only when `doc.frame_count() > 1`.
+    Gif,
+    /// PNG spritesheet, auto-tiled roughly square — offered only when `doc.frame_count() > 1`.
+    SpriteSheet,
+    /// Per-frame text dump, one file, frame-separated — offered only when `doc.frame_count() > 1`.
+    TextFrames,
 }
 
 /// The Export dialog's remembered settings — persisted per-app (not per-document; `eframe::Storage`
@@ -604,11 +897,15 @@ impl GasciiApp {
     }
 
     fn with_state(started: Instant) -> Self {
+        // Same-order contract with `build_tools`'s own throwaway instances — see `plugin_factories`.
+        let plugins: Vec<Box<dyn Plugin>> = plugin_factories().into_iter().map(|f| f()).collect();
+        let renderer = build_renderer(&plugins);
         Self {
             doc: Document::default_document(),
             viewport: Viewport::default(),
             hovered_cell: None,
-            renderer: Box::new(NaiveRenderer),
+            renderer,
+            plugins,
             // Fit on the first frame: a document pinned to the top-left corner of the desk is not
             // "the star", and the viewport's default pan of zero puts it there.
             pending_fit: true,
@@ -620,6 +917,8 @@ impl GasciiApp {
             active_fg: Rgba::WHITE,
             active_bg: Rgba::TRANSPARENT,
             mask: PlaneMask::default(),
+            active_layer: 0,
+            active_frame: 0,
             slots: [ToolSlot::new(ToolKind::Pencil), ToolSlot::new(ToolKind::Eraser)],
             options_focus: Binding::L,
             stroke_owner: None,
@@ -632,13 +931,9 @@ impl GasciiApp {
             active_page: 0,
             palette_scroll_target: None,
             recent_glyphs: Vec::new(),
-            ramps: builtin_ramps(),
-            active_ramp: 0,
-            density_mode: DensityMode::Fixed(Fixed(1.0)),
             theme_pref: egui::ThemePreference::System,
             show_grid: false,
             stylus_detected: false,
-            brush_pressure: false,
             pinch_zoom_accum: 1.0,
             resize_dialog_open: false,
             resize_w: Document::DEFAULT_WIDTH,
@@ -690,6 +985,17 @@ impl GasciiApp {
     #[allow(dead_code)]
     pub(crate) fn slot_mut(&mut self, b: Binding) -> &mut ToolSlot {
         &mut self.slots[b.ix()]
+    }
+
+    /// Test-only downcast into the live `BrushPlugin` instance, for tests that need to drive or
+    /// inspect its own state (ramp/mode/pressure) directly rather than only through the `Plugin`
+    /// trait's narrow surface — e.g. confirming it survives being rendered through two different
+    /// chrome geometries unchanged. Not a production access path: nothing outside tests should ever
+    /// need a concrete plugin type back out of `Box<dyn Plugin>`.
+    #[cfg(test)]
+    pub(crate) fn brush_plugin_mut(&mut self) -> &mut gascii_density_brush::BrushPlugin {
+        let i = tool_def(ToolKind::Brush).plugin_slot.expect("Brush is plugin-sourced");
+        self.plugins[i].as_any_mut().downcast_mut().expect("plugin at Brush's slot must be BrushPlugin")
     }
 
     /// Binds `kind` to `b`, replacing that slot's instance. A no-op while a gesture is active: the
@@ -747,11 +1053,7 @@ impl GasciiApp {
     /// count (the Brush writes ramp characters, the Eraser writes Blank), and only when the glyph
     /// plane was being written at all.
     pub(crate) fn note_glyph_drawn(&mut self, kind: ToolKind) {
-        let stamps_glyph = matches!(
-            kind,
-            ToolKind::Pencil | ToolKind::Fill | ToolKind::Rectangle | ToolKind::Line
-        );
-        if stamps_glyph && self.mask.glyph {
+        if tool_def(kind).stamps_glyph && self.mask.glyph {
             push_recent(&mut self.recent_glyphs, self.active_glyph);
         }
     }
@@ -790,14 +1092,71 @@ impl GasciiApp {
     /// `origin` is the slot whose own `update` produced this edit — it has nothing to re-pin.
     /// `None` for app-level mutations (redo, resize).
     pub(crate) fn apply_edit(&mut self, edit: gascii_core::Edit, origin: Option<Binding>) {
+        // app -> doc: seeds doc's cursor before the edit applies — see `active_frame`'s field doc
+        // comment for the full round trip. A no-op today (`active_frame` never leaves `0`).
+        self.doc.set_active_frame(self.active_frame);
         self.history.apply(&mut self.doc, edit);
+        // doc -> app: some Edit kinds shift doc's cursor as a side effect of applying, independent
+        // of the seed above — resync so this field never drifts from doc.active_frame().
+        self.active_frame = self.doc.active_frame();
         self.resync_slots(origin);
     }
 
     pub(crate) fn resync_slots(&mut self, except: Option<Binding>) {
         for b in Binding::ALL {
             if Some(b) != except {
-                self.slots[b.ix()].tool.resync(&self.doc, 0);
+                self.slots[b.ix()].tool.resync(&self.doc, self.active_frame, self.active_layer);
+            }
+        }
+    }
+
+    /// Moves the editing cursor to `idx`, flushing first — joins the same "flush before a
+    /// structural trigger" convention every other cursor-affecting action already follows (Ctrl+S,
+    /// Ctrl+Z, Resize, Clear, rebinding a tool). Not an `Edit` — mirrors `active_layer`'s plain-
+    /// session-state precedent; only `frame_ops`'s structural ops touch `History`. A no-op if `idx`
+    /// is out of range or already active.
+    pub(crate) fn switch_active_frame(&mut self, idx: usize) {
+        if idx == self.active_frame {
+            return;
+        }
+        self.flush_all();
+        if self.doc.set_active_frame(idx) {
+            self.active_frame = idx;
+            self.resync_slots(None);
+        }
+    }
+
+    /// Draws every plugin's panel, then applies whatever `PanelOutcome`s they returned. Two passes
+    /// — draw-and-collect, then drain — because `apply_edit` needs the whole of `&mut self`, which
+    /// would conflict with `self.plugins`'s mutable borrow while the draw loop is still running.
+    /// `host`'s borrow of `self.doc` ends at its last use inside the loop (NLL), before the drain
+    /// pass's `&mut self` calls. Called with the host's own live root `Ui` — see `Plugin::panel`'s
+    /// doc comment for why a plain `Context` cannot substitute for this. A returned `PanelOutcome
+    /// ::error` is written straight into `self.last_error` — the same status-bar channel every other
+    /// structural trigger already uses (`add_frame_via_menu`, "Resize Canvas…"), so a plugin-
+    /// originated failure reads identically to a host-originated one.
+    fn run_plugin_panels(&mut self, ui: &mut egui::Ui, kiosk: bool) {
+        let (stylus_detected, bound) = host_context(self);
+        let host = host_facts(&self.doc, stylus_detected, bound);
+        let mut outcomes = Vec::with_capacity(self.plugins.len());
+        for p in self.plugins.iter_mut() {
+            outcomes.push(p.panel(ui, kiosk, &host));
+        }
+        for outcome in outcomes {
+            for edit in outcome.edits {
+                self.apply_edit(edit, None);
+            }
+            if let Some(idx) = outcome.set_active_frame {
+                self.switch_active_frame(idx);
+            }
+            if let Some(loop_playback) = outcome.set_loop_playback {
+                // A plain field write, not an `Edit` — matches `Document.loop_playback`'s own
+                // "set-and-forget, never History-tracked" contract (see `PanelOutcome::
+                // set_loop_playback`'s doc comment).
+                self.doc.loop_playback = loop_playback;
+            }
+            if let Some(msg) = outcome.error {
+                self.last_error = Some(msg);
             }
         }
     }
@@ -877,6 +1236,40 @@ impl GasciiApp {
         }
     }
 
+    /// The Edit menu's "Add Frame" bootstrap: the one host-owned, non-plugin-routed frame-creation
+    /// path, since `gascii-anim` has no toolbox/menu presence of its own to
+    /// host this affordance at the `frame_count() == 1` boundary. Calls `frame_ops::duplicate_frame`
+    /// directly through `apply_edit` — the same shape every other menu-triggered structural edit in
+    /// this app already uses. Once `frame_count() > 1`, the plugin's own timeline panel takes over
+    /// for all further add/duplicate/delete/reorder. Flushes first, same trigger-table discipline as
+    /// Clear/Resize/Save.
+    pub(crate) fn add_frame_via_menu(&mut self) {
+        self.flush_all();
+        match duplicate_frame(&self.doc, self.doc.active_frame()) {
+            Ok(edit) => {
+                self.apply_edit(edit, None);
+                self.last_error = None;
+            }
+            // Matches "Resize Canvas…"'s own convention: a specific, readable message per error
+            // variant, not a raw `{e:?}` dump.
+            Err(FrameOpError::TooManyFrames { max, .. }) => {
+                self.last_error = Some(format!("add frame: exceeds the {max} maximum"));
+            }
+            Err(FrameOpError::TotalCellBudgetExceeded { .. }) => {
+                self.last_error = Some("add frame: exceeds the maximum total cell budget".to_string());
+            }
+            Err(FrameOpError::TooManyLayers { max, .. }) => {
+                self.last_error = Some(format!("add frame: exceeds the {max} maximum layer count"));
+            }
+            Err(FrameOpError::IndexOutOfBounds { .. } | FrameOpError::LastFrame) => {
+                // Unreachable from this call site: `duplicate_frame` is always given
+                // `self.doc.active_frame()`, a provably in-range index, and never returns
+                // `LastFrame` (that's `remove_frame`'s own error).
+                self.last_error = Some("add frame: unexpected error".to_string());
+            }
+        }
+    }
+
     /// Commits any pending text burst or floating selection, then undoes the most recent edit.
     /// Flushing before undo is correct here: it turns "Undo mid-session" into "undo the very edit
     /// that was just committed" (the same edit the flush just committed), matching ordinary
@@ -890,6 +1283,9 @@ impl GasciiApp {
     pub(crate) fn request_undo(&mut self) {
         self.flush_all();
         if self.history.undo(&mut self.doc) {
+            // doc -> app: undo restores doc's active-frame cursor from the undone Edit's own
+            // snapshot — see `active_frame`'s field doc comment.
+            self.active_frame = self.doc.active_frame();
             self.resync_slots(None);
         }
     }
@@ -912,6 +1308,8 @@ impl GasciiApp {
     pub(crate) fn request_redo(&mut self) {
         if self.history.can_redo() {
             self.history.redo(&mut self.doc);
+            // doc -> app: same resync as `request_undo` — see `active_frame`'s field doc comment.
+            self.active_frame = self.doc.active_frame();
             // A redo mutates `self.doc` behind BOTH slots' backs, so both re-pin — there is no
             // originating slot to exempt.
             self.resync_slots(None);
@@ -925,12 +1323,6 @@ impl GasciiApp {
     /// other slot's), so the singular language in `copy_selection` and the Edit menu stays honest.
     pub(crate) fn selection_slot(&self) -> Option<Binding> {
         self.keyboard_owner.filter(|&b| self.slot(b).kind == ToolKind::Selection)
-    }
-
-    /// The first binding holding `kind`, if either does. For controls over app-global state that a
-    /// tool uses (the Brush's ramp and intensity), which stay live while either button holds it.
-    pub(crate) fn bound_to(&self, kind: ToolKind) -> Option<Binding> {
-        Binding::ALL.into_iter().find(|&b| self.slot(b).kind == kind)
     }
 
     /// Copies the active selection's cells to both the OS clipboard (plain text) and the app's
@@ -1074,14 +1466,14 @@ impl GasciiApp {
         if fit {
             self.pending_fit = true;
         }
-        // The tool shortcuts come from the TOOLS table, so a tool and its key can never drift
+        // The tool shortcuts come from the tool registry, so a tool and its key can never drift
         // apart. A shortcut always sets the L binding; right-clicking a toolbox cell is the only
         // way to set R. Text is excluded from the lookup while fullscreen — see
         // `tool_shortcut_reachable` — so its key event is left unconsumed rather than silently
         // rebinding L to a tool that kiosk's own sidebar has no cell for.
         if !focused {
             let picked = ui.input_mut(|i| {
-                TOOLS
+                tools()
                     .iter()
                     .find(|def| {
                         tool_shortcut_reachable(def.kind, is_fullscreen)
@@ -1144,10 +1536,16 @@ impl GasciiApp {
                 self.step_zoom(-1);
             }
         }
-        // Ramp/intensity are app-global shared state, so the digit keys apply whenever EITHER
-        // binding is holding the Brush.
-        if self.bound_to(ToolKind::Brush).is_some() && !focused {
-            self.handle_brush_intensity_keys(ui);
+        // Per-frame plugin input outside a canvas gesture (Brush's digit-key intensity shortcut, a
+        // playback clock, and whatever a future plugin needs the same hook for). Called
+        // unconditionally now — `focused` is passed through as a plain parameter instead of gating
+        // the call site, so a plugin that doesn't care about shortcuts (a playback clock) isn't
+        // starved whenever any field has focus; a plugin that DOES consume a shortcut (Brush's
+        // digit keys) checks `focused` itself.
+        let (stylus_detected, bound) = host_context(self);
+        let host = host_facts(&self.doc, stylus_detected, bound);
+        for p in self.plugins.iter_mut() {
+            p.tick(ui, focused, &host);
         }
         // `[`/`]` adjust the stamp of whichever binding was last used — a gesture on either button
         // selects it, as does binding a tool, so the keys follow the button you last drew with.
@@ -1168,34 +1566,6 @@ impl GasciiApp {
                     stamp.size = (stamp.size + 1).min(MAX_TOOL_SIZE);
                 }
             }
-        }
-    }
-
-    /// Number keys `1`-`9` -> Fixed intensity 0.1-0.9, `0` -> 1.0. Only consumed while Brush is
-    /// the active tool and no widget has focus — pressing a digit implicitly switches into Fixed
-    /// mode at that level even if Buildup was active, since reaching for a number key expresses
-    /// "I want this exact intensity now."
-    fn handle_brush_intensity_keys(&mut self, ui: &mut egui::Ui) {
-        const DIGIT_KEYS: [(egui::Key, f32); 10] = [
-            (egui::Key::Num1, 0.1),
-            (egui::Key::Num2, 0.2),
-            (egui::Key::Num3, 0.3),
-            (egui::Key::Num4, 0.4),
-            (egui::Key::Num5, 0.5),
-            (egui::Key::Num6, 0.6),
-            (egui::Key::Num7, 0.7),
-            (egui::Key::Num8, 0.8),
-            (egui::Key::Num9, 0.9),
-            (egui::Key::Num0, 1.0),
-        ];
-        let level = ui.input_mut(|i| {
-            DIGIT_KEYS
-                .iter()
-                .find(|&&(key, _)| i.consume_key(egui::Modifiers::NONE, key))
-                .map(|&(_, level)| level)
-        });
-        if let Some(level) = level {
-            self.density_mode = DensityMode::Fixed(Fixed(level));
         }
     }
 
@@ -1299,6 +1669,9 @@ impl GasciiApp {
                     // must not read as if this fresh dialog already failed.
                     self.last_error = None;
                     self.resize_dialog_open = true;
+                }
+                if ui.button("Add Frame").clicked() {
+                    self.add_frame_via_menu();
                 }
             });
             ui.menu_button("View", |ui| {
@@ -1487,6 +1860,9 @@ impl GasciiApp {
                         self.last_error =
                             Some(format!("resize: exceeds the {max_width}x{max_height} maximum"));
                     }
+                    Err(ResizeError::TotalCellBudgetExceeded { .. }) => {
+                        self.last_error = Some("resize: exceeds the maximum total cell budget".to_string());
+                    }
                 }
             }
             DialogAction::Cancel => self.resize_dialog_open = false,
@@ -1502,7 +1878,7 @@ impl GasciiApp {
     /// already current. Dropped (not just left stale) whenever the dialog is closed, so the
     /// texture's GPU memory isn't held open between uses.
     fn refresh_export_preview(&mut self, ctx: &egui::Context) {
-        if self.export.format != ExportFormat::Png {
+        if !matches!(self.export.format, ExportFormat::Png | ExportFormat::Gif | ExportFormat::SpriteSheet) {
             self.export_preview = None;
             self.export_preview_key = None;
             return;
@@ -1523,12 +1899,14 @@ impl GasciiApp {
         self.export_preview_key = Some(key);
     }
 
-    /// Unified Export dialog: Text/PNG format, PNG scale + transparency, Text trim, a live
-    /// preview, and a pixel/char readout.
+    /// Unified Export dialog: Text/PNG/(multi-frame docs only: GIF/Spritesheet/Text Frames)
+    /// format, PNG/GIF/Spritesheet scale + transparency, Text/Text Frames trim, a live preview, and
+    /// a pixel/char readout.
     fn export_dialog(&mut self, ctx: &egui::Context) {
         if !self.export_dialog_open {
             return;
         }
+        self.export.format = snap_unavailable_export_format(self.export.format, self.doc.frame_count());
         self.refresh_export_preview(ctx);
         let doc = &self.doc;
         let preview = self.export_preview.clone();
@@ -1539,12 +1917,12 @@ impl GasciiApp {
         }
         let mut bg_action = BgAction::None;
         let resp = dialog::modal(ctx, "export", "Export", |ui| {
-            let formats = [(ExportFormat::Text, "Text (.txt)"), (ExportFormat::Png, "PNG")];
+            let formats = export_dialog_formats(doc);
             crate::ui::widgets::segmented(ui, &mut self.export.format, &formats, false);
             ui.add_space(8.0);
 
             match self.export.format {
-                ExportFormat::Png => {
+                ExportFormat::Png | ExportFormat::Gif | ExportFormat::SpriteSheet => {
                     ui.horizontal(|ui| {
                         ui.label("Scale");
                         let scales = [(1u8, "1×"), (2, "2×"), (4, "4×")];
@@ -1600,7 +1978,7 @@ impl GasciiApp {
                         }
                     }
                 }
-                ExportFormat::Text => {
+                ExportFormat::Text | ExportFormat::TextFrames => {
                     crate::ui::widgets::checkbox(ui, &mut self.export.trim, "Trim trailing spaces");
                 }
             }
@@ -1612,7 +1990,10 @@ impl GasciiApp {
             ui.painter().rect_filled(preview_rect, 0.0, t.bg_chrome);
             ui.painter().rect_stroke(preview_rect, 0.0, egui::Stroke::new(1.0, t.border_soft), egui::StrokeKind::Inside);
             match self.export.format {
-                ExportFormat::Png => {
+                // Gif/SpriteSheet reuse the same active-frame raster preview PNG builds — a
+                // deliberate simplification, not an oversight: no live GIF playback or tiled
+                // spritesheet layout is rendered in the dialog, only the active frame's still.
+                ExportFormat::Png | ExportFormat::Gif | ExportFormat::SpriteSheet => {
                     if let Some(tex) = &preview {
                         let size = tex.size_vec2();
                         let fit = (size * (preview_rect.size() / size).min_elem()).min(size);
@@ -1625,8 +2006,8 @@ impl GasciiApp {
                         );
                     }
                 }
-                ExportFormat::Text => {
-                    let text = export_text(doc);
+                ExportFormat::Text | ExportFormat::TextFrames => {
+                    let text = if self.export.format == ExportFormat::Text { export_text(doc) } else { export_text_frames(doc) };
                     let preview_text: String = text.lines().take(6).collect::<Vec<_>>().join("\n");
                     ui.painter().text(
                         preview_rect.left_top() + egui::Vec2::new(6.0, 4.0),
@@ -1640,7 +2021,7 @@ impl GasciiApp {
 
             ui.add_space(6.0);
             let readout = match self.export.format {
-                ExportFormat::Png => {
+                ExportFormat::Png | ExportFormat::Gif | ExportFormat::SpriteSheet => {
                     let px = self.export.cell_px();
                     format!(
                         "{}×{} px · {}× cell scale",
@@ -1650,6 +2031,9 @@ impl GasciiApp {
                     )
                 }
                 ExportFormat::Text => format!("{}×{} chars", doc.width, doc.height),
+                ExportFormat::TextFrames => {
+                    format!("{}×{} chars × {} frames", doc.width, doc.height, doc.frame_count())
+                }
             };
             ui.label(egui::RichText::new(readout).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary));
 
@@ -1754,6 +2138,57 @@ impl GasciiApp {
                         Err(e) => self.last_error = Some(format!("failed to write {}: {e}", path.display())),
                     },
                     Err(e) => self.last_error = Some(format!("PNG export failed: {e}")),
+                }
+            }
+            ExportFormat::Gif => {
+                let Some(path) = rfd::FileDialog::new().add_filter("GIF", &["gif"]).save_file() else {
+                    return;
+                };
+                let opaque_bg = (!self.export.transparent).then_some(self.doc.background);
+                let bg_image = self.image_bg.as_ref().filter(|b| b.use_in_export).map(|b| (&b.pixels, b.export_opacity));
+                match anim_export::export_gif(&self.doc, self.export.cell_px(), opaque_bg, bg_image) {
+                    Ok(bytes) => match write_atomic(&path, &bytes) {
+                        Ok(()) => {
+                            self.last_error = None;
+                            self.close_export_dialog();
+                        }
+                        Err(e) => self.last_error = Some(format!("failed to write {}: {e}", path.display())),
+                    },
+                    Err(e) => self.last_error = Some(format!("GIF export failed: {e}")),
+                }
+            }
+            ExportFormat::SpriteSheet => {
+                let Some(path) = rfd::FileDialog::new().add_filter("PNG", &["png"]).save_file() else {
+                    return;
+                };
+                let opaque_bg = (!self.export.transparent).then_some(self.doc.background);
+                let bg_image = self.image_bg.as_ref().filter(|b| b.use_in_export).map(|b| (&b.pixels, b.export_opacity));
+                match anim_export::export_spritesheet(&self.doc, self.export.cell_px(), opaque_bg, bg_image) {
+                    Ok(bytes) => match write_atomic(&path, &bytes) {
+                        Ok(()) => {
+                            self.last_error = None;
+                            self.close_export_dialog();
+                        }
+                        Err(e) => self.last_error = Some(format!("failed to write {}: {e}", path.display())),
+                    },
+                    Err(e) => self.last_error = Some(format!("spritesheet export failed: {e}")),
+                }
+            }
+            ExportFormat::TextFrames => {
+                let Some(path) = rfd::FileDialog::new().add_filter("Text", &["txt"]).save_file() else {
+                    return;
+                };
+                let text = if self.export.trim {
+                    export_text_frames(&self.doc)
+                } else {
+                    export_text_frames_untrimmed(&self.doc)
+                };
+                match write_atomic(&path, text.as_bytes()) {
+                    Ok(()) => {
+                        self.last_error = None;
+                        self.close_export_dialog();
+                    }
+                    Err(e) => self.last_error = Some(format!("failed to export {}: {e}", path.display())),
                 }
             }
         }
@@ -2035,6 +2470,14 @@ impl eframe::App for GasciiApp {
         self.apply_startup_window_state(&ctx);
         self.handle_ctrl_c(&ctx);
         self.handle_close_request(&ctx);
+        // A deliberate, accepted side effect of this gate: `handle_keys` is the only driver of every
+        // plugin's `tick` (including `gascii-anim`'s playback clock's `elapsed_ms` accumulation and
+        // `request_repaint_after` rescheduling), so a running animation preview visibly freezes for
+        // as long as any modal dialog (New/Resize/Export/Confirm) is open, then resumes — never
+        // skipping ahead — the moment it closes, since each subsequent tick's own `stable_dt` is just
+        // the real delta since the last rendered frame. No data loss, no runaway catch-up; not
+        // threading `tick` outside this gate to avoid growing the app-vs-plugin coupling for a
+        // cosmetic pause with no other reported downside.
         if !self.modal_open() {
             self.handle_keys(ui);
         }
@@ -2082,6 +2525,13 @@ impl eframe::App for GasciiApp {
                 .exact_size(crate::ui::kiosk::SIDEBAR_W)
                 .resizable(false)
                 .show(ui, |ui| crate::ui::kiosk::sidebar(ui, self));
+            // A plugin's own panel (the timeline strip, etc.) — declared here, after every other
+            // kiosk chrome panel and before `CentralPanel`, so a real `egui::Panel::bottom(..)`
+            // called from inside a plugin correctly claims space from what's left (egui does not
+            // allow a panel to be added after `CentralPanel` has already claimed the remainder).
+            // No visible effect while every plugin's panel is a no-op (the shipped default, and
+            // `AnimPlugin`'s own single-frame gate).
+            self.run_plugin_panels(ui, true);
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(t.bg_desk))
                 .show(ui, |ui| {
@@ -2118,6 +2568,8 @@ impl eframe::App for GasciiApp {
                 .size_range(crate::ui::sidebar::MIN_WIDTH..=crate::ui::sidebar::MAX_WIDTH)
                 .resizable(true)
                 .show(ui, |ui| crate::ui::sidebar::show(ui, self));
+            // See the kiosk branch's own comment above — same reasoning, same call, `kiosk: false`.
+            self.run_plugin_panels(ui, false);
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(t.bg_desk))
                 .show(ui, |ui| {
@@ -2202,6 +2654,14 @@ mod tests {
         }
     }
 
+    /// `SIZED_TOOL_COUNT` must exactly cover the sized rows in the tool registry — too small would
+    /// silently truncate a `stamps` array read, too large wastes slots no kind will ever index.
+    #[test]
+    fn sized_tool_count_matches_stamp_slots() {
+        let count = tools().iter().filter(|d| d.stamp_slot.is_some()).count();
+        assert_eq!(SIZED_TOOL_COUNT, count);
+    }
+
     const ALL_KINDS: [ToolKind; 9] = [
         ToolKind::Pencil,
         ToolKind::Eraser,
@@ -2214,16 +2674,745 @@ mod tests {
         ToolKind::Brush,
     ];
 
-    /// `TOOLS` is the single source of truth for names, shortcuts, hints and constructors. If a
-    /// kind were missing, `make_tool`'s `expect` would fire; if one were listed twice, the toolbox
-    /// would show a duplicate cell and the two entries could drift apart.
+    /// The tool registry is the single source of truth for names, shortcuts, hints and
+    /// constructors. If a kind were missing, `make_tool`'s `expect` would fire; if one were listed
+    /// twice, the toolbox would show a duplicate cell and the two entries could drift apart.
     #[test]
     fn tools_table_lists_every_kind_exactly_once() {
-        assert_eq!(TOOLS.len(), ALL_KINDS.len());
+        assert_eq!(tools().len(), ALL_KINDS.len());
         for kind in ALL_KINDS {
-            let count = TOOLS.iter().filter(|d| d.kind == kind).count();
-            assert_eq!(count, 1, "{kind:?} appears {count} times in TOOLS");
+            let count = tools().iter().filter(|d| d.kind == kind).count();
+            assert_eq!(count, 1, "{kind:?} appears {count} times in the tool registry");
         }
+    }
+
+    /// Locks each row's capability fields against the pre-refactor per-kind facts, so a typo in
+    /// the tool registry can't silently drift from the scattered `match` arms it replaces.
+    #[test]
+    fn capability_fields_match_expected_for_every_kind() {
+        for kind in ALL_KINDS {
+            let d = tool_def(kind);
+            let expected_stamp_slot = match kind {
+                ToolKind::Pencil => Some(0u8),
+                ToolKind::Eraser => Some(1),
+                ToolKind::Line => Some(2),
+                ToolKind::Brush => Some(3),
+                _ => None,
+            };
+            let expected_holds_session = matches!(kind, ToolKind::Text | ToolKind::Selection);
+            let expected_shows_hover = !matches!(kind, ToolKind::Selection);
+            let expected_stamps_glyph = matches!(
+                kind,
+                ToolKind::Pencil | ToolKind::Fill | ToolKind::Rectangle | ToolKind::Line
+            );
+            let expected_suppresses_shortcuts = matches!(kind, ToolKind::Text);
+            let expected_kiosk_visible = !matches!(kind, ToolKind::Text);
+            // The two plugin-boundary capability fields: today only Brush's plugin-sourced row
+            // sets either.
+            let expected_pressure_sizeable = matches!(kind, ToolKind::Brush);
+            let expected_wants_extra_ctx = matches!(kind, ToolKind::Brush);
+
+            assert_eq!(d.stamp_slot, expected_stamp_slot, "{kind:?}: stamp_slot");
+            assert_eq!(d.holds_session, expected_holds_session, "{kind:?}: holds_session");
+            assert_eq!(d.shows_hover, expected_shows_hover, "{kind:?}: shows_hover");
+            assert_eq!(d.stamps_glyph, expected_stamps_glyph, "{kind:?}: stamps_glyph");
+            assert_eq!(
+                d.suppresses_shortcuts, expected_suppresses_shortcuts,
+                "{kind:?}: suppresses_shortcuts"
+            );
+            assert_eq!(d.kiosk_visible, expected_kiosk_visible, "{kind:?}: kiosk_visible");
+            assert_eq!(d.pressure_sizeable, expected_pressure_sizeable, "{kind:?}: pressure_sizeable");
+            assert_eq!(d.wants_extra_ctx, expected_wants_extra_ctx, "{kind:?}: wants_extra_ctx");
+        }
+    }
+
+    /// Locks the registry's observable shape against the merge machinery's own plumbing: whether a
+    /// row came from a pure built-in literal or a plugin bundle, the table still has exactly 9
+    /// entries with exactly the capability values `capability_fields_match_expected_for_every_kind`
+    /// already pins.
+    #[test]
+    fn tools_registry_merge_produces_the_same_9_row_table_the_pre_plugin_registry_had() {
+        assert_eq!(tools().len(), 9);
+        capability_fields_match_expected_for_every_kind();
+    }
+
+    /// Guards `prefs.json` forward-compatibility (persisted stamps are positionally indexed by
+    /// `sized_slot`): Brush's stamp slot is host-owned and pinned to `3`, exactly its pre-migration
+    /// literal value, regardless of where `plugin_factories()` places it in the list.
+    #[test]
+    fn brush_stamp_slot_is_pinned_to_3_regardless_of_registration_order() {
+        assert_eq!(stamp_slot_for_plugin_tool(gascii_density_brush::BRUSH), Some(3));
+        assert_eq!(tool_def(ToolKind::Brush).stamp_slot, Some(3));
+    }
+
+    /// `merge_plugin_row`'s `plugin_slot` must carry through whatever index it is given, not a
+    /// hardcoded value — every downstream consumer (`tool_ctx`'s extra-context injection, the
+    /// pressure-override gate, `binding_options_geom`'s dedup) trusts `plugin_slot` to resolve back
+    /// to the correct entry of `GasciiApp.plugins`. This phase ships exactly one plugin, so a real
+    /// `GasciiApp`'s Brush row can only ever observe `plugin_slot == Some(0)` — this test exercises
+    /// indices beyond that single-plugin scale directly against the pure merge function, closing
+    /// the plan's own documented residual risk ("no direct test proving a *wrong* index at
+    /// 1-plugin scale").
+    #[test]
+    fn merge_plugin_row_carries_the_given_plugin_slot_index_verbatim() {
+        let cap = gascii_plugin_api::PluginToolCapabilities {
+            name: "Brush",
+            key: egui::Key::B,
+            tip: "t",
+            make: || Box::new(gascii_core::DensityBrush::new()),
+            sized: true,
+            holds_session: false,
+            shows_hover: true,
+            stamps_glyph: false,
+            suppresses_shortcuts: false,
+            kiosk_visible: true,
+            pressure_sizeable: true,
+            wants_extra_ctx: true,
+        };
+        for slot in [0usize, 1, 4, 7] {
+            let row = merge_plugin_row(slot, &cap);
+            assert_eq!(row.plugin_slot, Some(slot), "merge_plugin_row must not hardcode a plugin_slot index");
+        }
+    }
+
+    /// A fresh `GasciiApp`'s Brush row's `plugin_slot` must resolve back to the exact live plugin
+    /// instance that actually registered the "Brush" tool — not merely to *some* valid index into
+    /// `plugins`. Proven by calling `register_tools()` on the live instance the index points at and
+    /// confirming it names the same tool `tool_def(Brush)` itself describes.
+    #[test]
+    fn a_fresh_apps_brush_row_plugin_slot_resolves_to_the_live_instance_that_registered_brush() {
+        let app = GasciiApp::headless();
+        let slot = tool_def(ToolKind::Brush).plugin_slot.expect("Brush is plugin-sourced");
+        let registered = app.plugins[slot].register_tools();
+        assert_eq!(registered.len(), 1);
+        assert_eq!(
+            registered[0].name,
+            gascii_density_brush::BRUSH,
+            "plugin_slot must resolve to the instance that actually registered Brush's row"
+        );
+    }
+
+    /// D5's refinement, directly: `GasciiApp::with_state`/`headless` must construct one real,
+    /// *retained* instance per `plugin_factories()` entry, per app — never a process-global shared
+    /// instance. Two independently constructed apps must never see each other's Brush state; a
+    /// `OnceLock`-cached plugin list (the design the plan explicitly rejected) would fail this.
+    #[test]
+    fn two_independent_gascii_apps_never_share_brush_plugin_state() {
+        let mut app1 = GasciiApp::headless();
+        let mut app2 = GasciiApp::headless();
+        app1.brush_plugin_mut().set_active_ramp(1);
+        app1.brush_plugin_mut().set_density_mode(gascii_core::DensityMode::Buildup(gascii_core::Buildup));
+        app1.brush_plugin_mut().set_pressure_enabled(true);
+
+        assert_eq!(app2.brush_plugin_mut().active_ramp(), 0, "app2 must start at Brush's own default ramp, not app1's mutated one");
+        assert!(
+            matches!(app2.brush_plugin_mut().density_mode(), gascii_core::DensityMode::Fixed(_)),
+            "app2 must not see app1's Buildup mode"
+        );
+        assert!(!app2.brush_plugin_mut().pressure_enabled(), "app2 must not see app1's pressure opt-in");
+
+        // And app1's own state must still hold, proving this isn't a case of neither app retaining
+        // anything at all.
+        assert_eq!(app1.brush_plugin_mut().active_ramp(), 1);
+    }
+
+    /// `Plugin::panel` must be a true no-op for the real, shipped builtin plugin list
+    /// (`BrushPlugin` never overrides it) — called in both chrome modes, must not mutate the
+    /// document or panic.
+    #[test]
+    fn every_plugins_panel_hook_is_a_true_no_op_for_the_real_builtin_list() {
+        let mut app = GasciiApp::headless();
+        let before = app.doc.clone();
+        let ctx = egui::Context::default();
+        let (stylus_detected, bound) = host_context(&app);
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let host = host_facts(&app.doc, stylus_detected, bound);
+            for p in app.plugins.iter_mut() {
+                let outcome = p.panel(ui, false, &host);
+                assert!(outcome.edits.is_empty());
+                let outcome = p.panel(ui, true, &host);
+                assert!(outcome.edits.is_empty());
+            }
+        });
+        assert_eq!(app.doc, before, "no plugin's panel hook may mutate the document");
+    }
+
+    fn raw_input_with_screen(w: f32, h: f32) -> egui::RawInput {
+        egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(w, h))), ..Default::default() }
+    }
+
+    /// A throwaway plugin double whose `panel` draws a real `egui::Panel::bottom` — proves the
+    /// panel-loop reorder at the mechanism level, not just "it doesn't panic": a bottom
+    /// panel declared from inside a plugin, run through `run_plugin_panels` BEFORE `CentralPanel`,
+    /// must actually shrink the central panel's claimed rect, exactly like every other panel this
+    /// app declares. This is the property a `ctx: &Context`-only plugin signature could never prove
+    /// (egui's `Panel` reads/mutates its literal parent `Ui`'s own placer state, not `Context` —
+    /// see `Plugin::panel`'s doc comment) — the reason `panel`'s host parameter is `&mut egui::Ui`.
+    struct BottomPanelDouble;
+    impl Plugin for BottomPanelDouble {
+        fn register_tools(&self) -> Vec<gascii_plugin_api::PluginToolCapabilities> {
+            Vec::new()
+        }
+        fn panel(&mut self, ui: &mut egui::Ui, _kiosk: bool, _host: &dyn gascii_plugin_api::PluginHost) -> gascii_plugin_api::PanelOutcome {
+            egui::Panel::bottom("test_timeline_double").exact_size(50.0).show(ui, |ui| {
+                ui.label("test timeline");
+            });
+            gascii_plugin_api::PanelOutcome::default()
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn a_real_bottom_panel_from_a_plugin_correctly_shrinks_the_central_panel_before_it_claims_space() {
+        let mut app = GasciiApp::headless();
+        app.plugins.push(Box::new(BottomPanelDouble));
+
+        let ctx = egui::Context::default();
+        let mut with_double = None;
+        let _ = ctx.run_ui(raw_input_with_screen(1000.0, 800.0), |ui| {
+            app.run_plugin_panels(ui, false);
+            let resp = egui::CentralPanel::default().show(ui, |_ui| {});
+            with_double = Some(resp.response.rect);
+        });
+
+        let mut app_without = GasciiApp::headless(); // no BottomPanelDouble registered
+        let ctx2 = egui::Context::default();
+        let mut without_double = None;
+        let _ = ctx2.run_ui(raw_input_with_screen(1000.0, 800.0), |ui| {
+            app_without.run_plugin_panels(ui, false);
+            let resp = egui::CentralPanel::default().show(ui, |_ui| {});
+            without_double = Some(resp.response.rect);
+        });
+
+        let with_double = with_double.unwrap();
+        let without_double = without_double.unwrap();
+        assert!(
+            with_double.height() < without_double.height(),
+            "a real Panel::bottom declared inside a plugin must shrink the central panel's rect — \
+             with={with_double:?} without={without_double:?}"
+        );
+    }
+
+    /// `AnimPlugin`'s own single-frame gate, exercised through the real registered plugin list (not
+    /// a double): a fresh document has exactly one frame, so its panel must claim zero space and
+    /// must not shrink the central panel at all.
+    #[test]
+    fn anim_panel_claims_no_space_while_frame_count_is_one() {
+        let mut app = GasciiApp::headless();
+        assert_eq!(app.doc.frame_count(), 1);
+
+        let ctx = egui::Context::default();
+        let mut central_rect = None;
+        let _ = ctx.run_ui(raw_input_with_screen(1000.0, 800.0), |ui| {
+            app.run_plugin_panels(ui, false);
+            let resp = egui::CentralPanel::default().show(ui, |_ui| {});
+            central_rect = Some(resp.response.rect);
+        });
+
+        let ctx2 = egui::Context::default();
+        let mut central_rect_no_plugins = None;
+        let _ = ctx2.run_ui(raw_input_with_screen(1000.0, 800.0), |ui| {
+            let resp = egui::CentralPanel::default().show(ui, |_ui| {});
+            central_rect_no_plugins = Some(resp.response.rect);
+        });
+
+        assert_eq!(central_rect.unwrap(), central_rect_no_plugins.unwrap(), "a single-frame document's layout must be byte-identical with or without the plugin panel loop running");
+    }
+
+    /// The real, registered `gascii-anim` plugin (not a double) must claim real screen space the
+    /// moment a second frame exists — the flip side of the single-frame no-op gate above.
+    #[test]
+    fn anim_panel_claims_space_once_a_second_frame_exists() {
+        let mut app = GasciiApp::headless();
+        let edit = gascii_core::add_frame(&app.doc, 1, gascii_core::Frame::blank(app.doc.width, app.doc.height)).unwrap();
+        app.apply_edit(edit, None);
+        assert_eq!(app.doc.frame_count(), 2);
+
+        let ctx = egui::Context::default();
+        let mut with_second_frame = None;
+        let _ = ctx.run_ui(raw_input_with_screen(1000.0, 800.0), |ui| {
+            app.run_plugin_panels(ui, false);
+            let resp = egui::CentralPanel::default().show(ui, |_ui| {});
+            with_second_frame = Some(resp.response.rect);
+        });
+
+        let app_single = GasciiApp::headless();
+        let ctx2 = egui::Context::default();
+        let mut single_frame = None;
+        let _ = ctx2.run_ui(raw_input_with_screen(1000.0, 800.0), |ui| {
+            let _ = &app_single; // single-frame baseline: no plugin panel call needed (the single-frame no-op gate)
+            let resp = egui::CentralPanel::default().show(ui, |_ui| {});
+            single_frame = Some(resp.response.rect);
+        });
+
+        assert!(
+            with_second_frame.unwrap().height() < single_frame.unwrap().height(),
+            "the timeline panel must claim real space once frame_count() > 1"
+        );
+    }
+
+    /// A test-double plugin returning a `PanelOutcome` with one `Edit`, driven through one
+    /// `run_plugin_panels` call — the edit must reach the document through the same, unmodified
+    /// `apply_edit` choke point every other mutation uses (undo/redo proves this, not just the
+    /// forward direction).
+    #[test]
+    fn plugin_panel_outcome_edits_are_applied_through_apply_edit() {
+        let mut app = GasciiApp::headless();
+        let edit = gascii_core::add_frame(&app.doc, 1, gascii_core::Frame::blank(app.doc.width, app.doc.height)).unwrap();
+        app.apply_edit(edit, None);
+        assert_eq!(app.doc.resolved_frame_duration_ms(0), Some(Document::DEFAULT_FRAME_DURATION_MS));
+
+        struct EditOutcomeDouble;
+        impl Plugin for EditOutcomeDouble {
+            fn register_tools(&self) -> Vec<gascii_plugin_api::PluginToolCapabilities> {
+                Vec::new()
+            }
+            fn panel(&mut self, _ui: &mut egui::Ui, _kiosk: bool, host: &dyn gascii_plugin_api::PluginHost) -> gascii_plugin_api::PanelOutcome {
+                let idx = host.document().active_frame();
+                gascii_plugin_api::PanelOutcome {
+                    edits: vec![gascii_core::Edit::SetFrameDuration { index: idx, before: None, after: Some(50) }],
+                    ..Default::default()
+                }
+            }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+        app.plugins.push(Box::new(EditOutcomeDouble));
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.run_plugin_panels(ui, false));
+
+        assert_eq!(app.doc.resolved_frame_duration_ms(0), Some(50), "the PanelOutcome's edit must reach the document");
+        assert!(app.history.can_undo(), "the edit must have gone through History::apply, not bypassed it");
+        app.request_undo();
+        assert_eq!(
+            app.doc.resolved_frame_duration_ms(0),
+            Some(Document::DEFAULT_FRAME_DURATION_MS),
+            "undo must reverse the plugin-originated edit exactly like any other apply_edit call"
+        );
+    }
+
+    /// `set_active_frame` in a returned `PanelOutcome` must flush pending sessions on BOTH bindings
+    /// before actually moving the cursor — a live Text burst must commit onto the frame it was
+    /// typed on, not silently carry over to the new one.
+    #[test]
+    fn plugin_panel_outcome_set_active_frame_flushes_pending_sessions_before_switching() {
+        let mut app = GasciiApp::headless();
+        let edit = gascii_core::add_frame(&app.doc, 1, gascii_core::Frame::blank(app.doc.width, app.doc.height)).unwrap();
+        app.apply_edit(edit, None);
+
+        // A pending Text burst on L, uncommitted, at (0,0) on frame 0.
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('a'), &tctx, &app.doc);
+        app.acquire_keyboard(Binding::L);
+
+        struct SwitchFrameDouble;
+        impl Plugin for SwitchFrameDouble {
+            fn register_tools(&self) -> Vec<gascii_plugin_api::PluginToolCapabilities> {
+                Vec::new()
+            }
+            fn panel(&mut self, _ui: &mut egui::Ui, _kiosk: bool, _host: &dyn gascii_plugin_api::PluginHost) -> gascii_plugin_api::PanelOutcome {
+                gascii_plugin_api::PanelOutcome { set_active_frame: Some(1), ..Default::default() }
+            }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+        app.plugins.push(Box::new(SwitchFrameDouble));
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.run_plugin_panels(ui, false));
+
+        assert_eq!(app.active_frame, 1, "set_active_frame must move the cursor");
+        assert_eq!(app.doc.active_frame(), 1);
+        assert_eq!(
+            app.doc.cell_at(0, 0, 0, 0).unwrap().ch,
+            'a',
+            "a pending burst must be flushed onto the frame it was typed on before the switch, not dropped or carried over"
+        );
+    }
+
+    /// `set_loop_playback` in a returned `PanelOutcome` must write `Document.loop_playback`
+    /// directly — a plain field write, not an `Edit`, so it must NOT create an undo entry.
+    #[test]
+    fn plugin_panel_outcome_set_loop_playback_writes_the_document_field_directly_without_history() {
+        let mut app = GasciiApp::headless();
+        assert!(app.doc.loop_playback, "sanity: a fresh document defaults to looping");
+        let can_undo_before = app.history.can_undo();
+
+        struct LoopToggleDouble;
+        impl Plugin for LoopToggleDouble {
+            fn register_tools(&self) -> Vec<gascii_plugin_api::PluginToolCapabilities> {
+                Vec::new()
+            }
+            fn panel(&mut self, _ui: &mut egui::Ui, _kiosk: bool, _host: &dyn gascii_plugin_api::PluginHost) -> gascii_plugin_api::PanelOutcome {
+                gascii_plugin_api::PanelOutcome { set_loop_playback: Some(false), ..Default::default() }
+            }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+        app.plugins.push(Box::new(LoopToggleDouble));
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.run_plugin_panels(ui, false));
+
+        assert!(!app.doc.loop_playback, "the PanelOutcome's request must reach Document.loop_playback");
+        assert_eq!(app.history.can_undo(), can_undo_before, "a plain field write must never create an undo entry");
+    }
+
+    /// A returned `PanelOutcome.error` must reach `self.last_error` — the same status-bar channel
+    /// every other structural trigger already uses, not a silent no-op (Important #1).
+    #[test]
+    fn plugin_panel_outcome_error_surfaces_through_last_error() {
+        let mut app = GasciiApp::headless();
+        assert!(app.last_error.is_none());
+
+        struct ErrorOutcomeDouble;
+        impl Plugin for ErrorOutcomeDouble {
+            fn register_tools(&self) -> Vec<gascii_plugin_api::PluginToolCapabilities> {
+                Vec::new()
+            }
+            fn panel(&mut self, _ui: &mut egui::Ui, _kiosk: bool, _host: &dyn gascii_plugin_api::PluginHost) -> gascii_plugin_api::PanelOutcome {
+                gascii_plugin_api::PanelOutcome { error: Some("add frame: exceeds the 256 maximum".to_string()), ..Default::default() }
+            }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+        app.plugins.push(Box::new(ErrorOutcomeDouble));
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.run_plugin_panels(ui, false));
+
+        assert_eq!(app.last_error.as_deref(), Some("add frame: exceeds the 256 maximum"));
+    }
+
+    /// A `PanelOutcome` carrying BOTH a successful edit and a failure message in the same drain pass
+    /// (a multi-op outcome) must apply the edit AND still surface the error — neither channel may
+    /// silently swallow the other just because they arrived together.
+    #[test]
+    fn plugin_panel_outcome_with_both_an_edit_and_an_error_applies_the_edit_and_still_surfaces_the_error() {
+        let mut app = GasciiApp::headless();
+
+        struct PartialFailureDouble;
+        impl Plugin for PartialFailureDouble {
+            fn register_tools(&self) -> Vec<gascii_plugin_api::PluginToolCapabilities> {
+                Vec::new()
+            }
+            fn panel(&mut self, _ui: &mut egui::Ui, _kiosk: bool, host: &dyn gascii_plugin_api::PluginHost) -> gascii_plugin_api::PanelOutcome {
+                let idx = host.document().active_frame();
+                gascii_plugin_api::PanelOutcome {
+                    edits: vec![gascii_core::Edit::SetFrameDuration { index: idx, before: None, after: Some(50) }],
+                    error: Some("duplicate frame: exceeds the 256 maximum".to_string()),
+                    ..Default::default()
+                }
+            }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+        app.plugins.push(Box::new(PartialFailureDouble));
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.run_plugin_panels(ui, false));
+
+        assert_eq!(app.doc.resolved_frame_duration_ms(0), Some(50), "the succeeding half of a multi-op outcome must still apply");
+        assert_eq!(app.last_error.as_deref(), Some("duplicate frame: exceeds the 256 maximum"), "the failing half must still surface");
+    }
+
+    /// A `PanelOutcome`-originated `duplicate_frame` edit (built from the real `gascii_core::
+    /// duplicate_frame`, exactly what `gascii-anim`'s own timeline controls call — not a hand-built
+    /// `Edit` literal) must land in `History` and undo byte-identically to the functionally same
+    /// operation reached via the host's own "Add Frame" menu path — the two entry points must be
+    /// indistinguishable to `History`/undo, not just visually similar.
+    #[test]
+    fn plugin_outcome_originated_duplicate_frame_edit_lands_in_history_and_undoes_identically_to_the_menu_path() {
+        let mut app_plugin = GasciiApp::headless();
+        app_plugin.doc.set_cell(0, 0, 0, cell('D'));
+
+        struct DuplicateOutcomeDouble;
+        impl Plugin for DuplicateOutcomeDouble {
+            fn register_tools(&self) -> Vec<gascii_plugin_api::PluginToolCapabilities> {
+                Vec::new()
+            }
+            fn panel(&mut self, _ui: &mut egui::Ui, _kiosk: bool, host: &dyn gascii_plugin_api::PluginHost) -> gascii_plugin_api::PanelOutcome {
+                let doc = host.document();
+                let edit = gascii_core::duplicate_frame(doc, doc.active_frame()).unwrap();
+                gascii_plugin_api::PanelOutcome { edits: vec![edit], ..Default::default() }
+            }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+        app_plugin.plugins.push(Box::new(DuplicateOutcomeDouble));
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| app_plugin.run_plugin_panels(ui, false));
+
+        let mut app_menu = GasciiApp::headless();
+        app_menu.doc.set_cell(0, 0, 0, cell('D'));
+        app_menu.add_frame_via_menu();
+
+        assert_eq!(app_plugin.doc, app_menu.doc, "a plugin-outcome-originated duplicate must produce a byte-identical document to the menu path");
+        assert!(app_plugin.history.can_undo());
+
+        app_plugin.request_undo();
+        app_menu.request_undo();
+        assert_eq!(app_plugin.doc, app_menu.doc, "undo must restore both paths to an identical document");
+        assert_eq!(app_plugin.doc.frame_count(), 1, "undo must fully reverse the plugin-originated duplicate");
+    }
+
+    /// A single `PanelOutcome` that both adds a frame AND requests switching to the frame the edit
+    /// just created — the index requested by `set_active_frame` does not exist in the document until
+    /// the outcome's own `edits` are drained first. Proves `run_plugin_panels`'s edits-then-switch
+    /// ordering, not just that each half works when tested alone.
+    #[test]
+    fn plugin_panel_outcome_that_both_adds_a_frame_and_switches_to_it_in_one_pass_resolves_against_the_post_edit_document() {
+        let mut app = GasciiApp::headless();
+        assert_eq!(app.doc.frame_count(), 1);
+
+        struct AddAndSwitchDouble;
+        impl Plugin for AddAndSwitchDouble {
+            fn register_tools(&self) -> Vec<gascii_plugin_api::PluginToolCapabilities> {
+                Vec::new()
+            }
+            fn panel(&mut self, _ui: &mut egui::Ui, _kiosk: bool, host: &dyn gascii_plugin_api::PluginHost) -> gascii_plugin_api::PanelOutcome {
+                let doc = host.document();
+                let edit = gascii_core::add_frame(doc, 1, gascii_core::Frame::blank(doc.width, doc.height)).unwrap();
+                gascii_plugin_api::PanelOutcome { edits: vec![edit], set_active_frame: Some(1), ..Default::default() }
+            }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+        app.plugins.push(Box::new(AddAndSwitchDouble));
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.run_plugin_panels(ui, false));
+
+        assert_eq!(app.doc.frame_count(), 2, "the edit half of the outcome must have landed");
+        assert_eq!(app.active_frame, 1, "the switch half must resolve against the post-edit document, landing on the frame the edit just created");
+        assert_eq!(app.doc.active_frame(), 1);
+    }
+
+    /// A `PanelOutcome`-originated `remove_frame`/`reorder_frame` edit (the real `gascii_core`
+    /// functions, matching what `gascii-anim`'s own Delete/reorder controls call) must undo
+    /// byte-exactly, mirroring `frame-substrate`'s own already-proven ladder-undo property, this
+    /// time reached through the plugin-drain path rather than a direct `apply_edit` call.
+    #[test]
+    fn plugin_panel_outcome_originated_delete_edit_undoes_to_a_byte_exact_prior_document() {
+        let mut app = GasciiApp::headless();
+        let edit = gascii_core::add_frame(&app.doc, 1, gascii_core::Frame::blank(app.doc.width, app.doc.height)).unwrap();
+        app.apply_edit(edit, None);
+        app.doc.set_cell(1, 0, 0, cell('B'));
+        let before_delete = app.doc.clone();
+        assert_eq!(before_delete.frame_count(), 2);
+
+        struct DeleteFrameDouble;
+        impl Plugin for DeleteFrameDouble {
+            fn register_tools(&self) -> Vec<gascii_plugin_api::PluginToolCapabilities> {
+                Vec::new()
+            }
+            fn panel(&mut self, _ui: &mut egui::Ui, _kiosk: bool, host: &dyn gascii_plugin_api::PluginHost) -> gascii_plugin_api::PanelOutcome {
+                let doc = host.document();
+                match gascii_core::remove_frame(doc, doc.active_frame()) {
+                    Ok(edit) => gascii_plugin_api::PanelOutcome { edits: vec![edit], ..Default::default() },
+                    Err(_) => gascii_plugin_api::PanelOutcome::default(),
+                }
+            }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+        app.plugins.push(Box::new(DeleteFrameDouble));
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.run_plugin_panels(ui, false));
+        assert_eq!(app.doc.frame_count(), 1, "the plugin-outcome-originated delete must have applied");
+
+        app.request_undo();
+        assert_eq!(app.doc, before_delete, "undo must byte-exactly restore the prior 2-frame document");
+    }
+
+    /// `switch_active_frame` (the target of a `PanelOutcome::set_active_frame`) flushes via
+    /// `flush_all()`, but that only actually commits a `holds_session` tool's (Text/Selection)
+    /// pending work — a plain stroke tool like Pencil does not hold a "session" the flush machinery
+    /// recognizes, so a mid-drag Pencil press is left genuinely pending, not force-committed, across
+    /// the switch. The eventual `Release` (whenever the pointer lifts) builds its `ToolCtx` fresh
+    /// against whatever frame is active *at that moment* — this proves it lands on the frame the
+    /// stroke was actually released against, and that the switch itself does not silently commit (or
+    /// lose) the in-flight stroke onto either frame by itself.
+    #[test]
+    fn switch_active_frame_mid_pencil_drag_does_not_silently_commit_the_pending_stroke_to_either_frame() {
+        let mut app = GasciiApp::headless();
+        let edit = gascii_core::add_frame(&app.doc, 1, gascii_core::Frame::blank(app.doc.width, app.doc.height)).unwrap();
+        app.apply_edit(edit, None);
+        assert_eq!(app.active_frame, 0);
+
+        app.active_glyph = 'Z';
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Pencil);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &app.doc);
+        app.stroke_owner = Some(Binding::L);
+
+        // A plugin-shaped frame switch arrives mid-drag (mirrors a real timeline click's outcome).
+        app.switch_active_frame(1);
+
+        assert_eq!(app.active_frame, 1, "the switch itself must still take effect");
+        assert_eq!(app.doc.cell_at(0, 0, 0, 0).unwrap().ch, ' ', "the pending stroke must not have been silently committed onto its origin frame by the flush");
+        assert_eq!(app.doc.cell_at(1, 0, 0, 0).unwrap().ch, ' ', "nor onto the frame just switched to");
+
+        // Whenever the pointer eventually releases, it commits against whatever frame is active at
+        // that moment — proving the eventual commit target is the frame the release actually
+        // targets, never a stale snapshot of the origin frame.
+        let tctx2 = crate::canvas::tool_ctx(&app, Binding::L);
+        if let ToolResponse::Commit(Some(edit)) = app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx2, &app.doc) {
+            app.apply_edit(edit, Some(Binding::L));
+        }
+        app.stroke_owner = None;
+        assert_eq!(app.doc.cell_at(1, 0, 0, 0).unwrap().ch, 'Z', "the eventual release commits onto whichever frame is active when it fires");
+        assert_eq!(app.doc.cell_at(0, 0, 0, 0).unwrap().ch, ' ', "the origin frame is left untouched by a release that fires after the switch");
+    }
+
+    /// `add_frame_via_menu`'s own per-variant `last_error` message at the `MAX_FRAMES` boundary —
+    /// pinned literally so a future wording change is deliberate, and so it can be cross-checked
+    /// against `gascii-anim`'s own `frame_op_error_message` test for the same `FrameOpError` variant
+    /// (Important #1's "menu and timeline paths produce consistent messages for the same failure").
+    #[test]
+    fn add_frame_via_menu_reports_the_max_frames_boundary_with_a_specific_readable_message() {
+        let mut app = GasciiApp::headless();
+        for i in 1..Document::MAX_FRAMES {
+            let edit = gascii_core::add_frame(&app.doc, i, gascii_core::Frame::blank(app.doc.width, app.doc.height)).unwrap();
+            app.apply_edit(edit, None);
+        }
+        assert_eq!(app.doc.frame_count(), Document::MAX_FRAMES);
+
+        app.add_frame_via_menu();
+
+        assert_eq!(app.doc.frame_count(), Document::MAX_FRAMES, "a rejected add must not change frame_count");
+        assert_eq!(app.last_error.as_deref(), Some("add frame: exceeds the 256 maximum"));
+    }
+
+    /// The Edit menu's "Add Frame" bootstrap: duplicates the active frame and flushes any pending
+    /// session first — mirrors "Resize Canvas…"'s own flush-before-structural-trigger discipline.
+    #[test]
+    fn add_frame_menu_item_duplicates_the_active_frame_and_flushes_first() {
+        let mut app = GasciiApp::headless();
+        app.doc.set_cell(0, 0, 0, cell('D'));
+
+        // A pending Text burst, uncommitted — must be flushed (not dropped) before the duplicate.
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 1, y: 0 }, &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('X'), &tctx, &app.doc);
+        app.acquire_keyboard(Binding::L);
+
+        app.add_frame_via_menu();
+
+        assert_eq!(app.doc.frame_count(), 2, "Add Frame must duplicate into a second frame");
+        assert_eq!(app.doc.cell_at(0, 0, 1, 0).unwrap().ch, 'X', "the pending burst must be flushed before duplicating");
+        assert_eq!(app.doc.cell_at(1, 0, 0, 0).unwrap().ch, 'D', "the duplicate must carry the source frame's content");
+        assert_eq!(app.doc.cell_at(1, 0, 1, 0).unwrap().ch, 'X', "the duplicate must carry the just-flushed burst too");
+        assert!(app.last_error.is_none());
+    }
+
+    /// End-to-end integration: drives the whole Add-Frame/switch-frame/undo commit chain together
+    /// through the real registered `gascii-anim` plugin (not a double) — Add Frame via the menu,
+    /// draw on frame 2, switch back to frame 1 via a synthetic `PanelOutcome`, undo twice, and
+    /// confirm both the frame structure and cell content are back to the single-frame starting state.
+    #[test]
+    fn add_frame_draw_switch_frame_and_undo_twice_restores_the_single_frame_starting_state() {
+        let mut app = GasciiApp::headless();
+        let starting_doc = app.doc.clone();
+
+        app.add_frame_via_menu();
+        assert_eq!(app.doc.frame_count(), 2);
+
+        // Switch to frame 1 via a plugin-shaped PanelOutcome (mirrors a real timeline click).
+        app.switch_active_frame(1);
+        assert_eq!(app.active_frame, 1);
+        assert_eq!(app.doc.active_frame(), 1);
+
+        // Draw on frame 2 (index 1).
+        app.active_glyph = 'Z';
+        let r = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 2, y: 2 }, &r, &app.doc);
+        if let ToolResponse::Commit(Some(edit)) = app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &r, &app.doc) {
+            app.apply_edit(edit, Some(Binding::L));
+        }
+        assert_eq!(app.doc.cell_at(1, 0, 2, 2).unwrap().ch, 'Z');
+
+        // Switch back to frame 0.
+        app.switch_active_frame(0);
+        assert_eq!(app.active_frame, 0);
+
+        // Undo the draw, then the Add Frame — back to the single-frame starting state.
+        app.request_undo();
+        app.request_undo();
+        assert_eq!(app.doc, starting_doc, "two undos must fully restore the pre-Add-Frame document");
+    }
+
+    /// A test-only `Plugin` that logs its own tag into a shared log when `wrap_renderer` is
+    /// called, proving `build_renderer`'s fold order directly rather than trying to inspect the
+    /// opaque composed `Box<dyn CanvasRenderer>` it returns.
+    struct TaggingPlugin {
+        tag: &'static str,
+        log: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
+    }
+    impl Plugin for TaggingPlugin {
+        fn register_tools(&self) -> Vec<gascii_plugin_api::PluginToolCapabilities> {
+            Vec::new()
+        }
+        fn wrap_renderer(&self, inner: Box<dyn CanvasRenderer>) -> Box<dyn CanvasRenderer> {
+            self.log.borrow_mut().push(self.tag);
+            inner
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn build_renderer_folds_every_plugins_wrap_renderer_in_registration_order() {
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let plugins: Vec<Box<dyn Plugin>> = vec![
+            Box::new(TaggingPlugin { tag: "a", log: log.clone() }),
+            Box::new(TaggingPlugin { tag: "b", log: log.clone() }),
+            Box::new(TaggingPlugin { tag: "c", log: log.clone() }),
+        ];
+        let _ = build_renderer(&plugins);
+        assert_eq!(*log.borrow(), vec!["a", "b", "c"], "fold order must match plugin-list order");
+    }
+
+    /// Confirms `BrushPlugin`'s actual no-op defaults hold end-to-end against a real
+    /// `GasciiApp::headless()` — not just against test doubles: the plugin-composed renderer
+    /// chain paints without panicking.
+    #[test]
+    fn a_real_app_with_the_builtin_plugin_list_has_an_identity_renderer() {
+        let app = GasciiApp::headless();
+
+        let mut renderer = build_renderer(&app.plugins);
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.painter().clone();
+            renderer.paint(
+                &painter,
+                &app.doc,
+                &app.viewport as &dyn gascii_plugin_api::CellGrid,
+                egui::Pos2::ZERO,
+                egui::Vec2::new(10.0, 20.0),
+                (0, 0, app.doc.width, app.doc.height),
+                &[],
+                &[],
+                None,
+                None,
+            );
+        });
     }
 
     /// Every kind must be constructible, including Eyedropper — which is not really a tool and is
@@ -2242,7 +3431,7 @@ mod tests {
     #[test]
     fn tool_shortcuts_are_unique() {
         let mut seen = std::collections::HashSet::new();
-        for def in TOOLS.iter() {
+        for def in tools().iter() {
             assert!(seen.insert(def.key), "{:?} reuses shortcut {:?}", def.kind, def.key);
         }
     }
@@ -2359,6 +3548,307 @@ mod tests {
             app.slots[Binding::L.ix()].stamps[brush_slot].size, 10,
             "the configured size survives the whole stroke, including release"
         );
+    }
+
+    /// `tool_ctx`'s extra-context injection (density mode, ramp) must reach only a plugin tool that
+    /// asks for it (Brush, via `wants_extra_ctx`), reading it from the *live* plugin instance rather
+    /// than a fresh default — and must leave a non-plugin tool at the inert default the pre-migration
+    /// literal `GasciiApp::with_state` used, matching what every non-Brush tool already got before
+    /// this workstream.
+    #[test]
+    fn tool_ctx_injects_extra_context_only_for_a_plugin_tool_that_wants_it() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Brush);
+        app.brush_plugin_mut().set_active_ramp(1);
+        let expected_ramp = gascii_core::builtin_ramps()[1].chars.clone();
+
+        let brush_ctx = crate::canvas::tool_ctx(&app, Binding::L);
+        assert_eq!(brush_ctx.ramp, expected_ramp, "Brush's tool_ctx.ramp must follow the live plugin's active ramp");
+
+        app.bind(Binding::L, ToolKind::Pencil);
+        let pencil_ctx = crate::canvas::tool_ctx(&app, Binding::L);
+        assert!(pencil_ctx.ramp.is_empty(), "a non-plugin tool must get the inert default, not Brush's ramp");
+    }
+
+    /// End-to-end proof that a real Brush stroke, driven the same way every other tool-stroke test
+    /// in this module drives one (`tool.update` + `apply_edit`, not just inspecting `tool_ctx` in
+    /// isolation), actually stamps a glyph read off the live plugin's active ramp — not a default
+    /// or a stale snapshot. Ramp index 1 ("Block shades", `"░▒▓█"`) with the plugin's default
+    /// `Fixed(1.0)` intensity picks the ramp's last character deterministically.
+    #[test]
+    fn a_full_brush_stroke_through_the_app_commits_a_glyph_from_the_plugins_active_ramp() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Brush);
+        app.brush_plugin_mut().set_active_ramp(1);
+        let expected_ch = gascii_core::builtin_ramps()[1].chars[3]; // '█', Fixed(1.0) on a 4-char ramp
+
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 2, y: 2 }, &tctx, &app.doc);
+        if let ToolResponse::Commit(Some(edit)) =
+            app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc)
+        {
+            app.apply_edit(edit, Some(Binding::L));
+        }
+        assert_eq!(
+            app.doc.cell(app.active_layer, 2, 2).unwrap().ch,
+            expected_ch,
+            "the committed glyph must come from the live plugin's active ramp/density, not a default"
+        );
+
+        // A non-plugin tool bound to the same binding must never read a ramp at all — it stamps
+        // the app's plain active_glyph, completely untouched by whatever the plugin's ramp holds.
+        app.bind(Binding::L, ToolKind::Pencil);
+        app.active_glyph = '#';
+        let pencil_ctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 3, y: 3 }, &pencil_ctx, &app.doc);
+        if let ToolResponse::Commit(Some(edit)) =
+            app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &pencil_ctx, &app.doc)
+        {
+            app.apply_edit(edit, Some(Binding::L));
+        }
+        assert_eq!(app.doc.cell(app.active_layer, 3, 3).unwrap().ch, '#');
+    }
+
+    /// Per-binding isolation through the plugin: Brush need not be on L. Bound to R alone while L
+    /// holds an unrelated tool, `tool_ctx` must still resolve R's ramp/density through the live
+    /// plugin (not just when Brush happens to be the L-bound case every other test exercises), and
+    /// L must see none of it.
+    #[test]
+    fn brush_bound_only_to_r_while_l_holds_a_different_tool_still_resolves_through_the_plugin() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Pencil);
+        app.bind(Binding::R, ToolKind::Brush);
+        app.brush_plugin_mut().set_active_ramp(1);
+        let expected_ramp = gascii_core::builtin_ramps()[1].chars.clone();
+
+        let r_ctx = crate::canvas::tool_ctx(&app, Binding::R);
+        assert_eq!(r_ctx.ramp, expected_ramp, "R's tool_ctx must resolve through the plugin even though L holds a different tool");
+        let l_ctx = crate::canvas::tool_ctx(&app, Binding::L);
+        assert!(l_ctx.ramp.is_empty(), "L (Pencil) must not see Brush's ramp just because R holds Brush");
+    }
+
+    /// The digit-key intensity shortcut's real gating, driven through `handle_keys` itself (not
+    /// `BrushPlugin::tick` in isolation with a `FakeHost`, which `gascii-density-brush`'s own suite
+    /// already covers) — proving the host's `!focused` gate, `host_facts`, and the per-frame
+    /// `plugins.iter_mut().for_each(|p| p.tick(...))` loop are wired together correctly end to end.
+    /// Also exercises kiosk (fullscreen) input: the shortcut was never fullscreen-gated pre-migration
+    /// and must not become so now.
+    #[test]
+    fn digit_key_intensity_shortcut_through_handle_keys_sets_fixed_intensity_while_bound_and_unfocused() {
+        for fullscreen in [false, true] {
+            let mut app = GasciiApp::headless();
+            app.bind(Binding::L, ToolKind::Brush);
+            app.brush_plugin_mut().set_density_mode(gascii_core::DensityMode::Buildup(gascii_core::Buildup));
+
+            let ctx = egui::Context::default();
+            let mut raw = egui::RawInput::default();
+            raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().fullscreen = Some(fullscreen);
+            raw.events.push(egui::Event::Key {
+                key: egui::Key::Num5,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+            match app.brush_plugin_mut().density_mode() {
+                gascii_core::DensityMode::Fixed(gascii_core::Fixed(level)) => {
+                    assert!((level - 0.5).abs() < 1e-4, "fullscreen={fullscreen}: expected Fixed(0.5)")
+                }
+                other => panic!("fullscreen={fullscreen}: expected Fixed(0.5), got {other:?}"),
+            }
+        }
+    }
+
+    /// The exact suppression the pre-migration `bound_to(ToolKind::Brush).is_some() && !focused`
+    /// gate provided: an active Text session anywhere on the keyboard must still suppress the
+    /// digit-key shortcut, even though Brush is bound to the OTHER binding (R), not the one holding
+    /// the session — `focused` is a single app-wide fact, not per-binding.
+    #[test]
+    fn digit_key_intensity_shortcut_is_suppressed_while_a_text_session_owns_the_keyboard() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        app.bind(Binding::R, ToolKind::Brush);
+        app.keyboard_owner = Some(Binding::L);
+        app.brush_plugin_mut().set_density_mode(gascii_core::DensityMode::Buildup(gascii_core::Buildup));
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::Num5,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert!(
+            matches!(app.brush_plugin_mut().density_mode(), gascii_core::DensityMode::Buildup(_)),
+            "an active Text session must suppress Brush's digit-key shortcut even though Brush is bound to the other binding"
+        );
+    }
+
+    /// The other suppression path: a focused egui widget (e.g. the HEX color field) must also
+    /// suppress the shortcut, matching every other single-key tool shortcut's own `!focused` gate.
+    #[test]
+    fn digit_key_intensity_shortcut_is_suppressed_while_a_widget_has_keyboard_focus() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Brush);
+        app.brush_plugin_mut().set_density_mode(gascii_core::DensityMode::Buildup(gascii_core::Buildup));
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::Num5,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run_ui(raw, |ui| {
+            let id = egui::Id::new("qa_test_fake_focused_widget");
+            ui.memory_mut(|m| m.request_focus(id));
+            app.handle_keys(ui);
+        });
+
+        assert!(
+            matches!(app.brush_plugin_mut().density_mode(), gascii_core::DensityMode::Buildup(_)),
+            "a focused widget must suppress Brush's digit-key shortcut, matching every other tool-shortcut gate"
+        );
+    }
+
+    /// `active_layer` is the single source `tool_ctx` and the eyedropper pick read from — pins that
+    /// a non-zero value (session-only in this scope; the app itself never writes anything but 0)
+    /// actually reaches both call sites rather than a stale `0` literal surviving in either.
+    #[test]
+    fn tool_ctx_and_eyedropper_follow_active_layer() {
+        let mut app = GasciiApp::headless();
+        let (w, h) = (app.doc.width, app.doc.height);
+        app.doc.layers_mut().push(gascii_core::Layer::blank(w, h));
+        app.doc.layers_mut().push(gascii_core::Layer::blank(w, h));
+        app.active_layer = 2;
+        app.doc.set_cell(2, 3, 3, gascii_core::Cell { ch: 'z', fg: Rgba(1, 2, 3, 255), bg: Rgba::TRANSPARENT });
+
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        assert_eq!(tctx.layer, 2, "tool_ctx's layer must follow active_layer");
+
+        app.bind(Binding::L, ToolKind::Eyedropper);
+        crate::canvas::begin_gesture(&mut app, Binding::L, 3, 3);
+        let (expected_fg, _) = gascii_core::eyedrop(&app.doc.cell(2, 3, 3).copied().unwrap());
+        assert_eq!(
+            app.active_fg, expected_fg,
+            "the eyedropper pick must read the cell from active_layer, not layer 0"
+        );
+    }
+
+    /// Mirrors `tool_ctx_and_eyedropper_follow_active_layer`'s shape, but for `frame`:
+    /// `active_frame` defaults to `0` and `tool_ctx` follows whatever it's set to.
+    #[test]
+    fn active_frame_defaults_to_zero_and_tool_ctx_follows_it() {
+        let app = GasciiApp::headless();
+        assert_eq!(app.active_frame, 0);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        assert_eq!(tctx.frame, 0, "tool_ctx's frame must follow active_frame");
+
+        let mut app = app;
+        app.active_frame = 1;
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        assert_eq!(tctx.frame, 1, "tool_ctx's frame must follow a non-default active_frame too");
+    }
+
+    /// `apply_edit`'s app -> doc sync actually reaches `doc.active_frame()` before every applied
+    /// edit, exercised end-to-end against a multi-frame document.
+    #[test]
+    fn apply_edit_syncs_doc_active_frame_from_app_active_frame_before_applying() {
+        let mut app = GasciiApp::headless();
+        let edit = gascii_core::add_frame(&app.doc, 1, gascii_core::Frame::blank(app.doc.width, app.doc.height)).unwrap();
+        app.apply_edit(edit, None);
+        assert_eq!(app.doc.frame_count(), 2);
+
+        app.active_frame = 1;
+        let cell_edit = gascii_core::Edit::Cells(vec![gascii_core::CellEdit {
+            frame: 1,
+            layer: 0,
+            x: 0,
+            y: 0,
+            before: gascii_core::Cell::BLANK,
+            after: gascii_core::Cell { ch: 'x', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT },
+        }]);
+        app.apply_edit(cell_edit, None);
+        assert_eq!(app.doc.active_frame(), 1, "apply_edit must sync doc's active-frame cursor from app.active_frame");
+    }
+
+    /// `apply_edit`'s doc -> app direction: `AddFrame` shifts `doc`'s cursor as a side effect of
+    /// applying (inserting at index 0 pushes the active frame from 0 to 1) — `app.active_frame`
+    /// must follow that shift, not just the app -> doc seed. Then `request_undo`'s own doc -> app
+    /// resync must follow `doc`'s cursor back down when the insert is undone.
+    #[test]
+    fn undoing_an_add_frame_moves_the_docs_cursor_and_app_active_frame_follows() {
+        let mut app = GasciiApp::headless();
+        let edit = gascii_core::add_frame(&app.doc, 0, gascii_core::Frame::blank(app.doc.width, app.doc.height)).unwrap();
+        app.apply_edit(edit, None);
+        assert_eq!(app.doc.frame_count(), 2);
+        assert_eq!(app.doc.active_frame(), 1, "inserting at index 0 shifts the active cursor forward");
+        assert_eq!(app.active_frame, 1, "apply_edit's doc -> app resync must follow the shift");
+
+        app.request_undo();
+        assert_eq!(app.doc.active_frame(), 0, "undo restores doc's pre-insert cursor");
+        assert_eq!(app.active_frame, 0, "app.active_frame must follow doc's cursor back down after undo");
+    }
+
+    /// App-side pinning spot-check: with `active_frame` shipped pinned at `0` (no UI writes it),
+    /// a full stroke -> undo -> redo -> save -> load cycle driven through the real app pipeline
+    /// must still land on `frame_count() == 1` and save exactly the pre-frames v1 envelope shape —
+    /// the `frame_count() == 1 => save v1` rule makes this directly assertable without a second,
+    /// pre-frames build to diff against.
+    #[test]
+    fn a_stroke_undo_redo_save_load_cycle_through_the_app_still_produces_a_plain_v1_file() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Pencil);
+        app.active_glyph = '#';
+        app.active_fg = Rgba::WHITE;
+        app.active_bg = Rgba::TRANSPARENT;
+
+        crate::canvas::begin_gesture(&mut app, Binding::L, 2, 2);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        if let ToolResponse::Commit(Some(edit)) = app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc) {
+            app.apply_edit(edit, Some(Binding::L));
+        }
+        app.stroke_owner = None;
+        assert_eq!(app.doc.cell(0, 2, 2).unwrap().ch, '#', "sanity: the stroke committed");
+
+        app.request_undo();
+        assert_eq!(app.doc.cell(0, 2, 2).unwrap().ch, ' ', "sanity: undo reverted the stroke");
+        app.request_redo();
+        assert_eq!(app.doc.cell(0, 2, 2).unwrap().ch, '#', "sanity: redo restored it");
+
+        assert_eq!(app.doc.frame_count(), 1, "the shipped app never leaves frame_count() == 1");
+        assert_eq!(app.active_frame, 0, "the shipped app never moves active_frame off 0");
+        assert_eq!(app.doc.active_frame(), 0);
+
+        let dir = scratch_dir("frame_pin_v1_shape");
+        let path = dir.join("out.gascii");
+        app.current_path = Some(path.clone());
+        app.save_file();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["background", "height", "layers", "version", "width"],
+            "a single-frame session must save exactly the pre-frames v1 key set — no frame-substrate field leaks in"
+        );
+        assert_eq!(value["version"], 1, "a single-frame session must be tagged version 1, the pre-frames version");
+
+        let loaded = load_str(&raw).unwrap();
+        assert_eq!(loaded, app.doc, "the round trip must be byte-exact");
+        assert_eq!(loaded.cell(0, 2, 2).unwrap().ch, '#');
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `F11` must exit/enter fullscreen even while a Text session is fully active — the exact
@@ -3172,6 +4662,364 @@ mod tests {
         assert_ne!(trimmed, untrimmed, "the two export paths must genuinely diverge for this document");
     }
 
+    /// Builds a real `n`-frame document via `apply_edit` (the same choke point every other
+    /// multi-frame test in this module uses), rather than mutating `app.doc` directly.
+    fn app_with_frame_count(n: usize) -> GasciiApp {
+        let mut app = GasciiApp::headless();
+        while app.doc.frame_count() < n {
+            let edit = gascii_core::add_frame(&app.doc, app.doc.frame_count(), gascii_core::Frame::blank(app.doc.width, app.doc.height)).unwrap();
+            app.apply_edit(edit, None);
+        }
+        app
+    }
+
+    /// A single-frame document's Export dialog offers exactly Text/PNG — the zero-visible-
+    /// behavior-change constraint for every pre-existing document, locked in by construction.
+    #[test]
+    fn a_single_frame_documents_format_list_is_exactly_text_and_png() {
+        let doc = Document::default_document();
+        assert_eq!(doc.frame_count(), 1);
+        let names: Vec<&str> = export_dialog_formats(&doc).iter().map(|(_, label)| *label).collect();
+        assert_eq!(names, vec!["Text (.txt)", "PNG"]);
+    }
+
+    /// A multi-frame document's Export dialog offers all five formats, in the documented order.
+    #[test]
+    fn a_multi_frame_documents_format_list_offers_all_five_formats_in_order() {
+        let app = app_with_frame_count(2);
+        let names: Vec<&str> = export_dialog_formats(&app.doc).iter().map(|(_, label)| *label).collect();
+        assert_eq!(names, vec!["Text (.txt)", "PNG", "Animated GIF", "PNG Spritesheet", "Text Frames (.txt)"]);
+    }
+
+    /// `snap_unavailable_export_format`: a multi-frame-only format survives while `frame_count() >
+    /// 1`, snaps back to `Text` the moment it drops to 1, and every format is a no-op at `> 1`.
+    #[test]
+    fn snap_unavailable_export_format_only_touches_multi_frame_only_formats_at_frame_count_one() {
+        for format in [ExportFormat::Gif, ExportFormat::SpriteSheet, ExportFormat::TextFrames] {
+            assert_eq!(snap_unavailable_export_format(format, 1), ExportFormat::Text);
+            assert_eq!(snap_unavailable_export_format(format, 2), format, "must be a no-op while still offered");
+        }
+        for format in [ExportFormat::Text, ExportFormat::Png] {
+            assert_eq!(snap_unavailable_export_format(format, 1), format, "an always-offered format is never snapped");
+        }
+    }
+
+    /// `refresh_export_preview`'s gate: Gif and SpriteSheet build a preview texture exactly like
+    /// PNG (all three are raster formats sharing the active-frame rasterizer); TextFrames does not,
+    /// mirroring the existing Text case.
+    #[test]
+    fn refresh_export_preview_builds_a_texture_for_every_raster_format_but_not_text_frames() {
+        let mut app = app_with_frame_count(2);
+        let ctx = egui::Context::default();
+        for format in [ExportFormat::Png, ExportFormat::Gif, ExportFormat::SpriteSheet] {
+            app.export.format = format;
+            app.export_preview = None;
+            app.export_preview_key = None;
+            app.refresh_export_preview(&ctx);
+            assert!(app.export_preview.is_some(), "{format:?} must build a preview texture");
+        }
+        app.export.format = ExportFormat::TextFrames;
+        app.export_preview = None;
+        app.export_preview_key = None;
+        app.refresh_export_preview(&ctx);
+        assert!(app.export_preview.is_none(), "TextFrames must not build a preview texture");
+    }
+
+    /// `export_gif`/`export_spritesheet`'s output written through `write_atomic` — the same
+    /// file-write half `write_atomic_creates_a_new_file_with_exact_contents` already pins for
+    /// Text/PNG — decodes back as the expected format and dimensions. `run_export` itself opens a
+    /// real native (blocking) `rfd::FileDialog`, so it — like the pre-existing Text/Png format
+    /// arms — has no direct test; this exercises the same export-function-then-write_atomic
+    /// pipeline `run_export`'s new arms perform, without the interactive file picker.
+    #[test]
+    fn gif_and_spritesheet_bytes_round_trip_through_write_atomic() {
+        let app = app_with_frame_count(2);
+        let dir = std::env::temp_dir().join(format!("gascii_anim_export_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let gif_path = dir.join("out.gif");
+        let gif_bytes = anim_export::export_gif(&app.doc, 8, None, None).unwrap();
+        write_atomic(&gif_path, &gif_bytes).unwrap();
+        let decoded = image::load_from_memory(&std::fs::read(&gif_path).unwrap()).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (app.doc.width as u32 * 8, app.doc.height as u32 * 8));
+
+        let sheet_path = dir.join("out.png");
+        let sheet_bytes = anim_export::export_spritesheet(&app.doc, 8, None, None).unwrap();
+        write_atomic(&sheet_path, &sheet_bytes).unwrap();
+        let decoded = image::load_from_memory(&std::fs::read(&sheet_path).unwrap()).unwrap();
+        // 2 frames -> a 2x1 grid (`cols = ceil(sqrt(2)) = 2`, `rows = 1`).
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (app.doc.width as u32 * 8 * 2, app.doc.height as u32 * 8),
+            "2 frames, 2x1 grid"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The Export dialog's "Trim trailing spaces" checkbox toggles between `export_text_frames`
+    /// (trimmed) and `export_text_frames_untrimmed` (padded) for `TextFrames`, the same divergence
+    /// `export_trim_checkbox_toggles_between_trimmed_and_full_width_padded_rows` already pins for
+    /// the single-frame `Text` pair.
+    #[test]
+    fn text_frames_trim_checkbox_toggles_between_trimmed_and_full_width_padded_rows() {
+        let mut doc = Document::new(5, 1);
+        doc.set_cell(0, 0, 0, cell('a'));
+        doc.set_cell(0, 1, 0, cell('b'));
+
+        let trimmed = export_text_frames(&doc);
+        let untrimmed = export_text_frames_untrimmed(&doc);
+
+        assert_eq!(trimmed, format!("--- frame 1 ({}ms) ---\nab", Document::DEFAULT_FRAME_DURATION_MS));
+        assert_eq!(untrimmed, format!("--- frame 1 ({}ms) ---\nab   ", Document::DEFAULT_FRAME_DURATION_MS));
+        assert_ne!(trimmed, untrimmed, "the two export paths must genuinely diverge for this document");
+    }
+
+    /// `TextFrames`'s combined dump, like every other export format, must round-trip byte-exact
+    /// through `write_atomic` and leave no `.tmp` file behind -- the same file-write half
+    /// `write_atomic_creates_a_new_file_with_exact_contents` already pins for Text/PNG/Gif/
+    /// SpriteSheet, extended to the one format that had no direct atomic-write test yet.
+    #[test]
+    fn text_frames_bytes_round_trip_through_write_atomic_with_no_tmp_file_left_behind() {
+        let mut doc = Document::new(3, 1);
+        doc.set_cell(0, 0, 0, cell('a'));
+        let mut history = History::new();
+        let edit = gascii_core::add_frame(&doc, 1, gascii_core::Frame::blank(3, 1)).unwrap();
+        history.apply(&mut doc, edit);
+        assert!(doc.set_active_frame(1));
+        doc.set_cell(0, 1, 0, cell('b'));
+        assert!(doc.set_active_frame(0));
+
+        let dir = scratch_dir("text_frames_atomic");
+        let path = dir.join("out.txt");
+        let text = export_text_frames(&doc);
+        write_atomic(&path, text.as_bytes()).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        assert!(!dir.join("out.txt.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cap composition, GIF: a document legitimately built past the joint frame-count budget
+    /// (`validate_gif_dimensions`'s own locked-in 196-frame boundary) must be rejected with no
+    /// bytes ever reaching the filesystem -- the same `Err` -> skip-`write_atomic` shape
+    /// `run_export`'s `Gif` arm itself follows -- and the source document/history must be
+    /// completely untouched by the failed attempt (export functions only ever borrow `&Document`,
+    /// but this pins that invariant at the integration level rather than trusting the type system
+    /// silently).
+    #[test]
+    fn a_gif_export_rejected_for_too_many_frames_writes_no_file_and_leaves_the_document_untouched() {
+        let mut doc = Document::new(80, 25);
+        let mut history = History::new();
+        for _ in 1..196 {
+            let edit = gascii_core::add_frame(&doc, doc.frame_count(), gascii_core::Frame::blank(80, 25)).unwrap();
+            history.apply(&mut doc, edit);
+        }
+        assert_eq!(doc.frame_count(), 196);
+        let before = doc.clone();
+        let before_top_edit = history.top_edit_id();
+
+        let dir = scratch_dir("gif_cap_rejection");
+        let path = dir.join("rejected.gif");
+        match anim_export::export_gif(&doc, 16, None, None) {
+            Ok(_) => panic!("196 frames at 80x25/16px must be rejected by the joint pixel budget"),
+            Err(e) => assert!(matches!(e, png_export::PngExportAppError::Dimensions(gascii_core::PngExportError::TooManyFrames { .. }))),
+        }
+
+        assert!(!path.exists(), "a rejected export must never reach write_atomic, so no file may exist");
+        assert_eq!(doc, before, "a failed export must not mutate the source document");
+        assert_eq!(history.top_edit_id(), before_top_edit, "a failed export must not touch history");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Cap composition, spritesheet: a per-frame size that's individually fine
+    /// (`validate_png_dimensions` succeeds) can still be rejected once tiled into a multi-frame
+    /// grid (`validate_spritesheet_dimensions` fails on the joint canvas) -- a genuinely different
+    /// rejection reason from the GIF case above, reached through the same `Err`-before-any-write
+    /// shape, no file left behind, document/history untouched.
+    #[test]
+    fn a_spritesheet_export_rejected_for_a_too_large_tiled_canvas_writes_no_file_and_leaves_the_document_untouched() {
+        let mut doc = Document::new(1024, 512);
+        let mut history = History::new();
+        for _ in 1..4 {
+            let edit = gascii_core::add_frame(&doc, doc.frame_count(), gascii_core::Frame::blank(1024, 512)).unwrap();
+            history.apply(&mut doc, edit);
+        }
+        assert_eq!(doc.frame_count(), 4);
+        // Sanity: one frame alone is well under the single-PNG cap (8192x4096 ≈ 33.5MP < 100MP).
+        assert!(gascii_core::validate_png_dimensions(doc.width, doc.height, 8).is_ok());
+        let before = doc.clone();
+        let before_top_edit = history.top_edit_id();
+
+        let dir = scratch_dir("spritesheet_cap_rejection");
+        let path = dir.join("rejected.png");
+        match anim_export::export_spritesheet(&doc, 8, None, None) {
+            Ok(_) => panic!("a 2x2 grid of 8192x4096 tiles (~134MP) must be rejected by the spritesheet cap"),
+            Err(e) => assert!(matches!(e, png_export::PngExportAppError::Dimensions(gascii_core::PngExportError::TooLarge { .. }))),
+        }
+
+        assert!(!path.exists(), "a rejected export must never reach write_atomic, so no file may exist");
+        assert_eq!(doc, before, "a failed export must not mutate the source document");
+        assert_eq!(history.top_edit_id(), before_top_edit, "a failed export must not touch history");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `Gif`-format export preference persisted while a multi-frame document was open survives
+    /// its own `Prefs` JSON round-trip unmodified -- `Prefs` is document-agnostic, it has no idea
+    /// what document it'll next be applied to -- but the moment it's paired with a single-frame
+    /// document (e.g. the app restarted after the user deleted every extra frame), the Export
+    /// dialog's own reopen-time guard (`snap_unavailable_export_format`, applied at the top of
+    /// `export_dialog` every frame it's open) snaps it back to `Text`, exactly as it would for any
+    /// other document that dropped to one frame mid-session.
+    #[test]
+    fn a_persisted_gif_preference_meeting_a_single_frame_document_snaps_back_to_text_on_reopen() {
+        let mut multi = app_with_frame_count(2);
+        multi.export.format = ExportFormat::Gif;
+        let prefs = crate::prefs::Prefs::from_app(&multi);
+        let json = serde_json::to_string(&prefs).unwrap();
+        let restored_prefs: crate::prefs::Prefs = serde_json::from_str(&json).unwrap();
+
+        let mut single = GasciiApp::headless();
+        assert_eq!(single.doc.frame_count(), 1, "sanity: a fresh headless app starts single-frame");
+        restored_prefs.apply_to(&mut single);
+        assert_eq!(
+            single.export.format,
+            ExportFormat::Gif,
+            "Prefs itself is document-agnostic -- it restores whatever format was last stored, unsnapped"
+        );
+
+        let snapped = snap_unavailable_export_format(single.export.format, single.doc.frame_count());
+        assert_eq!(snapped, ExportFormat::Text, "the dialog's reopen-time guard must snap an unavailable format back to Text");
+    }
+
+    /// Regression proof for WS5's `rasterize_composited` extraction, with realistic (not
+    /// single-pixel) content: multiple distinct glyphs, distinct fg/bg colors including partial
+    /// alpha, and an opaque document background -- `export_png` (built on `rasterize_rgba8`, which
+    /// now delegates to `rasterize_composited`) must still produce byte-identical output to
+    /// manually driving the frame-explicit path (`rasterize_frame_rgba8` at the active frame) and
+    /// encoding it the same way `export_png` itself does. A regression that only shows up on
+    /// multi-cell, multi-color, partially-transparent content (not the trivial 1x1 cases the
+    /// pre-existing suite already covers) would only be caught here.
+    #[test]
+    fn export_png_is_byte_identical_to_manually_driving_the_frame_explicit_rasterizer_on_realistic_content() {
+        let mut doc = Document::new(6, 4);
+        doc.background = Rgba(20, 30, 40, 255);
+        doc.set_cell(0, 0, 0, gascii_core::Cell { ch: 'A', fg: Rgba(255, 0, 0, 255), bg: Rgba::TRANSPARENT });
+        doc.set_cell(0, 1, 0, gascii_core::Cell { ch: 'B', fg: Rgba(0, 255, 0, 200), bg: Rgba(10, 10, 10, 128) });
+        doc.set_cell(0, 2, 1, gascii_core::Cell { ch: '#', fg: Rgba::WHITE, bg: Rgba(0, 0, 255, 255) });
+        doc.set_cell(0, 5, 3, gascii_core::Cell { ch: 'Z', fg: Rgba(1, 2, 3, 90), bg: Rgba::TRANSPARENT });
+
+        let opaque_bg = Some(doc.background);
+        let via_export_png = png_export::export_png(&doc, 12, opaque_bg, None).unwrap();
+
+        let (w, h, pixels) = png_export::rasterize_frame_rgba8(&doc, doc.active_frame(), 12, opaque_bg, None).unwrap();
+        let img = image::RgbaImage::from_raw(w, h, pixels).unwrap();
+        let mut via_manual_frame_explicit = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut via_manual_frame_explicit), image::ImageFormat::Png).unwrap();
+
+        assert_eq!(via_export_png, via_manual_frame_explicit, "export_png must remain byte-identical to the frame-explicit rasterization path");
+    }
+
+    /// Program-level end-to-end proof for the whole animation-plugin program (Phases 1-5): a
+    /// document built up through the real user-facing sequence -- new doc, draw per frame, add
+    /// frames, set per-frame durations -- is saved to `.gascii`, reloaded as a fresh `Document`
+    /// sharing no memory with the original, and every one of this phase's three export formats is
+    /// produced from that *reloaded* document and independently verified against it. A bug in the
+    /// v2 save/load frame round-trip that only manifested at export time would slip through every
+    /// phase-scoped test suite but not this one.
+    #[test]
+    fn a_full_new_draw_frames_durations_save_load_export_lifecycle_round_trips_correctly() {
+        let mut app = GasciiApp::headless();
+        app.doc = Document::new(3, 2);
+        app.history = History::new();
+
+        // Frame 0: draw.
+        let red = Rgba(255, 0, 0, 255);
+        app.doc.set_cell(0, 0, 0, gascii_core::Cell { ch: 'A', fg: red, bg: Rgba::TRANSPARENT });
+
+        // Frame 1: add, draw distinct content.
+        let edit = gascii_core::add_frame(&app.doc, 1, gascii_core::Frame::blank(3, 2)).unwrap();
+        app.apply_edit(edit, None);
+        assert!(app.doc.set_active_frame(1));
+        let green = Rgba(0, 255, 0, 255);
+        app.doc.set_cell(0, 1, 0, gascii_core::Cell { ch: 'B', fg: green, bg: Rgba::TRANSPARENT });
+
+        // Frame 2: add, draw distinct content, give it its own duration.
+        let edit = gascii_core::add_frame(&app.doc, 2, gascii_core::Frame::blank(3, 2)).unwrap();
+        app.apply_edit(edit, None);
+        assert!(app.doc.set_active_frame(2));
+        let blue = Rgba(0, 0, 255, 255);
+        app.doc.set_cell(0, 2, 0, gascii_core::Cell { ch: 'C', fg: blue, bg: Rgba::TRANSPARENT });
+        let edit = gascii_core::set_frame_duration(&app.doc, 2, Some(250)).unwrap().unwrap();
+        app.apply_edit(edit, None);
+        app.doc.loop_playback = false;
+        assert!(app.doc.set_active_frame(0));
+
+        // Save + reload: the loaded document shares no memory with `app.doc`.
+        let saved = save_string(&app.doc);
+        let loaded = load_str(&saved).unwrap();
+        assert_eq!(loaded.frame_count(), 3);
+        assert_eq!(loaded.resolved_frame_duration_ms(2), Some(250));
+        assert!(!loaded.loop_playback);
+
+        // Export all three multi-frame formats from the *loaded* document.
+        let gif_bytes = anim_export::export_gif(&loaded, 8, None, None).unwrap();
+        let sheet_bytes = anim_export::export_spritesheet(&loaded, 8, None, None).unwrap();
+        let text = export_text_frames(&loaded);
+
+        // GIF: 3 frames, no loop extension (loop_playback == false survived the round trip), each
+        // frame carries its source glyph's color, frame 2's delay honors the reloaded 250ms override.
+        use image::AnimationDecoder;
+        let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(&gif_bytes)).unwrap();
+        let frames = decoder.into_frames().collect_frames().unwrap();
+        assert_eq!(frames.len(), 3);
+        let close = |a: u8, b: u8| (a as i16 - b as i16).abs() <= 16;
+        for (frame, &color) in frames.iter().zip([red, green, blue].iter()) {
+            assert!(
+                frame.buffer().pixels().any(|p| close(p.0[0], color.0) && close(p.0[1], color.1) && close(p.0[2], color.2)),
+                "each decoded GIF frame must contain a pixel close to its source frame's color {color:?}"
+            );
+        }
+        let (numer, denom) = frames[2].delay().numer_denom_ms();
+        assert_eq!(numer / denom, 250, "frame 2's reloaded duration_override must survive into the GIF's delay");
+        assert!(!gif_bytes.windows(11).any(|w| w == b"NETSCAPE2.0"), "the reloaded loop_playback == false must write no loop extension");
+
+        // Spritesheet: 3 frames -> a 2x2 grid (cols=ceil(sqrt(3))=2, rows=2); frame 2 lands at (0,1).
+        // Each frame draws one glyph at a different cell column (not a whole-tile fill), so the
+        // check scans frame 2's whole tile region for its color rather than one hard-coded pixel.
+        let decoded = image::load_from_memory(&sheet_bytes).unwrap().to_rgba8();
+        let (frame_px_w, frame_px_h) = gascii_core::validate_png_dimensions(loaded.width, loaded.height, 8).unwrap();
+        let (sheet_w, sheet_h) = gascii_core::validate_spritesheet_dimensions(frame_px_w, frame_px_h, 2, 2).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (sheet_w, sheet_h));
+        let (tile_x0, tile_y0) = (0u32, frame_px_h); // frame 2's tile origin at grid (col=0, row=1)
+        let found_blue_in_frame_2s_tile = (tile_y0..tile_y0 + frame_px_h)
+            .flat_map(|y| (tile_x0..tile_x0 + frame_px_w).map(move |x| (x, y)))
+            .any(|(x, y)| decoded.get_pixel(x, y).0[..3] == [blue.0, blue.1, blue.2]);
+        assert!(found_blue_in_frame_2s_tile, "frame 2's own tile must contain its glyph's exact fg color somewhere");
+
+        // Text frames: 3 headered bodies, each matching that frame's own `export_text` taken in
+        // isolation on the reloaded document. Sliced by each header's own position (not a naive
+        // `"\n\n"` split) since frame 0's body itself ends in a blank second row -- its own
+        // trailing newline plus the `"\n\n"` frame separator would otherwise misalign a
+        // position-based split.
+        let headers: Vec<String> = (0..3)
+            .map(|i| format!("--- frame {} ({}ms) ---", i + 1, loaded.resolved_frame_duration_ms(i).unwrap()))
+            .collect();
+        let starts: Vec<usize> = headers.iter().map(|h| text.find(h.as_str()).unwrap()).collect();
+        for i in 0..3 {
+            let mut isolated = loaded.clone();
+            isolated.set_active_frame(i);
+            let expected_body = export_text(&isolated);
+            let seg_end = if i + 1 < 3 { starts[i + 1] - 2 } else { text.len() };
+            let segment = &text[starts[i]..seg_end];
+            assert_eq!(
+                segment,
+                format!("{}\n{expected_body}", headers[i]),
+                "frame {i}'s text segment must match export_text of the reloaded document in isolation"
+            );
+        }
+    }
+
     /// The New dialog's background color well (`new_bg`) must land on the freshly created
     /// document's `background` field, not just sit as inert dialog state -- the one place this
     /// wiring is exercised outside a full GUI run.
@@ -3201,7 +5049,7 @@ mod tests {
 
         app.clear_document();
 
-        assert!(app.doc.layers[0].cells().iter().all(gascii_core::Cell::is_blank));
+        assert!(app.doc.layers()[0].cells().iter().all(gascii_core::Cell::is_blank));
         assert!(app.history.can_undo());
         assert!(app.history.undo(&mut app.doc));
         assert_eq!(app.doc, before);
@@ -3231,7 +5079,7 @@ mod tests {
 
         // The burst's 'A' commits, then Clear blanks it right back out — both as real edits, so
         // two undos are needed to get back to the empty starting document.
-        assert!(app.doc.layers[0].cells().iter().all(gascii_core::Cell::is_blank));
+        assert!(app.doc.layers()[0].cells().iter().all(gascii_core::Cell::is_blank));
         assert!(app.history.undo(&mut app.doc));
         assert_eq!(app.doc.cell(0, 0, 0).unwrap().ch, 'A', "undo #1 restores the burst's commit");
         assert!(app.history.undo(&mut app.doc));
@@ -3252,7 +5100,7 @@ mod tests {
 
         // Same two-undo-entry shape as the Text-burst case: the drop commits, then Clear blanks
         // it back out.
-        assert!(app.doc.layers[0].cells().iter().all(gascii_core::Cell::is_blank));
+        assert!(app.doc.layers()[0].cells().iter().all(gascii_core::Cell::is_blank));
         assert!(app.history.undo(&mut app.doc));
         assert_eq!(app.doc.cell(0, 4, 4).unwrap().ch, 'z', "undo #1 restores the dropped stamp");
         assert!(app.history.undo(&mut app.doc));
@@ -3309,7 +5157,7 @@ mod tests {
 
         app.clear_document();
         assert!(
-            app.doc.layers[0].cells().iter().all(gascii_core::Cell::is_blank),
+            app.doc.layers()[0].cells().iter().all(gascii_core::Cell::is_blank),
             "Clear must blank the document even with a stroke mid-flight"
         );
         assert_eq!(app.stroke_owner, Some(Binding::L), "Clear must not itself end an in-progress stroke");
@@ -3659,5 +5507,224 @@ mod tests {
             Some(1),
             "the new key must reflect the bumped generation, not just differ arbitrarily"
         );
+    }
+
+    /// `suppresses_tool_shortcuts` end to end through the real `handle_keys` loop, not just the
+    /// pure predicate: a live Text session must swallow `P` as burst content rather than let it
+    /// rebind L to Pencil, and the very next frame after that session ends must let the same key
+    /// through normally — proving the gate tracks the session's lifetime, not a stuck flag.
+    #[test]
+    fn a_live_text_session_suppresses_the_pencil_shortcut_through_handle_keys_and_releases_it_once_the_session_ends() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &app.doc);
+        app.acquire_keyboard(Binding::L);
+
+        let press_p = |app: &mut GasciiApp| {
+            let ctx = egui::Context::default();
+            let mut raw = egui::RawInput::default();
+            raw.events.push(egui::Event::Key {
+                key: egui::Key::P,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+        };
+
+        press_p(&mut app);
+        assert_eq!(
+            app.slot(Binding::L).kind, ToolKind::Text,
+            "P must be swallowed as burst content while the Text session is active, not rebind L"
+        );
+
+        // Ending the session (Escape/toolbox click equivalent) must release the gate.
+        app.end_session(Binding::L);
+        press_p(&mut app);
+        assert_eq!(
+            app.slot(Binding::L).kind, ToolKind::Pencil,
+            "once the session has ended, the very same key must rebind L normally"
+        );
+    }
+
+    /// Windowed complement to `pressing_t_while_fullscreen_leaves_l_unchanged_but_other_tool_
+    /// shortcuts_still_work`: outside fullscreen every registry entry's shortcut — including
+    /// Text's, which `kiosk_visible` gates only while fullscreen — must reach `set_tool` normally.
+    #[test]
+    fn pressing_t_while_windowed_rebinds_l_to_text() {
+        let mut app = GasciiApp::headless();
+        assert_ne!(app.slot(Binding::L).kind, ToolKind::Text, "sanity: L doesn't already start on Text");
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().fullscreen = Some(false);
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::T,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert_eq!(app.slot(Binding::L).kind, ToolKind::Text, "T must rebind L to Text while windowed");
+    }
+
+    /// The `[`/`]` size keys must adjust whichever binding `options_focus` currently names, driven
+    /// through the real `handle_keys` loop rather than by mutating `stamps` directly — proving the
+    /// `sized_slot` capability lookup and the focus-tracking field are both actually wired into the
+    /// live key-handling path, not merely consistent in isolation.
+    #[test]
+    fn close_bracket_grows_only_the_options_focused_bindings_stamp_through_handle_keys() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Eraser);
+        app.slots[Binding::R.ix()] = ToolSlot::new(ToolKind::Eraser);
+        app.options_focus = Binding::R;
+        let slot = sized_slot(ToolKind::Eraser).expect("Eraser is sized");
+        app.slots[Binding::L.ix()].stamps[slot].size = 1;
+        app.slots[Binding::R.ix()].stamps[slot].size = 1;
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::CloseBracket,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert_eq!(app.slots[Binding::R.ix()].stamps[slot].size, 2, "R (options_focus) must grow");
+        assert_eq!(app.slots[Binding::L.ix()].stamps[slot].size, 1, "L must be untouched by R's focused key");
+    }
+
+    /// A committed Pencil stroke that stamps the glyph plane must add the active glyph to RECENT —
+    /// closing the code review's flagged gap (`note_glyph_drawn`/`stamps_glyph` had no test driving
+    /// the real committed-stroke call path, only the underlying capability-table field). Eraser
+    /// (`stamps_glyph: false`) is driven the same way as a negative control: a real committed
+    /// stroke that does NOT count toward RECENT.
+    #[test]
+    fn a_committed_stroke_updates_recent_glyphs_exactly_for_stamps_glyph_kinds() {
+        for (kind, should_note) in [(ToolKind::Pencil, true), (ToolKind::Eraser, false)] {
+            let mut app = GasciiApp::headless();
+            app.slots[Binding::L.ix()] = ToolSlot::new(kind);
+            app.mask = PlaneMask::ALL;
+            app.active_glyph = 'Q';
+            assert!(app.recent_glyphs.is_empty(), "{kind:?}: sanity, RECENT starts empty");
+
+            crate::canvas::begin_gesture(&mut app, Binding::L, 0, 0);
+            let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+            let resp = app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc);
+            app.stroke_owner = None;
+            if let ToolResponse::Commit(Some(edit)) = resp {
+                app.apply_edit(edit, Some(Binding::L));
+                // Mirrors canvas.rs's own commit call site exactly (`show`'s stroke-tail branch).
+                app.note_glyph_drawn(app.slots[Binding::L.ix()].kind);
+            }
+
+            if should_note {
+                assert_eq!(
+                    app.recent_glyphs.first(), Some(&'Q'),
+                    "{kind:?}: a committed glyph-plane stroke must add the active glyph to RECENT"
+                );
+            } else {
+                assert!(
+                    app.recent_glyphs.is_empty(),
+                    "{kind:?}: a stamps_glyph=false kind's committed stroke must not touch RECENT"
+                );
+            }
+        }
+    }
+
+    /// The recurring stale-`before` bug class (flagged in prior reviews of redesign-round-2 and
+    /// fullscreen-mode), exercised specifically against a non-default `active_layer`: a Pencil
+    /// commit, a live Text session's resync, a second Pencil commit that re-pins the Text session's
+    /// `before` mid-burst, the Text session's own eventual commit, and finally undo/redo — every
+    /// one of those five steps must read and write the SAME layer (2), and layer 0 must stay
+    /// completely untouched throughout. `active_layer` is session-only (always 0 in the shipped
+    /// app), but the plumbing this pins must already be correct for the layers feature that will
+    /// set it to something other than 0.
+    #[test]
+    fn active_layer_resync_and_undo_redo_all_target_the_same_non_default_layer_under_adversarial_sequencing() {
+        let mut app = GasciiApp::headless();
+        let (w, h) = (app.doc.width, app.doc.height);
+        app.doc.layers_mut().push(gascii_core::Layer::blank(w, h));
+        app.doc.layers_mut().push(gascii_core::Layer::blank(w, h));
+        app.active_layer = 2;
+        app.mask = PlaneMask::ALL;
+
+        // R: a first Pencil stroke stamps layer 2's (2,2) with 'Z'.
+        app.bind(Binding::R, ToolKind::Pencil);
+        app.active_glyph = 'Z';
+        crate::canvas::begin_gesture(&mut app, Binding::R, 2, 2);
+        let r_tctx = crate::canvas::tool_ctx(&app, Binding::R);
+        if let ToolResponse::Commit(Some(edit)) =
+            app.slots[Binding::R.ix()].tool.update(ToolEvent::Release, &r_tctx, &app.doc)
+        {
+            app.apply_edit(edit, Some(Binding::R));
+        }
+        app.stroke_owner = None;
+        assert_eq!(app.doc.cell(2, 2, 2).unwrap().ch, 'Z', "sanity: R's first stroke landed on layer 2");
+        assert_eq!(app.doc.cell(0, 2, 2), Some(&gascii_core::Cell::BLANK), "sanity: layer 0 untouched so far");
+
+        // L: a Text burst starts on the SAME cell, pinning `before` against layer 2's current 'Z'.
+        app.bind(Binding::L, ToolKind::Text);
+        app.acquire_keyboard(Binding::L);
+        let l_tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 2, y: 2 }, &l_tctx, &app.doc);
+        app.active_glyph = 'A';
+        let l_tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('A'), &l_tctx, &app.doc);
+
+        // R: a second Pencil stroke, still mid-L-session, touches the SAME cell again — its commit
+        // must resync L against layer 2's new value ('Y'), not layer 0's untouched blank.
+        app.active_glyph = 'Y';
+        crate::canvas::begin_gesture(&mut app, Binding::R, 2, 2);
+        let r_tctx2 = crate::canvas::tool_ctx(&app, Binding::R);
+        if let ToolResponse::Commit(Some(edit)) =
+            app.slots[Binding::R.ix()].tool.update(ToolEvent::Release, &r_tctx2, &app.doc)
+        {
+            app.apply_edit(edit, Some(Binding::R));
+        }
+        app.stroke_owner = None;
+        assert_eq!(app.doc.cell(2, 2, 2).unwrap().ch, 'Y', "sanity: R's second stroke committed 'Y' on layer 2");
+
+        // L's burst finally commits 'A'. Correctness here is invisible on the forward write (the
+        // committed `after` is always 'A' either way) — the resync's target layer only shows up in
+        // the undo entry's `before`, which is exactly why this test checks undo/redo, not just the
+        // post-commit cell.
+        app.flush_slot(Binding::L);
+        assert_eq!(app.doc.cell(2, 2, 2).unwrap().ch, 'A', "L's committed burst lands 'A' on layer 2");
+
+        app.request_undo();
+        assert_eq!(
+            app.doc.cell(2, 2, 2).unwrap().ch, 'Y',
+            "undo must restore layer 2's actual prior content ('Y' from R's second stroke), not a \
+             stale before pinned against the wrong layer"
+        );
+
+        app.request_redo();
+        assert_eq!(app.doc.cell(2, 2, 2).unwrap().ch, 'A', "redo must re-land the Text commit");
+
+        assert_eq!(
+            app.doc.cell(0, 2, 2), Some(&gascii_core::Cell::BLANK),
+            "layer 0 must stay completely untouched by every edit and every undo/redo in this sequence"
+        );
+    }
+
+    /// The process-global tool registry must build exactly once: repeated `tools()` calls return
+    /// the same backing allocation, not a freshly rebuilt `Vec` each time. Guards the `OnceLock`
+    /// contract `prefs::load`'s first-ever-read-in-the-app-lifetime relies on (a rebuild-per-call
+    /// registry would still be correct today since every row is a pure constant, but would silently
+    /// stop being `&'static`-cheap the moment a plugin's `register_tool` needs to append once,
+    /// before the first read, rather than on every read).
+    #[test]
+    fn tools_registry_returns_the_same_backing_slice_across_repeated_calls() {
+        let a = tools().as_ptr();
+        let b = tools().as_ptr();
+        assert_eq!(a, b, "tools() must not rebuild the registry on every call");
     }
 }

@@ -17,6 +17,7 @@ use gascii_core::{
 
 fn ctx(mask: PlaneMask, glyph: char, fg: Rgba, bg: Rgba) -> ToolCtx {
     ToolCtx {
+        frame: 0,
         layer: 0,
         glyph,
         fg,

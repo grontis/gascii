@@ -23,7 +23,7 @@ impl Rectangle {
         if !doc.in_bounds(x, y) {
             return;
         }
-        let before = doc.cell(ctx.layer, x, y).copied().unwrap_or(Cell::BLANK);
+        let before = doc.cell_at(ctx.frame, ctx.layer, x, y).copied().unwrap_or(Cell::BLANK);
         let ch = join(before.ch, arms, ctx.glyph);
         let proposed = Cell { ch, fg: ctx.fg, bg: ctx.bg };
         pending.push(PendingCell { x, y, cell: mask_apply(before, proposed, ctx.mask) });
@@ -91,7 +91,7 @@ impl Tool for Rectangle {
                 ToolResponse::Active
             }
             ToolEvent::Release => {
-                let edit = diff_pending(&self.pending, doc, ctx.layer);
+                let edit = diff_pending(&self.pending, doc, ctx.frame, ctx.layer);
                 self.pending.clear();
                 self.anchor = None;
                 self.cur = None;
@@ -111,8 +111,9 @@ impl Tool for Rectangle {
         &self.pending
     }
 
-    fn resync(&mut self, doc: &Document, layer: usize) {
+    fn resync(&mut self, doc: &Document, frame: usize, layer: usize) {
         let Some((cur, mut ctx)) = self.cur.clone() else { return };
+        ctx.frame = frame;
         ctx.layer = layer;
         self.recompute(cur, &ctx, doc);
     }
@@ -126,6 +127,7 @@ mod tests {
 
     fn ctx(mask: PlaneMask, glyph: char) -> ToolCtx {
         ToolCtx {
+            frame: 0,
             layer: 0,
             glyph,
             fg: Rgba::WHITE,
@@ -220,7 +222,7 @@ mod tests {
         for y in 0..10u16 {
             doc.set_cell(0, 5, y, Cell::BLANK);
         }
-        rect.resync(&doc, 0);
+        rect.resync(&doc, 0, 0);
 
         let resp = rect.update(ToolEvent::Release, &tctx, &doc);
         let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
@@ -289,5 +291,50 @@ mod tests {
         for c in &cells {
             assert!(c.x < 5 && c.y < 5);
         }
+    }
+
+    /// `Rectangle::stamp`'s `before` read must consult `ctx.frame`, not `doc`'s active frame.
+    /// Distinguishing content — a vertical run on frame 1 only — makes the defect visible: reading
+    /// the (blank) active frame instead would join nothing, while reading frame 1 produces a '┼'.
+    #[test]
+    fn a_stroke_tools_committed_cell_edit_reads_before_from_the_ctx_frame_it_was_drawn_against() {
+        let mut doc = Document::new(10, 10);
+        let mut history = crate::edit::History::new();
+        let edit = crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(10, 10)).unwrap();
+        history.apply(&mut doc, edit);
+        for y in 0..10u16 {
+            doc.set_cell_at(1, 0, 5, y, Cell { ch: '│', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        }
+        assert_eq!(doc.active_frame(), 0, "doc's active frame stays 0; only ctx.frame targets frame 1");
+
+        let mut tctx = ctx(PlaneMask::ALL, '#');
+        tctx.frame = 1;
+        let mut rect = drag(&doc, &tctx, (2, 2), (8, 8));
+        let resp = rect.update(ToolEvent::Release, &tctx, &doc);
+        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
+            panic!("expected a committed edit");
+        };
+        let chars = chars_at(&cells);
+        assert_eq!(chars[&(5, 2)], '┼', "the join read must consult frame 1's content, not frame 0's blank active frame");
+        assert_eq!(chars[&(5, 8)], '┼');
+    }
+
+    /// The `diff_pending`-based-helper counterpart of pencil's freehand-path test: a rectangle
+    /// bound against a non-active frame must produce `CellEdit`s carrying that frame.
+    #[test]
+    fn a_stroke_tools_committed_cell_edit_carries_the_ctx_frame_it_was_drawn_against() {
+        let mut doc = Document::new(10, 10);
+        let mut history = crate::edit::History::new();
+        let edit = crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(10, 10)).unwrap();
+        history.apply(&mut doc, edit);
+
+        let mut tctx = ctx(PlaneMask::ALL, '#');
+        tctx.frame = 1;
+        let mut rect = drag(&doc, &tctx, (2, 2), (5, 5));
+        let resp = rect.update(ToolEvent::Release, &tctx, &doc);
+        let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
+            panic!("expected a committed edit");
+        };
+        assert!(cells.iter().all(|c| c.frame == 1), "every CellEdit must carry the frame it was drawn against");
     }
 }

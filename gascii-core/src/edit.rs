@@ -1,12 +1,24 @@
 //! Cell-diff undo/redo. `History` is the sole choke point for committed document mutation: it is
 //! the only thing that ever writes `Edit::after`/`before` cells back into a `Document`, so the doc
 //! and the undo/redo stacks can never drift out of sync.
+//!
+//! Positional (index-based) frame addressing in `CellEdit`/`Edit::AddFrame`/`RemoveFrame`/
+//! `ReorderFrame` is sound only because `History` is a single, strictly-LIFO stack and the sole
+//! path any of these variants are ever applied through. Undo always reverses the most recently
+//! applied edit first, so an older `CellEdit`'s stored `frame` index is always restored to its
+//! original content by any intervening frame-structure edit's own undo before the `CellEdit`
+//! itself is undone. Do not add a second mutation path for `frames` (a compacting/compressing
+//! history, selective per-frame undo, etc.) without re-deriving this argument — see the pinned
+//! test `history_is_a_single_strictly_lifo_stack_across_mixed_edit_kinds` and
+//! `undoing_a_reorder_before_an_older_cell_edit_targets_the_correct_frame`.
 
-use crate::model::{Cell, DocExtent, Document, Layer};
+use crate::model::{Cell, DocExtent, Document, Frame};
 
-/// A single cell's before/after value, addressed by layer + coordinate.
+/// A single cell's before/after value, addressed by frame + layer + coordinate. `frame` is safe
+/// to address positionally (not by a stable id) — see the module doc's LIFO argument.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct CellEdit {
+    pub frame: usize,
     pub layer: usize,
     pub x: u16,
     pub y: u16,
@@ -14,38 +26,70 @@ pub struct CellEdit {
     pub after: Cell,
 }
 
-/// A full-document snapshot: extent plus every layer's contents. Backs `Edit::Resize`'s
+/// A full-document snapshot: extent plus every frame's contents. Backs `Edit::Resize`'s
 /// before/after — deliberately a whole-snapshot swap rather than a diff (resize is a rare,
-/// deliberate action, not a per-frame hot path; see `resize_document`'s own docs).
+/// deliberate action, not a per-frame hot path; see `resize_document`'s own docs). Cost scales
+/// with frame count now that a document can carry more than one — an extension of the same
+/// accepted unbounded-`History`-memory tradeoff already documented below, not a new one.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct DocSnapshot {
     pub extent: DocExtent,
-    pub layers: Vec<Layer>,
+    pub frames: Vec<Frame>,
 }
 
-/// A single undoable Document mutation. `#[non_exhaustive]` because further mutation kinds (e.g.
-/// layer ops) join as new variants without touching the `Cells`/`Resize` paths or `History`'s
-/// apply/undo/redo mechanics, which are already variant-agnostic.
+/// A single undoable Document mutation. `#[non_exhaustive]` because further mutation kinds join
+/// as new variants without touching existing paths or `History`'s apply/undo/redo mechanics,
+/// which are already variant-agnostic.
 #[non_exhaustive]
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Edit {
     Cells(Vec<CellEdit>),
     /// A document-extent change (grow or shrink), top-left anchored. `before`/`after` are full
-    /// snapshots so undo/redo restore cropped-away cells exactly, not just the extent.
+    /// snapshots so undo/redo restore cropped-away cells exactly, not just the extent. Frame count
+    /// is invariant under resize, so `active_frame` is not part of this variant.
     Resize { before: DocSnapshot, after: DocSnapshot },
+    /// Inserts `frame` at `index`. `active_frame_before`/`active_frame_after` are the cursor's
+    /// exact value before/after this insert (computed once by `frame_ops.rs`'s index-shift rules,
+    /// never recomputed by `History`) — inserting can shift which frame a numeric `active_frame`
+    /// index refers to, exactly like inserting text shifts a cursor position.
+    AddFrame { index: usize, frame: Frame, active_frame_before: usize, active_frame_after: usize },
+    /// Removes the frame at `index`, keeping its content so undo can reinsert it exactly.
+    RemoveFrame { index: usize, frame: Frame, active_frame_before: usize, active_frame_after: usize },
+    /// Moves the frame at `from` to `to`. Never changes frame *count*, but can still shift the
+    /// index a still-valid `active_frame` should track.
+    ReorderFrame { from: usize, to: usize, active_frame_before: usize, active_frame_after: usize },
+    /// Sets frame `index`'s duration override (`None` clears it, falling back to the document
+    /// default).
+    SetFrameDuration { index: usize, before: Option<u32>, after: Option<u32> },
 }
 
 fn apply_forward(doc: &mut Document, edit: &Edit) {
     match edit {
         Edit::Cells(cells) => {
             for c in cells {
-                doc.set_cell(c.layer, c.x, c.y, c.after);
+                doc.set_cell_at(c.frame, c.layer, c.x, c.y, c.after);
             }
         }
         Edit::Resize { after, .. } => {
             doc.width = after.extent.width;
             doc.height = after.extent.height;
-            doc.layers = after.layers.clone();
+            doc.frames = after.frames.clone();
+        }
+        Edit::AddFrame { index, frame, active_frame_after, .. } => {
+            doc.frames.insert(*index, frame.clone());
+            doc.active_frame = *active_frame_after;
+        }
+        Edit::RemoveFrame { index, active_frame_after, .. } => {
+            doc.frames.remove(*index);
+            doc.active_frame = *active_frame_after;
+        }
+        Edit::ReorderFrame { from, to, active_frame_after, .. } => {
+            let f = doc.frames.remove(*from);
+            doc.frames.insert(*to, f);
+            doc.active_frame = *active_frame_after;
+        }
+        Edit::SetFrameDuration { index, after, .. } => {
+            doc.frames[*index].duration_override = *after;
         }
     }
 }
@@ -54,13 +98,29 @@ fn apply_backward(doc: &mut Document, edit: &Edit) {
     match edit {
         Edit::Cells(cells) => {
             for c in cells {
-                doc.set_cell(c.layer, c.x, c.y, c.before);
+                doc.set_cell_at(c.frame, c.layer, c.x, c.y, c.before);
             }
         }
         Edit::Resize { before, .. } => {
             doc.width = before.extent.width;
             doc.height = before.extent.height;
-            doc.layers = before.layers.clone();
+            doc.frames = before.frames.clone();
+        }
+        Edit::AddFrame { index, active_frame_before, .. } => {
+            doc.frames.remove(*index);
+            doc.active_frame = *active_frame_before;
+        }
+        Edit::RemoveFrame { index, frame, active_frame_before, .. } => {
+            doc.frames.insert(*index, frame.clone());
+            doc.active_frame = *active_frame_before;
+        }
+        Edit::ReorderFrame { from, to, active_frame_before, .. } => {
+            let f = doc.frames.remove(*to);
+            doc.frames.insert(*from, f);
+            doc.active_frame = *active_frame_before;
+        }
+        Edit::SetFrameDuration { index, before, .. } => {
+            doc.frames[*index].duration_override = *before;
         }
     }
 }
@@ -75,7 +135,10 @@ fn apply_backward(doc: &mut Document, edit: &Edit) {
 /// Acceptable at current extents — depth-capping would silently discard undo steps and
 /// compression would complicate the choke point for a problem no real document yet has. Revisit
 /// (byte-budget with oldest-entry eviction, or region/RLE encoding) before raising
-/// `MAX_WIDTH`/`MAX_HEIGHT` or shipping long-session multi-layer workflows.
+/// `MAX_WIDTH`/`MAX_HEIGHT` or shipping long-session multi-layer workflows. `Edit::Resize`'s
+/// `DocSnapshot` extends the same accepted tradeoff with one more multiplier: its clone cost now
+/// scales with frame count too, not just layer count — not a new design problem, the same
+/// unbounded-memory acceptance applied to a document that can now have more than one frame.
 #[derive(Default)]
 pub struct History {
     undo_stack: Vec<(u64, Edit)>,
@@ -142,7 +205,7 @@ impl History {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Rgba;
+    use crate::model::{Layer, Rgba};
 
     fn cell(ch: char) -> Cell {
         Cell {
@@ -184,6 +247,7 @@ mod tests {
         let mut doc = Document::new(10, 10);
         let mut history = History::new();
         let edit = Edit::Cells(vec![CellEdit {
+            frame: 0,
             layer: 0,
             x: 3,
             y: 4,
@@ -199,9 +263,9 @@ mod tests {
         let mut doc = Document::new(10, 10);
         let mut history = History::new();
         let edit = Edit::Cells(vec![
-            CellEdit { layer: 0, x: 0, y: 0, before: Cell::BLANK, after: cell('a') },
-            CellEdit { layer: 0, x: 1, y: 0, before: Cell::BLANK, after: cell('b') },
-            CellEdit { layer: 0, x: 2, y: 0, before: Cell::BLANK, after: cell('c') },
+            CellEdit { frame: 0, layer: 0, x: 0, y: 0, before: Cell::BLANK, after: cell('a') },
+            CellEdit { frame: 0, layer: 0, x: 1, y: 0, before: Cell::BLANK, after: cell('b') },
+            CellEdit { frame: 0, layer: 0, x: 2, y: 0, before: Cell::BLANK, after: cell('c') },
         ]);
         history.apply(&mut doc, edit);
         assert_eq!(doc.cell(0, 0, 0), Some(&cell('a')));
@@ -214,7 +278,7 @@ mod tests {
         let mut doc = Document::new(10, 10);
         let mut history = History::new();
         let before = *doc.cell(0, 3, 4).unwrap();
-        let edit = Edit::Cells(vec![CellEdit { layer: 0, x: 3, y: 4, before, after: cell('x') }]);
+        let edit = Edit::Cells(vec![CellEdit { frame: 0, layer: 0, x: 3, y: 4, before, after: cell('x') }]);
         history.apply(&mut doc, edit);
         assert!(history.undo(&mut doc));
         assert_eq!(doc.cell(0, 3, 4), Some(&before));
@@ -225,6 +289,7 @@ mod tests {
         let mut doc = Document::new(10, 10);
         let mut history = History::new();
         let edit = Edit::Cells(vec![CellEdit {
+            frame: 0,
             layer: 0,
             x: 3,
             y: 4,
@@ -242,6 +307,7 @@ mod tests {
         let mut doc = Document::new(10, 10);
         let mut history = History::new();
         let edit1 = Edit::Cells(vec![CellEdit {
+            frame: 0,
             layer: 0,
             x: 0,
             y: 0,
@@ -253,6 +319,7 @@ mod tests {
         assert!(history.can_redo());
 
         let edit2 = Edit::Cells(vec![CellEdit {
+            frame: 0,
             layer: 0,
             x: 1,
             y: 0,
@@ -271,6 +338,7 @@ mod tests {
         assert!(!history.can_redo());
 
         let edit = Edit::Cells(vec![CellEdit {
+            frame: 0,
             layer: 0,
             x: 0,
             y: 0,
@@ -295,8 +363,8 @@ mod tests {
         let mut doc = Document::new(10, 10);
         let mut history = History::new();
         let edit = Edit::Cells(vec![
-            CellEdit { layer: 0, x: 0, y: 0, before: Cell::BLANK, after: cell('a') },
-            CellEdit { layer: 0, x: 1, y: 0, before: Cell::BLANK, after: cell('b') },
+            CellEdit { frame: 0, layer: 0, x: 0, y: 0, before: Cell::BLANK, after: cell('a') },
+            CellEdit { frame: 0, layer: 0, x: 1, y: 0, before: Cell::BLANK, after: cell('b') },
         ]);
         history.apply(&mut doc, edit);
         history.undo(&mut doc);
@@ -324,6 +392,7 @@ mod tests {
         let mut doc = Document::new(10, 10);
         let mut history = History::new();
         let edit1 = Edit::Cells(vec![CellEdit {
+            frame: 0,
             layer: 0,
             x: 0,
             y: 0,
@@ -337,6 +406,7 @@ mod tests {
         // Simulate "flush a pending edit right before redo": a second, unrelated apply() call
         // (standing in for flush_active_tool's own History::apply) fires here.
         let edit2 = Edit::Cells(vec![CellEdit {
+            frame: 0,
             layer: 0,
             x: 1,
             y: 0,
@@ -369,6 +439,7 @@ mod tests {
 
         let mut history = History::new();
         let stale_edit = Edit::Cells(vec![CellEdit {
+            frame: 0,
             layer: 0,
             x: 0,
             y: 0,
@@ -404,6 +475,7 @@ mod tests {
         let mut doc = Document::new(10, 10);
         let mut history = History::new();
         let edit = Edit::Cells(vec![CellEdit {
+            frame: 0,
             layer: 5, // doc only has 1 layer
             x: 0,
             y: 0,
@@ -430,6 +502,7 @@ mod tests {
         let mut history = History::new();
         assert_eq!(history.top_edit_id(), None);
         let edit = Edit::Cells(vec![CellEdit {
+            frame: 0,
             layer: 0,
             x: 0,
             y: 0,
@@ -445,6 +518,7 @@ mod tests {
         let mut doc = Document::new(10, 10);
         let mut history = History::new();
         let edit1 = Edit::Cells(vec![CellEdit {
+            frame: 0,
             layer: 0,
             x: 0,
             y: 0,
@@ -455,6 +529,7 @@ mod tests {
         let id_a = history.top_edit_id();
 
         let edit2 = Edit::Cells(vec![CellEdit {
+            frame: 0,
             layer: 0,
             x: 1,
             y: 0,
@@ -473,6 +548,7 @@ mod tests {
         let mut doc = Document::new(10, 10);
         let mut history = History::new();
         let edit = Edit::Cells(vec![CellEdit {
+            frame: 0,
             layer: 0,
             x: 0,
             y: 0,
@@ -492,6 +568,7 @@ mod tests {
         let mut doc = Document::new(10, 10);
         let mut history = History::new();
         let edit1 = Edit::Cells(vec![CellEdit {
+            frame: 0,
             layer: 0,
             x: 0,
             y: 0,
@@ -501,6 +578,7 @@ mod tests {
         history.apply(&mut doc, edit1);
 
         let edit2 = Edit::Cells(vec![CellEdit {
+            frame: 0,
             layer: 0,
             x: 1,
             y: 0,
@@ -512,6 +590,7 @@ mod tests {
 
         history.undo(&mut doc);
         let edit3 = Edit::Cells(vec![CellEdit {
+            frame: 0,
             layer: 0,
             x: 2,
             y: 0,
@@ -533,7 +612,10 @@ mod tests {
     fn resize_edit_apply_and_undo_swap_extent_and_layers_wholesale() {
         let mut doc = Document::new(5, 5);
         doc.set_cell(0, 0, 0, cell('a'));
-        let before = DocSnapshot { extent: doc.extent(), layers: doc.layers.clone() };
+        let before = DocSnapshot {
+            extent: doc.extent(),
+            frames: vec![Frame { layers: doc.layers().to_vec(), duration_override: None }],
+        };
 
         // Simulate a grow that preserves top-left content and pads the rest.
         let after_cells: Vec<Cell> = {
@@ -542,7 +624,10 @@ mod tests {
             cells
         };
         let after_layer = Layer::from_cells(after_cells, 8, 8);
-        let after = DocSnapshot { extent: DocExtent { width: 8, height: 8 }, layers: vec![after_layer] };
+        let after = DocSnapshot {
+            extent: DocExtent { width: 8, height: 8 },
+            frames: vec![Frame { layers: vec![after_layer], duration_override: None }],
+        };
 
         let mut history = History::new();
         history.apply(&mut doc, Edit::Resize { before: before.clone(), after: after.clone() });
@@ -559,5 +644,145 @@ mod tests {
         assert!(history.redo(&mut doc));
         assert_eq!(doc.width, 8);
         assert_eq!(doc.height, 8);
+    }
+
+    // --- frame ops: LIFO safety and undo correctness ---
+
+    /// Pins the mechanical property the positional-frame-addressing safety argument (module doc)
+    /// depends on: `History` is a single stack, and undo always reverses the *most recently
+    /// applied* edit first, regardless of its variant kind. A future change that breaks this
+    /// (selective undo, history compression, per-frame history) must fail this test, not silently
+    /// corrupt an unrelated `CellEdit`.
+    #[test]
+    fn history_is_a_single_strictly_lifo_stack_across_mixed_edit_kinds() {
+        let mut doc = Document::new(5, 5);
+        let mut history = History::new();
+
+        let cells_edit = Edit::Cells(vec![CellEdit { frame: 0, layer: 0, x: 0, y: 0, before: Cell::BLANK, after: cell('a') }]);
+        history.apply(&mut doc, cells_edit);
+        let id_cells = history.top_edit_id();
+
+        let duration_edit = Edit::SetFrameDuration { index: 0, before: None, after: Some(50) };
+        history.apply(&mut doc, duration_edit);
+        let id_duration = history.top_edit_id();
+
+        assert_ne!(id_cells, id_duration, "each applied edit gets its own id regardless of kind");
+        assert_eq!(doc.frame(0).unwrap().duration_override, Some(50));
+
+        assert!(history.undo(&mut doc));
+        assert_eq!(
+            doc.frame(0).unwrap().duration_override,
+            None,
+            "the first undo must reverse the more recently applied edit (SetFrameDuration), not Cells"
+        );
+        assert_eq!(doc.cell(0, 0, 0), Some(&cell('a')), "the Cells edit must still be applied");
+        assert_eq!(history.top_edit_id(), id_cells);
+
+        assert!(history.undo(&mut doc));
+        assert_eq!(doc.cell(0, 0, 0), Some(&Cell::BLANK), "the second undo reverses the Cells edit");
+        assert_eq!(history.top_edit_id(), None);
+    }
+
+    /// The worked correctness argument from the module doc, proven concretely: a `CellEdit` on
+    /// frame 1, followed by a `ReorderFrame` swapping 0<->1, then undoing both in sequence must
+    /// land the cell edit's content back at frame 1 — never frame 0 — because the reorder's own
+    /// undo runs first and restores addressing before the older edit's undo executes.
+    #[test]
+    fn undoing_a_reorder_before_an_older_cell_edit_targets_the_correct_frame() {
+        let mut doc = Document::new(3, 3);
+        let mut history = History::new();
+
+        // Add a second frame, landing after the active one (active_frame stays 0).
+        let add_edit = Edit::AddFrame { index: 1, frame: Frame::blank(3, 3), active_frame_before: 0, active_frame_after: 0 };
+        history.apply(&mut doc, add_edit);
+        assert_eq!(doc.frame_count(), 2);
+
+        // Draw a distinguishing glyph on frame 1.
+        let cell_edit = Edit::Cells(vec![CellEdit { frame: 1, layer: 0, x: 0, y: 0, before: Cell::BLANK, after: cell('Q') }]);
+        history.apply(&mut doc, cell_edit);
+        assert_eq!(doc.cell_at(1, 0, 0, 0), Some(&cell('Q')));
+
+        // Reorder: swap frames 0 and 1. The active frame (0) follows the swap to index 1.
+        let reorder_edit = Edit::ReorderFrame { from: 0, to: 1, active_frame_before: 0, active_frame_after: 1 };
+        history.apply(&mut doc, reorder_edit);
+        assert_eq!(doc.cell_at(0, 0, 0, 0), Some(&cell('Q')), "the reorder moved frame 1's content to index 0");
+
+        // Undo the reorder first: frame 1's content (with 'Q') must land back at index 1.
+        assert!(history.undo(&mut doc));
+        assert_eq!(
+            doc.cell_at(1, 0, 0, 0),
+            Some(&cell('Q')),
+            "the reorder's own undo must restore addressing before the older CellEdit's undo runs"
+        );
+
+        // Undo the CellEdit: it targets frame 1 positionally, which is now correctly restored.
+        assert!(history.undo(&mut doc));
+        assert_eq!(
+            doc.cell_at(1, 0, 0, 0),
+            Some(&Cell::BLANK),
+            "the CellEdit must undo against frame 1, not frame 0, after both undos complete"
+        );
+    }
+
+    #[test]
+    fn add_frame_undo_restores_active_frame_to_its_pre_insert_value() {
+        let mut doc = Document::new(3, 3);
+        let mut history = History::new();
+        let add_edit = Edit::AddFrame { index: 0, frame: Frame::blank(3, 3), active_frame_before: 0, active_frame_after: 1 };
+        history.apply(&mut doc, add_edit);
+        assert_eq!(doc.frame_count(), 2);
+        assert_eq!(doc.active_frame(), 1);
+
+        assert!(history.undo(&mut doc));
+        assert_eq!(doc.frame_count(), 1);
+        assert_eq!(doc.active_frame(), 0, "undo must restore active_frame to its pre-insert value");
+    }
+
+    #[test]
+    fn remove_frame_undo_reinserts_the_exact_removed_frame_content() {
+        let mut doc = Document::new(3, 3);
+        let mut history = History::new();
+
+        let mut cells = vec![Cell::BLANK; 9];
+        cells[0] = cell('Z');
+        let frame1 = Frame { layers: vec![Layer::from_cells(cells, 3, 3)], duration_override: None };
+
+        let add_edit = Edit::AddFrame { index: 1, frame: frame1.clone(), active_frame_before: 0, active_frame_after: 0 };
+        history.apply(&mut doc, add_edit);
+        assert_eq!(doc.cell_at(1, 0, 0, 0), Some(&cell('Z')));
+
+        let remove_edit = Edit::RemoveFrame { index: 1, frame: frame1, active_frame_before: 0, active_frame_after: 0 };
+        history.apply(&mut doc, remove_edit);
+        assert_eq!(doc.frame_count(), 1);
+
+        assert!(history.undo(&mut doc));
+        assert_eq!(doc.frame_count(), 2);
+        assert_eq!(
+            doc.cell_at(1, 0, 0, 0),
+            Some(&cell('Z')),
+            "undo must reinsert the exact removed frame's content"
+        );
+    }
+
+    #[test]
+    fn set_frame_duration_undo_restores_the_prior_override_including_none() {
+        let mut doc = Document::new(3, 3);
+        let mut history = History::new();
+
+        history.apply(&mut doc, Edit::SetFrameDuration { index: 0, before: None, after: Some(200) });
+        assert_eq!(doc.frame(0).unwrap().duration_override, Some(200));
+
+        history.apply(&mut doc, Edit::SetFrameDuration { index: 0, before: Some(200), after: Some(400) });
+        assert_eq!(doc.frame(0).unwrap().duration_override, Some(400));
+
+        assert!(history.undo(&mut doc));
+        assert_eq!(doc.frame(0).unwrap().duration_override, Some(200));
+
+        assert!(history.undo(&mut doc));
+        assert_eq!(
+            doc.frame(0).unwrap().duration_override,
+            None,
+            "undo must restore the prior override exactly, including a None baseline"
+        );
     }
 }

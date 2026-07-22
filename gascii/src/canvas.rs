@@ -1,12 +1,19 @@
 use eframe::egui::{self, Align2, Color32, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2};
 use gascii_core::{
-    CellRect, Direction, DocExtent, Document, Edit, PendingCell, Rgba, SelectionView, Tool,
-    ToolCtx, ToolEvent, ToolResponse,
+    CellRect, DensityMode, Direction, DocExtent, Document, Edit, Fixed, PendingCell, Rgba,
+    SelectionView, Tool, ToolCtx, ToolEvent, ToolResponse,
 };
+use gascii_plugin_api::{cell_rect_to_screen, CanvasRenderer, CellGrid};
 
-use crate::app::{Binding, GasciiApp, ToolKind};
+use crate::app::{tool_def, Binding, GasciiApp, ToolKind};
 use crate::fonts::canvas_font_id;
 use crate::viewport::Viewport;
+
+/// The `ToolCtx.density` a tool that never reads it gets — a pure "doesn't care" placeholder,
+/// matching the literal `GasciiApp::with_state` used to initialize its own (now-deleted)
+/// `density_mode` field before this migration, so this stays a pure refactor rather than a
+/// behavior change.
+const DEFAULT_DENSITY: DensityMode = DensityMode::Fixed(Fixed(1.0));
 
 fn color32(c: Rgba) -> Color32 {
     Color32::from_rgba_unmultiplied(c.0, c.1, c.2, c.3)
@@ -25,32 +32,6 @@ pub const DESK_MARGIN: f32 = 28.0;
 /// The marquee's dash pattern, in points.
 const MARQUEE_DASH: (f32, f32) = (4.0, 3.0);
 
-/// Converts an inclusive cell-space rect to the screen-space rect covering all of its cells.
-fn cell_rect_to_screen(r: CellRect, vp: &Viewport, cell: Vec2, origin: Pos2) -> Rect {
-    let min = vp.cell_to_screen(r.x0, r.y0, cell, origin);
-    let max = vp.cell_to_screen(r.x1 + 1, r.y1 + 1, cell, origin);
-    Rect::from_min_max(min, max)
-}
-
-pub trait CanvasRenderer {
-    /// `hover` is the cells the active tool's next application would land on — the hovered cell,
-    /// expanded to the tool's footprint for sized tools; empty when no marker should show.
-    #[allow(clippy::too_many_arguments)]
-    fn paint(
-        &mut self,
-        painter: &Painter,
-        doc: &Document,
-        vp: &Viewport,
-        origin: Pos2,
-        cell: Vec2,
-        visible: (u16, u16, u16, u16),
-        pending: &[PendingCell],
-        hover: &[(u16, u16)],
-        caret: Option<(u16, u16, bool)>,
-        selection: Option<SelectionView>,
-    );
-}
-
 /// Default renderer: per-cell `Painter::text`/`rect_filled`, no caching.
 pub struct NaiveRenderer;
 
@@ -59,7 +40,7 @@ impl CanvasRenderer for NaiveRenderer {
         &mut self,
         painter: &Painter,
         doc: &Document,
-        vp: &Viewport,
+        vp: &dyn CellGrid,
         origin: Pos2,
         cell: Vec2,
         visible: (u16, u16, u16, u16),
@@ -78,6 +59,8 @@ impl CanvasRenderer for NaiveRenderer {
         let font_id = canvas_font_id(vp.font_px());
         for y in y0..y1 {
             for x in x0..x1 {
+                // Literal, not `app.active_layer`: this renderer has no `GasciiApp` handle, only
+                // `doc`. v1 documents have exactly one layer, so this is behavior-identical.
                 let Some(c) = doc.cell(0, x, y) else {
                     continue;
                 };
@@ -257,20 +240,24 @@ pub(crate) fn tool_ctx(app: &GasciiApp, b: Binding) -> gascii_core::ToolCtx {
     } else {
         stamp.size
     };
-    // Only the density brush reads `density`/`ramp`; for every other tool the ramp clone would
-    // be a per-drag-frame allocation on the stroke hot path for data it ignores.
-    let ramp = if app.slot(b).kind == ToolKind::Brush {
-        app.ramps[app.active_ramp].chars.clone()
+    // Only a tool whose row asks for it (Brush's, via `wants_extra_ctx`) reads `density`/`ramp`;
+    // for every other tool the ramp clone would be a per-drag-frame allocation on the stroke hot
+    // path for data it ignores.
+    let kind = app.slot(b).kind;
+    let (density, ramp) = if tool_def(kind).wants_extra_ctx {
+        let i = tool_def(kind).plugin_slot.expect("wants_extra_ctx implies a plugin_slot");
+        app.plugins[i].extra_tool_ctx(tool_def(kind).name).unwrap_or((DEFAULT_DENSITY, Vec::new()))
     } else {
-        Vec::new()
+        (DEFAULT_DENSITY, Vec::new())
     };
     gascii_core::ToolCtx {
-        layer: 0,
+        frame: app.active_frame,
+        layer: app.active_layer,
         glyph: app.active_glyph,
         fg: app.active_fg,
         bg: app.active_bg,
         mask: app.mask,
-        density: app.density_mode,
+        density,
         ramp,
         size,
         shape: stamp.shape,
@@ -288,7 +275,7 @@ pub(crate) fn begin_gesture(app: &mut GasciiApp, b: Binding, x: u16, y: u16) -> 
 
     if app.slot(b).kind == ToolKind::Eyedropper {
         // A one-shot pick, not a gesture: there is no ownership to track and no `Edit` to apply.
-        if let Some(picked) = app.doc.cell(0, x, y).copied() {
+        if let Some(picked) = app.doc.cell(app.active_layer, x, y).copied() {
             let (fg, bg) = gascii_core::eyedrop(&picked);
             app.active_fg = fg;
             app.active_bg = bg;
@@ -631,12 +618,13 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
         });
         if let Some(force) = latest_force {
             app.stylus_detected = true;
-            if app.brush_pressure {
-                if let Some(b) = app.stroke_owner {
-                    if app.slot(b).kind == ToolKind::Brush {
-                        let quantized = 1 + (force.clamp(0.0, 1.0) * 3.0).round() as u16; // 1..=4
-                        app.pressure_stamp_size = Some(quantized);
-                    }
+            if let Some(b) = app.stroke_owner {
+                let td = tool_def(app.slot(b).kind);
+                let overridden = td.pressure_sizeable
+                    && td.plugin_slot.is_some_and(|i| app.plugins[i].pressure_override_enabled(td.name));
+                if overridden {
+                    let quantized = 1 + (force.clamp(0.0, 1.0) * 3.0).round() as u16; // 1..=4
+                    app.pressure_stamp_size = Some(quantized);
                 }
             }
         }
@@ -783,7 +771,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
     app.renderer.paint(
         &painter,
         &app.doc,
-        &app.viewport,
+        &app.viewport as &dyn CellGrid,
         origin,
         cell,
         visible,
@@ -931,7 +919,7 @@ mod tests {
         for (force, expected) in cases {
             let mut app = GasciiApp::headless();
             app.bind(Binding::L, ToolKind::Brush);
-            app.brush_pressure = true;
+            app.brush_plugin_mut().set_pressure_enabled(true);
             begin_gesture(&mut app, Binding::L, 2, 2);
 
             let ctx = headless_ctx();
@@ -962,6 +950,122 @@ mod tests {
         }
     }
 
+    /// A tool whose row is not `pressure_sizeable` (Pencil — no plugin owns it at all, let alone
+    /// one that opts into a pressure override) must never get a pressure-driven size override, even
+    /// while stylus force events fire mid-stroke — the gate must be a real capability check, not
+    /// "any tool happens to be Brush by coincidence".
+    #[test]
+    fn a_non_pressure_sizeable_tool_never_gets_a_pressure_driven_size_override() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Pencil);
+        begin_gesture(&mut app, Binding::L, 2, 2);
+
+        let ctx = headless_ctx();
+        let pos = Pos2::new(50.0, 50.0);
+        let mut raw = raw_input_with_screen(900.0, 700.0, false);
+        raw.events.push(egui::Event::PointerMoved(pos));
+        raw.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        raw.events.push(egui::Event::Touch {
+            device_id: egui::TouchDeviceId(0),
+            id: egui::TouchId(0),
+            phase: egui::TouchPhase::Move,
+            pos,
+            force: Some(1.0),
+        });
+        let _ = ctx.run_ui(raw, |ui| show(ui, &mut app, false));
+
+        assert!(app.stylus_detected, "force events still mark stylus_detected regardless of tool");
+        assert_eq!(app.pressure_stamp_size, None, "Pencil is not pressure_sizeable: no override may apply");
+    }
+
+    /// `REVIEW_plugin-api_2026-07-20.md` Suggestion 2, the one untested combination the review
+    /// hand-traced but didn't lock with a test: a tool whose row IS `pressure_sizeable` (Brush)
+    /// but whose live "Pressure" opt-in is still off (`BrushPlugin`'s own default,
+    /// `brush_pressure: false` — never toggled on here) must get no size override, even while
+    /// stylus force events fire mid-stroke. Distinct from
+    /// `a_non_pressure_sizeable_tool_never_gets_a_pressure_driven_size_override`: that test covers
+    /// the wrong-capability case (Pencil); this one covers the right-capability, opt-in-still-off
+    /// case, which is the other half of `canvas.rs`'s two-part gate
+    /// (`td.pressure_sizeable && td.plugin_slot.is_some_and(|i| app.plugins[i].
+    /// pressure_override_enabled(td.name))`).
+    #[test]
+    fn a_pressure_sizeable_tool_with_the_pressure_toggle_off_gets_no_size_override() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Brush);
+        assert!(!app.brush_plugin_mut().pressure_enabled(), "sanity: the Pressure opt-in starts off");
+        begin_gesture(&mut app, Binding::L, 2, 2);
+
+        let ctx = headless_ctx();
+        let pos = Pos2::new(50.0, 50.0);
+        let mut raw = raw_input_with_screen(900.0, 700.0, false);
+        raw.events.push(egui::Event::PointerMoved(pos));
+        raw.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        raw.events.push(egui::Event::Touch {
+            device_id: egui::TouchDeviceId(0),
+            id: egui::TouchId(0),
+            phase: egui::TouchPhase::Move,
+            pos,
+            force: Some(1.0),
+        });
+        let _ = ctx.run_ui(raw, |ui| show(ui, &mut app, false));
+
+        assert!(app.stylus_detected, "force events still mark stylus_detected regardless of the opt-in");
+        assert_eq!(
+            app.pressure_stamp_size, None,
+            "Brush IS pressure_sizeable, but the live Pressure toggle is off: no override may apply"
+        );
+    }
+
+    /// `build_renderer`'s fold over the real, per-app plugin list must be a true no-op for this
+    /// phase: `BrushPlugin` never overrides `wrap_renderer` (it uses the trait's default identity),
+    /// so painting through `app.renderer` (built from `app.plugins` in `with_state`/`headless`)
+    /// must produce the exact same shapes as painting through a bare, freshly constructed
+    /// `NaiveRenderer` on the same document. Proven on a seeded, non-trivial cell rather than an
+    /// empty document, so the comparison actually exercises glyph/background painting, not just an
+    /// empty-canvas coincidence.
+    #[test]
+    fn the_real_plugin_composed_renderer_paints_the_same_shapes_as_a_bare_naive_renderer() {
+        let mut app = GasciiApp::headless();
+        let seeded_bg = Rgba(10, 20, 30, 255);
+        // Well inside the fit-computed visible range for a 300x300 screen against the default
+        // 80x25 document (not (0,0)/(1,1) — the fit centers the doc and clips a couple of columns
+        // off the left edge, which a smaller/edge-adjacent coordinate would silently fall outside).
+        app.doc.set_cell(0, 10, 10, gascii_core::Cell { ch: 'X', fg: Rgba::WHITE, bg: seeded_bg });
+
+        let ctx = headless_ctx();
+        let via_plugins = ctx.run_ui(raw_input_with_screen(300.0, 300.0, false), |ui| show(ui, &mut app, false));
+        let seeded_color = color32(seeded_bg);
+        let via_plugins_bg_count = via_plugins
+            .shapes
+            .iter()
+            .filter(|cs| matches!(&cs.shape, Shape::Rect(r) if r.fill == seeded_color))
+            .count();
+        assert_eq!(via_plugins_bg_count, 1, "sanity: the real per-app renderer painted the seeded cell's background exactly once");
+
+        app.renderer = Box::new(NaiveRenderer);
+        let bare = ctx.run_ui(raw_input_with_screen(300.0, 300.0, false), |ui| show(ui, &mut app, false));
+        let bare_bg_count =
+            bare.shapes.iter().filter(|cs| matches!(&cs.shape, Shape::Rect(r) if r.fill == seeded_color)).count();
+
+        assert_eq!(
+            via_plugins.shapes.len(),
+            bare.shapes.len(),
+            "the plugin-composed renderer must paint the exact same shape count as a bare NaiveRenderer \
+             — BrushPlugin contributes no wrap_renderer override this phase"
+        );
+        assert_eq!(via_plugins_bg_count, bare_bg_count, "both must paint the seeded cell's background the same number of times");
+    }
+
     /// The focus-loss cancel path (`canvas.rs`'s own focus-edge block) must clear the pressure
     /// override alongside the stroke it belongs to — otherwise a stale override could leak into
     /// whatever stroke happens next after focus returns.
@@ -969,7 +1073,7 @@ mod tests {
     fn a_focus_loss_mid_pressure_modulated_stroke_clears_both_the_stroke_and_its_pressure_override() {
         let mut app = GasciiApp::headless();
         app.bind(Binding::L, ToolKind::Brush);
-        app.brush_pressure = true;
+        app.brush_plugin_mut().set_pressure_enabled(true);
         begin_gesture(&mut app, Binding::L, 0, 0);
         app.pressure_stamp_size = Some(2); // as if a light-pressure dab already landed
         app.was_focused = true;

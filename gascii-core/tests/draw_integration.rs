@@ -12,7 +12,7 @@ use gascii_core::{
 };
 
 fn ctx(mask: PlaneMask, glyph: char, fg: Rgba, bg: Rgba) -> ToolCtx {
-    ToolCtx { layer: 0, glyph, fg, bg, mask, density: DensityMode::Fixed(Fixed(1.0)), ramp: Vec::new(), size: 1, shape: BrushShape::Square }
+    ToolCtx { frame: 0, layer: 0, glyph, fg, bg, mask, density: DensityMode::Fixed(Fixed(1.0)), ramp: Vec::new(), size: 1, shape: BrushShape::Square }
 }
 
 /// Drives a full press -> drag(...) -> release gesture through `tool`, committing the result (if
@@ -396,7 +396,7 @@ fn stroke_spans_full_extent_of_a_tiny_document_corner_to_corner() {
     }
     assert!(history.can_undo());
     assert!(history.undo(&mut doc));
-    assert!(doc.layers[0].cells().iter().all(Cell::is_blank), "undo must restore a fully blank tiny document");
+    assert!(doc.layers()[0].cells().iter().all(Cell::is_blank), "undo must restore a fully blank tiny document");
 }
 
 #[test]
@@ -436,7 +436,7 @@ fn redo_mid_text_burst_touching_an_already_pinned_cell_keeps_before_accurate_thr
     let redo_after = Cell { ch: 'Z', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) };
     history.apply(
         &mut doc,
-        Edit::Cells(vec![CellEdit { layer: 0, x: 5, y: 5, before: Cell::BLANK, after: redo_after }]),
+        Edit::Cells(vec![CellEdit { frame: 0, layer: 0, x: 5, y: 5, before: Cell::BLANK, after: redo_after }]),
     );
     assert!(history.undo(&mut doc));
     assert_eq!(doc.cell(0, 5, 5), Some(&Cell::BLANK));
@@ -453,7 +453,7 @@ fn redo_mid_text_burst_touching_an_already_pinned_cell_keeps_before_accurate_thr
     // burst, bypassing it entirely. `resync` must re-pin the burst's stale before value.
     assert!(history.redo(&mut doc));
     assert_eq!(doc.cell(0, 5, 5), Some(&redo_after));
-    text.resync(&doc, 0);
+    text.resync(&doc, 0, 0);
 
     let ToolResponse::Commit(Some(edit)) = text.update(ToolEvent::Commit, &tctx, &doc) else {
         panic!("expected a committed edit");
