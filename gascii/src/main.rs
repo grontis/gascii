@@ -1,6 +1,7 @@
 mod anim_export;
 mod app;
 mod canvas;
+mod chords;
 mod font_coverage;
 mod fonts;
 mod image_bg;

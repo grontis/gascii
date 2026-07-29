@@ -1,6 +1,6 @@
 use egui::{Ui, Vec2};
 use gascii_core::{Buildup, DensityBrush, DensityMode, Fixed, Ramp};
-use gascii_plugin_api::{OptionsGeom, Plugin, PluginHost, PluginToolCapabilities};
+use gascii_plugin_api::{OptionsGeom, PanelOutcome, Plugin, PluginHost, PluginToolCapabilities};
 
 use crate::theme;
 use crate::widgets::{self, size};
@@ -173,9 +173,9 @@ impl Plugin for BrushPlugin {
     /// playback clock needs `tick` even while a field has focus, so the gate moved here) — pressing
     /// a digit implicitly switches into Fixed mode at that level even if Buildup was active, since
     /// reaching for a number key expresses "I want this exact intensity now."
-    fn tick(&mut self, ui: &mut Ui, focused: bool, host: &dyn PluginHost) {
+    fn tick(&mut self, ui: &mut Ui, focused: bool, host: &dyn PluginHost) -> PanelOutcome {
         if focused || !host.is_bound(BRUSH) {
-            return;
+            return PanelOutcome::default();
         }
         const DIGIT_KEYS: [(egui::Key, f32); 10] = [
             (egui::Key::Num1, 0.1),
@@ -195,6 +195,8 @@ impl Plugin for BrushPlugin {
         if let Some(level) = level {
             self.density_mode = DensityMode::Fixed(Fixed(level));
         }
+        // Never needs to apply an Edit or move the editing cursor — a true no-op outcome.
+        PanelOutcome::default()
     }
 
     fn extra_tool_ctx(&self, tool_name: &str) -> Option<(DensityMode, Vec<char>)> {
@@ -305,7 +307,7 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         });
-        let _ = ctx.run_ui(raw, |ui| p.tick(ui, false, &FakeHost::new(false, false)));
+        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, &FakeHost::new(false, false)); });
         assert!(matches!(p.density_mode(), DensityMode::Buildup(_)), "unbound tick must not react");
 
         let mut raw = egui::RawInput::default();
@@ -316,7 +318,7 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         });
-        let _ = ctx.run_ui(raw, |ui| p.tick(ui, false, &FakeHost::new(false, true)));
+        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, &FakeHost::new(false, true)); });
         match p.density_mode() {
             DensityMode::Fixed(Fixed(level)) => assert!((level - 0.5).abs() < 1e-4),
             other => panic!("expected Fixed(0.5), got {other:?}"),
@@ -340,7 +342,7 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         });
-        let _ = ctx.run_ui(raw, |ui| p.tick(ui, true, &FakeHost::new(false, true)));
+        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, true, &FakeHost::new(false, true)); });
         assert!(matches!(p.density_mode(), DensityMode::Buildup(_)), "a focused tick must not react even while bound");
     }
 

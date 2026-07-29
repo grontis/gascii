@@ -256,6 +256,20 @@ impl Tool for SelectionTool {
                 self.pending.clear();
                 ToolResponse::Idle
             }
+            ToolEvent::SelectAll => {
+                // A live float is uncommitted work with its own drop semantics — SelectAll must
+                // never silently discard it, so it only defines/replaces a marquee-only selection.
+                if self.float.is_none() {
+                    self.mode = DragMode::Idle;
+                    self.selection = Some(CellRect::from_corners(
+                        (0, 0),
+                        (doc.width.saturating_sub(1), doc.height.saturating_sub(1)),
+                    ));
+                }
+                // No `Edit` — mirrors a completed marquee-drag's own `Release`, which stays a plain
+                // `Active`/no-op until content is actually moved or deleted.
+                ToolResponse::Idle
+            }
             _ => ToolResponse::Active,
         }
     }
@@ -718,5 +732,57 @@ mod tests {
             matches!(sel.mode, DragMode::Idle),
             "mode must not be left pointing at a float that Delete just consumed"
         );
+    }
+
+    #[test]
+    fn select_all_defines_a_marquee_spanning_the_full_document_extent_and_commits_no_edit() {
+        let doc = filled_doc(7, 4);
+        let before = doc.clone();
+        let tctx = ctx();
+        let mut sel = SelectionTool::new();
+
+        let resp = sel.update(ToolEvent::SelectAll, &tctx, &doc);
+        assert!(matches!(resp, ToolResponse::Idle), "SelectAll must never produce an Edit by itself");
+        assert_eq!(
+            sel.selection_overlay().and_then(|v| v.marquee),
+            Some(CellRect { x0: 0, y0: 0, x1: 6, y1: 3 }),
+            "the marquee must span the document's full extent"
+        );
+        assert_eq!(doc, before, "SelectAll alone must never mutate the document");
+    }
+
+    #[test]
+    fn select_all_replaces_a_pre_existing_plain_selection() {
+        let doc = filled_doc(10, 10);
+        let tctx = ctx();
+        let mut sel = SelectionTool::new();
+        sel.update(ToolEvent::Press { x: 1, y: 1 }, &tctx, &doc);
+        sel.update(ToolEvent::Drag { x: 2, y: 2 }, &tctx, &doc);
+        sel.update(ToolEvent::Release, &tctx, &doc);
+
+        sel.update(ToolEvent::SelectAll, &tctx, &doc);
+        assert_eq!(
+            sel.selection_overlay().and_then(|v| v.marquee),
+            Some(CellRect { x0: 0, y0: 0, x1: 9, y1: 9 }),
+            "SelectAll must replace whatever plain selection was already defined"
+        );
+    }
+
+    /// SelectAll must never silently discard an in-progress float — the same "never silently
+    /// discard pending work" stance every other trigger in this tool follows.
+    #[test]
+    fn select_all_does_not_disturb_a_live_float() {
+        let doc = filled_doc(10, 10);
+        let tctx = ctx();
+        let mut sel = SelectionTool::new();
+        sel.update(ToolEvent::Press { x: 1, y: 1 }, &tctx, &doc);
+        sel.update(ToolEvent::Drag { x: 2, y: 2 }, &tctx, &doc);
+        sel.update(ToolEvent::Release, &tctx, &doc);
+        sel.update(ToolEvent::Press { x: 1, y: 1 }, &tctx, &doc); // lift: a float now exists
+        assert!(!sel.pending().is_empty(), "sanity: a float is active");
+
+        let resp = sel.update(ToolEvent::SelectAll, &tctx, &doc);
+        assert!(matches!(resp, ToolResponse::Idle));
+        assert!(!sel.pending().is_empty(), "the live float must survive SelectAll untouched");
     }
 }

@@ -187,6 +187,57 @@ pub fn cursor_blink_on(ui: &egui::Ui) -> bool {
 struct StrokeTail {
     ended: bool,
     edit: Option<Edit>,
+    /// The (possibly Shift-constrained) cell this call's `Drag` landed on, if any moved this frame
+    /// — the caller's source of truth for a committed `Line`'s terminal point
+    /// (`ToolSlot::last_line_point`), so the shift-click-continue feature always continues from
+    /// exactly where the stroke actually ended, not a separately re-derived value.
+    last_drag_cell: Option<(u16, u16)>,
+}
+
+/// Snaps `cur` toward a Shift-constrained target relative to `anchor`, for the two tool kinds that
+/// support it — `Line` (nearest of the 8 compass rays, 0/45/90/.../315°) and `Rectangle` (a square,
+/// whose side is whichever axis the pointer moved further along — the dominant axis "wins" and the
+/// other one is stretched to match, preserving direction on both). Returns `cur` unchanged for
+/// every other kind, whenever `shift` is false, or when `cur == anchor` (no direction to snap to)
+/// — the unconstrained path is a byte-for-byte passthrough of whatever `drive_stroke_tail` already
+/// computed, by construction, satisfying the "existing Line/Rectangle drag behavior is unchanged
+/// when Shift is not held" requirement without a separate code path.
+///
+/// Integer-only (no floating point): the 45°-ray boundaries at 22.5°/67.5° are approximated via
+/// `adx * 1000` vs. `ady * TAN_67_5_X1000` cross-multiplication rather than `atan2`, so the result
+/// is exactly reproducible and trivially unit-testable against round-number vectors.
+pub(crate) fn shift_constrain(kind: ToolKind, anchor: (u16, u16), cur: (u16, u16), shift: bool) -> (u16, u16) {
+    if !shift || !matches!(kind, ToolKind::Line | ToolKind::Rectangle) {
+        return cur;
+    }
+    let dx = cur.0 as i32 - anchor.0 as i32;
+    let dy = cur.1 as i32 - anchor.1 as i32;
+    let (adx, ady) = (dx.abs(), dy.abs());
+    if adx == 0 && ady == 0 {
+        return cur;
+    }
+    const TAN_67_5_X1000: i32 = 2414; // tan(67.5°) * 1000, the 22.5°/67.5° ray-boundary ratio
+    let (ndx, ndy) = match kind {
+        ToolKind::Rectangle => {
+            let side = adx.max(ady);
+            (side * dx.signum(), side * dy.signum())
+        }
+        ToolKind::Line => {
+            if adx * 1000 > ady * TAN_67_5_X1000 {
+                (dx, 0) // within 22.5° of horizontal
+            } else if ady * 1000 > adx * TAN_67_5_X1000 {
+                (0, dy) // within 22.5° of vertical
+            } else {
+                let diag = adx.max(ady); // the 45° diagonal ray
+                (diag * dx.signum(), diag * dy.signum())
+            }
+        }
+        _ => unreachable!("gated by the matches! check above"),
+    };
+    (
+        (anchor.0 as i32 + ndx).clamp(0, u16::MAX as i32) as u16,
+        (anchor.1 as i32 + ndy).clamp(0, u16::MAX as i32) as u16,
+    )
 }
 
 /// The drag/release tail of a pointer-stroke lifecycle, shared by the primary and right-click
@@ -210,10 +261,22 @@ fn drive_stroke_tail(
     down: bool,
     just_started: bool,
     ends: bool,
+    kind: ToolKind,
+    anchor: Option<(u16, u16)>,
 ) -> StrokeTail {
+    let mut last_drag_cell = None;
     if down && !just_started {
         if let Some(pos) = response.interact_pointer_pos() {
             let (x, y) = viewport.screen_to_cell_clamped(pos, cell, origin, doc_extent);
+            // Shift held live, read off `response`'s own `Context` — `drive_stroke_tail` takes no
+            // `ui`/ambient input handle otherwise, and `egui::Response::ctx` is exactly this app's
+            // one live `Context`, so this needs no extra parameter.
+            let shift = response.ctx.input(|i| i.modifiers.shift);
+            let (x, y) = match anchor {
+                Some(a) => shift_constrain(kind, a, (x, y), shift),
+                None => (x, y),
+            };
+            last_drag_cell = Some((x, y));
             tool.update(ToolEvent::Drag { x, y }, tctx, doc);
         }
     }
@@ -223,7 +286,7 @@ fn drive_stroke_tail(
             edit = Some(e);
         }
     }
-    StrokeTail { ended: ends, edit }
+    StrokeTail { ended: ends, edit, last_drag_cell }
 }
 
 /// The `ToolCtx` for one binding. Everything but the footprint is app-global shared state; the
@@ -269,11 +332,22 @@ pub(crate) fn tool_ctx(app: &GasciiApp, b: Binding) -> gascii_core::ToolCtx {
 ///
 /// Nothing here is button-specific — that is the whole point of two symmetric slots. The Eyedropper
 /// is the single remaining special case, because it is the one kind that isn't a `Tool`.
-pub(crate) fn begin_gesture(app: &mut GasciiApp, b: Binding, x: u16, y: u16) -> bool {
+///
+/// `alt_sample`: the Alt-hold temporary eyedropper — Alt held at press time samples color exactly
+/// like a real Eyedropper press, without ever touching `self.slots[b.ix()].kind`. Ephemeral and
+/// press-time-only: no transient field, no restore bookkeeping, nothing for any other path to know
+/// about.
+///
+/// `shift_held`: Shift-click-continue on a Line — a Shift-held press on a `Line` binding with a
+/// remembered `last_line_point` replays as a `Press` at that remembered point immediately followed
+/// by a `Drag` to the actual click, instead of starting a fresh line at the click. The pointer's
+/// subsequent mouse-up still fires an ordinary `Release` through the unchanged `stroke_owner`
+/// machinery below.
+pub(crate) fn begin_gesture(app: &mut GasciiApp, b: Binding, x: u16, y: u16, alt_sample: bool, shift_held: bool) -> bool {
     // Drawing with a button focuses that binding for the [/] size keys.
     app.options_focus = b;
 
-    if app.slot(b).kind == ToolKind::Eyedropper {
+    if app.slot(b).kind == ToolKind::Eyedropper || alt_sample {
         // A one-shot pick, not a gesture: there is no ownership to track and no `Edit` to apply.
         if let Some(picked) = app.doc.cell(app.active_layer, x, y).copied() {
             let (fg, bg) = gascii_core::eyedrop(&picked);
@@ -293,8 +367,17 @@ pub(crate) fn begin_gesture(app: &mut GasciiApp, b: Binding, x: u16, y: u16) -> 
         app.acquire_keyboard(b);
     }
 
+    let continue_from = (app.slot(b).kind == ToolKind::Line && shift_held)
+        .then(|| app.slots[b.ix()].last_line_point)
+        .flatten();
+
     let tctx = tool_ctx(app, b);
-    let resp = app.slots[b.ix()].tool.update(ToolEvent::Press { x, y }, &tctx, &app.doc);
+    let resp = if let Some(lp) = continue_from {
+        app.slots[b.ix()].tool.update(ToolEvent::Press { x: lp.0, y: lp.1 }, &tctx, &app.doc);
+        app.slots[b.ix()].tool.update(ToolEvent::Drag { x, y }, &tctx, &app.doc)
+    } else {
+        app.slots[b.ix()].tool.update(ToolEvent::Press { x, y }, &tctx, &app.doc)
+    };
     // Always apply the press response. This is what makes the bindings symmetric: a stroke tool's
     // `Press` returns `Active` and never matches, while Selection's press CAN commit (clicking away
     // from a float drops it) and discarding that would silently lose the drop.
@@ -302,6 +385,10 @@ pub(crate) fn begin_gesture(app: &mut GasciiApp, b: Binding, x: u16, y: u16) -> 
         app.apply_edit(edit, Some(b));
     }
     app.stroke_owner = Some(b);
+    // The anchor `shift_constrain` measures a Shift-held drag against — the remembered
+    // continuation point when replaying one, otherwise the actual press cell, matching every other
+    // gesture.
+    app.stroke_press_cell = Some(continue_from.unwrap_or((x, y)));
     // A fresh stroke starts with no pressure override — this stroke hasn't reported any `force`
     // yet, so it must draw at the slot's configured size until it does, not a leftover value from
     // whatever stroke (or binding) last set one.
@@ -407,6 +494,12 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
             app.viewport.pan += response.drag_delta();
         }
         let space = ui.input(|i| i.key_down(egui::Key::Space));
+        // Alt held at press time: a temporary eyedropper, regardless of the bound kind — see
+        // `begin_gesture`'s own doc comment.
+        let alt_sample = ui.input(|i| i.modifiers.alt);
+        // Shift held at press time: shift-click-continue on a Line binding — see `begin_gesture`'s
+        // own doc comment.
+        let shift_held = ui.input(|i| i.modifiers.shift);
 
         cell = app.viewport.cell_size(&ctx);
         app.hovered_cell = response
@@ -458,7 +551,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
                 if let Some(b) = pressed.filter(|_| response.contains_pointer()) {
                     if let Some(pos) = response.interact_pointer_pos() {
                         if let Some((x, y)) = app.viewport.screen_to_cell(pos, cell, origin, doc_extent) {
-                            gesture_just_started = begin_gesture(app, b, x, y);
+                            gesture_just_started = begin_gesture(app, b, x, y, alt_sample, shift_held);
                         }
                     }
                 }
@@ -478,6 +571,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
                 Binding::R => (secondary_down, secondary_released || !secondary_down),
             };
             let tctx = tool_ctx(app, b);
+            let kind = app.slots[b.ix()].kind;
             let tail = drive_stroke_tail(
                 app.slots[b.ix()].tool.as_mut(),
                 &app.doc,
@@ -490,18 +584,30 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
                 down,
                 gesture_just_started,
                 ends,
+                kind,
+                app.stroke_press_cell,
             );
             if let Some(edit) = tail.edit {
                 // `apply_edit` performs its own `resync_slots(Some(b))` — the other slot's pending
                 // session may now hold `before` values pinned against the pre-commit document.
                 app.apply_edit(edit, Some(b));
                 // A committed stroke that stamped the active glyph counts as "using" it.
-                let kind = app.slots[b.ix()].kind;
                 app.note_glyph_drawn(kind);
+                // A committed Line stroke's terminal cell becomes the next Shift-click's
+                // continuation point (`begin_gesture`'s own shift-click-continue branch). Falls
+                // back to the press cell for a plain click-with-no-drag commit (a zero-length
+                // line), whose terminal point IS the press cell — `drive_stroke_tail` never emits a
+                // `Drag` for that case.
+                if kind == ToolKind::Line {
+                    if let Some(p) = tail.last_drag_cell.or(app.stroke_press_cell) {
+                        app.slots[b.ix()].last_line_point = Some(p);
+                    }
+                }
             }
             if tail.ended {
                 app.stroke_owner = None;
                 app.pressure_stamp_size = None;
+                app.stroke_press_cell = None;
             }
         }
 
@@ -920,7 +1026,7 @@ mod tests {
             let mut app = GasciiApp::headless();
             app.bind(Binding::L, ToolKind::Brush);
             app.brush_plugin_mut().set_pressure_enabled(true);
-            begin_gesture(&mut app, Binding::L, 2, 2);
+            begin_gesture(&mut app, Binding::L, 2, 2, false, false);
 
             let ctx = headless_ctx();
             let pos = Pos2::new(50.0, 50.0);
@@ -958,7 +1064,7 @@ mod tests {
     fn a_non_pressure_sizeable_tool_never_gets_a_pressure_driven_size_override() {
         let mut app = GasciiApp::headless();
         app.bind(Binding::L, ToolKind::Pencil);
-        begin_gesture(&mut app, Binding::L, 2, 2);
+        begin_gesture(&mut app, Binding::L, 2, 2, false, false);
 
         let ctx = headless_ctx();
         let pos = Pos2::new(50.0, 50.0);
@@ -998,7 +1104,7 @@ mod tests {
         let mut app = GasciiApp::headless();
         app.bind(Binding::L, ToolKind::Brush);
         assert!(!app.brush_plugin_mut().pressure_enabled(), "sanity: the Pressure opt-in starts off");
-        begin_gesture(&mut app, Binding::L, 2, 2);
+        begin_gesture(&mut app, Binding::L, 2, 2, false, false);
 
         let ctx = headless_ctx();
         let pos = Pos2::new(50.0, 50.0);
@@ -1074,7 +1180,7 @@ mod tests {
         let mut app = GasciiApp::headless();
         app.bind(Binding::L, ToolKind::Brush);
         app.brush_plugin_mut().set_pressure_enabled(true);
-        begin_gesture(&mut app, Binding::L, 0, 0);
+        begin_gesture(&mut app, Binding::L, 0, 0, false, false);
         app.pressure_stamp_size = Some(2); // as if a light-pressure dab already landed
         app.was_focused = true;
 
@@ -1154,6 +1260,272 @@ mod tests {
             trace_index > bg_index,
             "the trace image (submitted at shape index {trace_index}) must come AFTER the opaque \
              background fill (index {bg_index}) so it paints on top instead of being hidden under it"
+        );
+    }
+
+    /// The Alt-hold temporary eyedropper: Alt held at press time samples color exactly like a real
+    /// Eyedropper press, regardless of the bound kind — and never touches the slot's own `kind`.
+    #[test]
+    fn alt_held_press_samples_color_regardless_of_the_bound_kind() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Pencil);
+        app.doc.set_cell(app.active_layer, 2, 2, gascii_core::Cell {
+            ch: 'x',
+            fg: gascii_core::Rgba(10, 20, 30, 255),
+            bg: gascii_core::Rgba(40, 50, 60, 255),
+        });
+        let (expected_fg, expected_bg) = gascii_core::eyedrop(&app.doc.cell(app.active_layer, 2, 2).copied().unwrap());
+
+        let started = begin_gesture(&mut app, Binding::L, 2, 2, true, false);
+
+        assert!(!started, "an Alt-sample press is a one-shot pick, not a gesture");
+        assert_eq!(app.active_fg, expected_fg);
+        assert_eq!(app.active_bg, expected_bg);
+        assert_eq!(app.slot(Binding::L).kind, ToolKind::Pencil, "alt_sample must never rebind the slot's own kind");
+        assert_eq!(app.stroke_owner, None, "a one-shot pick must not claim stroke ownership");
+    }
+
+    /// The `!stroke_in_progress` gate `begin_gesture`'s doc comment describes is inherited from
+    /// `show()`'s own press-branch condition (`app.stroke_owner.is_none()`), not from `begin_gesture`
+    /// itself — proven here by driving the real `show()` while a stroke on the OTHER binding is
+    /// already active: an Alt-held primary press must not resample, must not disturb the in-progress
+    /// stroke, and must not reassign stroke ownership.
+    #[test]
+    fn alt_hold_while_another_bindings_stroke_is_active_does_not_resample() {
+        let mut app = GasciiApp::headless();
+        app.pending_fit = false;
+        app.bind(Binding::R, ToolKind::Pencil);
+        begin_gesture(&mut app, Binding::R, 0, 0, false, false);
+        assert_eq!(app.stroke_owner, Some(Binding::R), "sanity: R's stroke is active");
+        let (fg_before, bg_before) = (app.active_fg, app.active_bg);
+
+        let ctx = headless_ctx();
+        let pos = Pos2::new(50.0, 50.0);
+        let mut raw = raw_input_with_screen(900.0, 700.0, false);
+        raw.modifiers = egui::Modifiers::ALT;
+        raw.events.push(egui::Event::PointerMoved(pos));
+        // R's own stroke must still read as "held" this frame — `secondary_down()` is a synthetic
+        // `RawInput` reads fresh each `run_ui`, so without this event the frame would (incorrectly,
+        // for this test's purposes) read R's button as already released regardless of Alt.
+        raw.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed: true,
+            modifiers: egui::Modifiers::ALT,
+        });
+        raw.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::ALT,
+        });
+        let _ = ctx.run_ui(raw, |ui| show(ui, &mut app, false));
+
+        assert_eq!(app.active_fg, fg_before, "an Alt press while another binding's stroke is active must not resample fg");
+        assert_eq!(app.active_bg, bg_before, "an Alt press while another binding's stroke is active must not resample bg");
+        assert_eq!(app.stroke_owner, Some(Binding::R), "R's in-progress stroke must be untouched");
+    }
+
+    const ALL_TOOL_KINDS: [ToolKind; 9] = [
+        ToolKind::Pencil,
+        ToolKind::Eraser,
+        ToolKind::Eyedropper,
+        ToolKind::Text,
+        ToolKind::Fill,
+        ToolKind::Rectangle,
+        ToolKind::Line,
+        ToolKind::Selection,
+        ToolKind::Brush,
+    ];
+
+    /// The unconstrained path (`shift: false`, for every `ToolKind`, including `Line`/`Rectangle`
+    /// themselves) must be a byte-for-byte passthrough of the input — Line/Rectangle drag behavior
+    /// must stay byte-identical when Shift is not held.
+    #[test]
+    fn shift_constrain_with_shift_false_is_a_byte_for_byte_passthrough_for_every_tool_kind() {
+        let anchor = (3, 4);
+        let cases: [(u16, u16); 5] = [(3, 4), (10, 4), (3, 12), (10, 12), (0, 0)];
+        for kind in ALL_TOOL_KINDS {
+            for cur in cases {
+                assert_eq!(
+                    shift_constrain(kind, anchor, cur, false),
+                    cur,
+                    "{kind:?}: shift=false must return cur unchanged for cur={cur:?}"
+                );
+            }
+        }
+    }
+
+    /// A non-Line/Rectangle kind must be a passthrough even with Shift held — only Line and
+    /// Rectangle support the constraint at all.
+    #[test]
+    fn shift_constrain_is_a_passthrough_for_every_non_line_non_rectangle_kind_even_with_shift_held() {
+        let anchor = (0, 0);
+        let cur = (10, 3);
+        for kind in ALL_TOOL_KINDS {
+            if matches!(kind, ToolKind::Line | ToolKind::Rectangle) {
+                continue;
+            }
+            assert_eq!(shift_constrain(kind, anchor, cur, true), cur, "{kind:?} must ignore shift entirely");
+        }
+    }
+
+    #[test]
+    fn shift_constrain_returns_cur_unchanged_when_cur_equals_anchor() {
+        let anchor = (5, 5);
+        assert_eq!(shift_constrain(ToolKind::Line, anchor, anchor, true), anchor);
+        assert_eq!(shift_constrain(ToolKind::Rectangle, anchor, anchor, true), anchor);
+    }
+
+    #[test]
+    fn shift_constrain_snaps_line_to_the_nearest_45_degree_ray() {
+        let anchor = (10, 10);
+        // (cursor delta from anchor, expected snapped delta)
+        let cases: [((i32, i32), (i32, i32)); 6] = [
+            ((10, 0), (10, 0)),    // already horizontal
+            ((0, 10), (0, 10)),    // already vertical
+            ((10, 10), (10, 10)),  // already diagonal (45°)
+            ((10, 3), (10, 0)),    // ~16.7°, within 22.5° of horizontal
+            ((3, 10), (0, 10)),    // ~16.7°, within 22.5° of vertical
+            ((10, 8), (10, 10)),   // ~38.7°, closer to the 45° diagonal than either axis
+        ];
+        for ((dx, dy), (edx, edy)) in cases {
+            let cur = ((anchor.0 as i32 + dx) as u16, (anchor.1 as i32 + dy) as u16);
+            let expected = ((anchor.0 as i32 + edx) as u16, (anchor.1 as i32 + edy) as u16);
+            assert_eq!(
+                shift_constrain(ToolKind::Line, anchor, cur, true),
+                expected,
+                "delta ({dx},{dy}) from anchor must snap to delta ({edx},{edy})"
+            );
+        }
+    }
+
+    /// Direction (sign) must be preserved for every quadrant, not just the positive one the other
+    /// tests exercise.
+    #[test]
+    fn shift_constrain_preserves_direction_for_negative_deltas() {
+        let anchor = (20, 20);
+        let cur = (10, 20); // dx = -10, dy = 0: already horizontal, leftward
+        assert_eq!(shift_constrain(ToolKind::Line, anchor, cur, true), cur);
+
+        let cur = (20, 10); // dx = 0, dy = -10: already vertical, upward
+        assert_eq!(shift_constrain(ToolKind::Line, anchor, cur, true), cur);
+
+        let cur = (10, 10); // dx = -10, dy = -10: already diagonal, up-left
+        assert_eq!(shift_constrain(ToolKind::Line, anchor, cur, true), cur);
+    }
+
+    #[test]
+    fn shift_constrain_clamps_rectangle_to_a_square_using_the_larger_axis() {
+        let anchor = (5, 5);
+        // dx=10, dy=3: the larger axis (x) wins, y stretches to match.
+        assert_eq!(shift_constrain(ToolKind::Rectangle, anchor, (15, 8), true), (15, 15));
+        // dx=3, dy=10: the larger axis (y) wins, x stretches to match.
+        assert_eq!(shift_constrain(ToolKind::Rectangle, anchor, (8, 15), true), (15, 15));
+        // Already square: unchanged.
+        assert_eq!(shift_constrain(ToolKind::Rectangle, anchor, (12, 12), true), (12, 12));
+        // Negative direction: signs preserved on both axes.
+        assert_eq!(shift_constrain(ToolKind::Rectangle, anchor, (0, 2), true), (0, 0));
+    }
+
+    /// Shift toggled mid-drag (not held at press time) must re-snap on the very next frame, not
+    /// only at press time — `shift_constrain` is called every `Drag` event via `drive_stroke_tail`,
+    /// so this falls out of the design for free; still worth pinning directly.
+    #[test]
+    fn shift_toggled_mid_drag_changes_the_pending_preview_on_the_very_next_frame() {
+        let mut app = GasciiApp::headless();
+        app.pending_fit = false;
+        app.bind(Binding::L, ToolKind::Line);
+        begin_gesture(&mut app, Binding::L, 0, 0, false, false);
+        assert_eq!(app.stroke_press_cell, Some((0, 0)));
+
+        let ctx = headless_ctx();
+        let pos = Pos2::new(50.0, 50.0);
+
+        // Frame 1: drag to a point off any 45° ray, Shift NOT held — the raw, unconstrained cell.
+        let mut raw1 = raw_input_with_screen(900.0, 700.0, false);
+        raw1.events.push(egui::Event::PointerMoved(pos));
+        raw1.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run_ui(raw1, |ui| show(ui, &mut app, false));
+        let unconstrained_pending = app.slots[Binding::L.ix()].tool.pending().to_vec();
+
+        // Frame 2: same pointer position, Shift now held — the preview must change (re-snap),
+        // proving the constraint re-applies live rather than only at press time.
+        let mut raw2 = raw_input_with_screen(900.0, 700.0, false);
+        raw2.modifiers = egui::Modifiers::SHIFT;
+        raw2.events.push(egui::Event::PointerMoved(pos));
+        raw2.events.push(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::SHIFT,
+        });
+        let _ = ctx.run_ui(raw2, |ui| show(ui, &mut app, false));
+        let constrained_pending = app.slots[Binding::L.ix()].tool.pending().to_vec();
+
+        assert_ne!(
+            unconstrained_pending, constrained_pending,
+            "toggling Shift mid-drag at the same pointer position must change the pending preview"
+        );
+    }
+
+    /// The shift-click-continue integration path, end to end through `begin_gesture`: a Shift-held
+    /// press on a Line binding with a remembered `last_line_point` must continue the line from that
+    /// point rather than starting a fresh one at the click.
+    #[test]
+    fn shift_held_press_on_line_with_a_remembered_point_continues_from_it() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Line);
+        app.slots[Binding::L.ix()].last_line_point = Some((2, 2));
+
+        let started = begin_gesture(&mut app, Binding::L, 8, 2, false, true);
+        assert!(started, "a continued line is still a live gesture");
+        assert_eq!(
+            app.stroke_press_cell,
+            Some((2, 2)),
+            "the constraint anchor must be the remembered point, not the click"
+        );
+
+        let tctx = tool_ctx(&app, Binding::L);
+        let resp = app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc);
+        let ToolResponse::Commit(Some(gascii_core::Edit::Cells(cells))) = resp else {
+            panic!("expected a committed Edit::Cells spanning the continued line");
+        };
+        assert!(cells.iter().any(|c| c.x == 2 && c.y == 2), "the line must include its remembered start point");
+        assert!(cells.iter().any(|c| c.x == 8 && c.y == 2), "the line must reach the click point");
+    }
+
+    /// Without Shift held, the same setup must behave exactly like today: a fresh line starting at
+    /// the click, ignoring any remembered point.
+    #[test]
+    fn press_on_line_without_shift_starts_a_fresh_line_at_the_click_even_with_a_remembered_point() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Line);
+        app.slots[Binding::L.ix()].last_line_point = Some((2, 2));
+
+        begin_gesture(&mut app, Binding::L, 8, 2, false, false);
+        assert_eq!(app.stroke_press_cell, Some((8, 2)), "the anchor must be the click, not the remembered point");
+    }
+
+    /// `set_tool`'s rebind-away-from-Line reset (`app.rs`): a rebind to any other kind must clear
+    /// `last_line_point`, so a later rebind back to Line starts with no stale continuation point.
+    #[test]
+    fn rebinding_away_from_line_clears_the_remembered_last_line_point() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Line);
+        app.slots[Binding::L.ix()].last_line_point = Some((2, 2));
+
+        app.bind(Binding::L, ToolKind::Pencil);
+        app.bind(Binding::L, ToolKind::Line);
+
+        assert_eq!(
+            app.slots[Binding::L.ix()].last_line_point, None,
+            "rebinding away from Line and back must not resurrect a stale continuation point"
         );
     }
 }

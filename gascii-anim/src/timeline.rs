@@ -48,7 +48,9 @@ pub(crate) fn show(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
     outcome
 }
 
-fn duplicate_active(doc: &Document) -> Result<Edit, FrameOpError> {
+/// Also called directly by `AnimPlugin::tick`'s `Shift+D` shortcut, so both entry points behave
+/// identically at every boundary.
+pub(crate) fn duplicate_active(doc: &Document) -> Result<Edit, FrameOpError> {
     gascii_core::duplicate_frame(doc, doc.active_frame())
 }
 
@@ -58,8 +60,9 @@ fn add_blank_after_active(doc: &Document) -> Result<Edit, FrameOpError> {
 
 /// Maps a `frame_ops` failure to a specific, readable message — mirrors `GasciiApp::
 /// add_frame_via_menu`'s own per-variant convention exactly (never a raw `{e:?}` dump), so a
-/// failure at the same boundary reads identically regardless of which control triggered it.
-fn frame_op_error_message(action: &str, err: FrameOpError) -> String {
+/// failure at the same boundary reads identically regardless of which control triggered it. Also
+/// called directly by `AnimPlugin::tick`'s `Shift+D` shortcut.
+pub(crate) fn frame_op_error_message(action: &str, err: FrameOpError) -> String {
     match err {
         FrameOpError::TooManyFrames { max, .. } => format!("{action}: exceeds the {max} maximum"),
         FrameOpError::TotalCellBudgetExceeded { .. } => format!("{action}: exceeds the maximum total cell budget"),

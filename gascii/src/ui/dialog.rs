@@ -124,7 +124,11 @@ pub enum DialogAction {
 }
 
 /// A right-aligned Cancel/Confirm button pair (primary `confirm` renders rightmost — added first to
-/// a `right_to_left` layout).
+/// a `right_to_left` layout). Enter also confirms, mirroring a click on `confirm` — every call site
+/// builds its confirm button `enabled: true` unconditionally, so no extra validity gating is needed
+/// here. Safe against `TextEdit`'s own Enter handling: a singleline field surrenders focus on Enter
+/// rather than consuming the event (`egui::TextEdit`'s own doc comment names this exact idiom), so
+/// this read sees the same press regardless of which field, if any, just lost focus over it.
 pub fn buttons(ui: &mut Ui, cancel: &str, confirm: &str) -> DialogAction {
     let mut action = DialogAction::None;
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -136,5 +140,48 @@ pub fn buttons(ui: &mut Ui, cancel: &str, confirm: &str) -> DialogAction {
             action = DialogAction::Cancel;
         }
     });
+    if action == DialogAction::None && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        action = DialogAction::Confirm;
+    }
     action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn enter_pressed_input() -> egui::RawInput {
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        raw
+    }
+
+    /// The Enter path this fix exists for: pressing Enter with neither button clicked must still
+    /// resolve to `Confirm`, driven through the real widget layout rather than a hand-rolled
+    /// `key_pressed` check.
+    #[test]
+    fn enter_confirms_the_dialog_identically_to_clicking_the_confirm_button() {
+        let ctx = egui::Context::default();
+        crate::fonts::install_fonts(&ctx);
+        let mut action = None;
+        let _ = ctx.run_ui(enter_pressed_input(), |ui| action = Some(buttons(ui, "Cancel", "Create")));
+        assert_eq!(action, Some(DialogAction::Confirm));
+    }
+
+    /// A frame with no Enter press and no click must resolve to `None` — Enter-to-confirm must not
+    /// fire spuriously on an otherwise-idle frame.
+    #[test]
+    fn no_key_and_no_click_resolves_to_none() {
+        let ctx = egui::Context::default();
+        crate::fonts::install_fonts(&ctx);
+        let mut action = None;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| action = Some(buttons(ui, "Cancel", "Create")));
+        assert_eq!(action, Some(DialogAction::None));
+    }
 }

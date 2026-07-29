@@ -18,6 +18,18 @@ pub(crate) struct Inner {
     pub onion_enabled: bool,
     pub onion_prev: u8,
     pub onion_next: u8,
+    /// Whether a `Space` hold is currently in progress — the state `resolve_space_hold` tracks
+    /// across frames to decide, at release, whether the hold was a play/pause tap or a space-pan
+    /// drag. See `plugin.rs`'s `resolve_space_hold`.
+    pub space_hold_active: bool,
+    /// Whether a primary press occurred at any point during the current `Space` hold — latched for
+    /// the whole hold, not just the frame it happened on.
+    pub space_hold_saw_primary_press: bool,
+    /// Previous tick's OS-level window-focus state, for edge-detecting focus loss — mirrors
+    /// `GasciiApp::was_focused`'s own field exactly, tracked separately here because this plugin has
+    /// no access to the host's copy. See `plugin.rs`'s `AnimPlugin::tick` for why the Space hold
+    /// needs this.
+    pub was_focused: bool,
 }
 
 #[derive(Clone)]
@@ -32,6 +44,9 @@ impl SharedState {
             onion_enabled: false,
             onion_prev: 1,
             onion_next: 1,
+            space_hold_active: false,
+            space_hold_saw_primary_press: false,
+            was_focused: true,
         })))
     }
 
@@ -72,5 +87,8 @@ mod tests {
         assert!(!inner.onion_enabled);
         assert_eq!(inner.onion_prev, 1);
         assert_eq!(inner.onion_next, 1);
+        assert!(!inner.space_hold_active);
+        assert!(!inner.space_hold_saw_primary_press);
+        assert!(inner.was_focused, "starts focused, matching GasciiApp::was_focused's own default");
     }
 }

@@ -21,7 +21,22 @@ pub trait Plugin: 'static {
     /// called unconditionally every frame, so a plugin that doesn't care about shortcuts (a
     /// playback clock) isn't starved whenever any field has focus. A plugin that DOES consume a
     /// shortcut (a digit-key intensity pick) checks `focused` itself before reacting.
-    fn tick(&mut self, _ui: &mut Ui, _focused: bool, _host: &dyn PluginHost) {}
+    ///
+    /// Returns a `PanelOutcome` exactly like `panel` does — the same document-mutation channel, for
+    /// a shortcut that needs to apply an `Edit` or move the editing cursor (a frame-navigation key,
+    /// a duplicate-frame chord) rather than only mutate the plugin's own session state directly. The
+    /// host applies it via the same drain pass `panel`'s outcome goes through. A plugin whose
+    /// shortcuts only ever mutate their own state (or none at all) needs no override here beyond the
+    /// default, which returns `PanelOutcome::default()` — a true no-op.
+    ///
+    /// Known gap: a shortcut consumed here (a digit key, a frame-navigation key, a duplicate-frame
+    /// chord) has no structured way to register its own label with the host, so it cannot appear in
+    /// the host's own `?` keyboard-shortcuts overlay — that overlay only lists `register_tools`'
+    /// tool letters and the host's own built-in chords. A `tick`-driven shortcut's discoverability
+    /// is entirely up to whatever UI the plugin's own `panel`/`options_ui` chooses to show for it.
+    fn tick(&mut self, _ui: &mut Ui, _focused: bool, _host: &dyn PluginHost) -> PanelOutcome {
+        PanelOutcome::default()
+    }
 
     /// A plugin-drawn panel, painted once per frame regardless of which tool is bound. `ui` is the
     /// host's own live root `Ui` — the same one every other chrome panel (titlebar, sidebar,
@@ -130,7 +145,9 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             p.options_ui("anything", ui, geom(), &host);
-            p.tick(ui, false, &host);
+            let tick_outcome = p.tick(ui, false, &host);
+            assert!(tick_outcome.edits.is_empty(), "default tick must request no edits");
+            assert!(tick_outcome.set_active_frame.is_none(), "default tick must not request a frame switch");
             let outcome = p.panel(ui, false, &host);
             assert!(outcome.edits.is_empty(), "default panel must request no edits");
             assert!(outcome.set_active_frame.is_none(), "default panel must not request a frame switch");

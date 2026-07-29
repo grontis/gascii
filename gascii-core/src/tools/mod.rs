@@ -171,6 +171,9 @@ pub enum ToolEvent {
     /// Clear the active selection/float to Blank. Only `SelectionTool` gives this meaning; other
     /// tools ignore it like any other irrelevant event.
     Delete,
+    /// Select the document's full extent as a marquee. Only `SelectionTool` gives this meaning
+    /// (`Ctrl+A`); every other tool ignores it like any other irrelevant event.
+    SelectAll,
 }
 
 /// Inclusive cell rectangle (`x0..=x1`, `y0..=y1`), normalized so `x0<=x1` and `y0<=y1`. Shared by

@@ -16,6 +16,7 @@ use gascii_plugin_api::{CanvasRenderer, Plugin};
 
 use crate::anim_export;
 use crate::canvas::{self, NaiveRenderer};
+use crate::chords::{self, ChordDispatch, ChordId};
 use crate::fonts;
 use crate::image_bg;
 use crate::png_export;
@@ -55,6 +56,23 @@ fn ctrl_c_response(count: u32, seen: u32, close_confirm_up: bool) -> Option<Ctrl
 /// without constructing a full `GasciiApp`.
 fn is_own_clipboard_text(text: &str, internal: Option<&CellPatch>) -> bool {
     internal.is_some_and(|p| p.to_text() == text)
+}
+
+/// Whether this frame's raw events include a real `egui::Event::Copy` — the event egui-winit
+/// actually emits for Ctrl+C/Cmd+C/Ctrl+Insert, intercepting the chord before it ever reaches
+/// `Event::Key`. `shift` (`InputState::modifiers.shift`, read at the moment the event is observed)
+/// discriminates plain copy from copy-all: `Event::Copy` carries no modifier state of its own, so the
+/// ambient modifiers are the only signal Ctrl+Shift+C leaves behind by the time this fires. Pure, so
+/// the discrimination is testable without a live `GasciiApp`, mirroring `is_own_clipboard_text`.
+fn copy_events(events: &[egui::Event], shift: bool) -> (bool, bool) {
+    let copy = events.iter().any(|e| matches!(e, egui::Event::Copy));
+    (copy && !shift, copy && shift)
+}
+
+/// Whether this frame's raw events include a real `egui::Event::Cut` — mirrors `copy_events`'s own
+/// reasoning: egui-winit intercepts the clipboard chord before it ever reaches `Event::Key`.
+fn cut_event(events: &[egui::Event]) -> bool {
+    events.iter().any(|e| matches!(e, egui::Event::Cut))
 }
 
 /// The Export dialog's "Trim trailing spaces" *unchecked* path: every row stays padded to
@@ -182,6 +200,17 @@ fn tool_shortcut_reachable(kind: ToolKind, is_fullscreen: bool) -> bool {
     !is_fullscreen || tool_def(kind).kiosk_visible
 }
 
+/// `handle_keys`'s tool-shortcut lookup predicate — deliberately side-effecting: past the
+/// reachability check, it also *consumes* `def`'s key event via `i.consume_key`. That side effect
+/// is what makes `tools().iter().find(...)` correct rather than merely convenient: `find` stops at
+/// the first row this returns `true` for, so exactly one key gets consumed per frame and every row
+/// it never reaches (because an earlier one already matched) is left completely untouched — the
+/// same "table order = consumption order, one shot" contract the chord registry's own generic loop
+/// follows.
+fn tool_shortcut_fires_and_consumes_its_key(def: &ToolDef, i: &mut egui::InputState, is_fullscreen: bool) -> bool {
+    tool_shortcut_reachable(def.kind, is_fullscreen) && i.consume_key(egui::Modifiers::NONE, def.key)
+}
+
 /// Whether this kind can hold a cross-frame Session (uncommitted work outliving a single stroke —
 /// a Text burst, a floating stamp). The one place that fact lives: `flush_slot`, `end_session`,
 /// the document-swap reset, and the takeover in `begin_gesture` all consult it, so a future
@@ -256,11 +285,21 @@ pub(crate) struct ToolSlot {
     /// Per-kind footprint memory, indexed by `sized_slot`. Private to this slot, so L's Eraser size
     /// and R's Eraser size are independent by construction rather than by two parallel arrays.
     pub stamps: [StampSettings; SIZED_TOOL_COUNT],
+    /// The terminal cell of this slot's last committed `Line` stroke, so a Shift-held fresh Press
+    /// can continue from it (`begin_gesture`). `None` until a Line stroke actually commits, and
+    /// cleared whenever the binding is rebound away from `Line` (`set_tool`) so a later rebind back
+    /// to `Line` never resumes a point from an unrelated editing session.
+    pub last_line_point: Option<(u16, u16)>,
 }
 
 impl ToolSlot {
     fn new(kind: ToolKind) -> Self {
-        ToolSlot { kind, tool: make_tool(kind), stamps: [StampSettings::default(); SIZED_TOOL_COUNT] }
+        ToolSlot {
+            kind,
+            tool: make_tool(kind),
+            stamps: [StampSettings::default(); SIZED_TOOL_COUNT],
+            last_line_point: None,
+        }
     }
 
     /// This slot's footprint for whatever it is currently bound to (the identity default for
@@ -509,7 +548,27 @@ fn build_tools() -> Vec<ToolDef> {
             rows.push(merge_plugin_row(i, &cap));
         }
     }
+    // A plugin-registered tool key silently colliding with a reserved global chord (`X` swap-colors,
+    // `[`/`]` size steppers, and every other modifier-less chord `chords::reserved_global_keys`
+    // knows about) would leave one of the two permanently unreachable — `tools()`'s own
+    // `find()`-based one-shot consumption always resolves in table order, so whichever comes first
+    // wins and the other never fires. `tool_shortcuts_are_unique` already catches a plugin-vs-tool
+    // collision; this catches the plugin-vs-non-tool-chord gap that check structurally can't see.
+    // Debug-only: a colliding release-build plugin key ships silently, an accepted trade-off in a
+    // pre-1.0, in-repo-only plugin ecosystem.
+    debug_assert!(
+        rows.iter().filter(|d| d.plugin_slot.is_some()).all(|d| !tool_key_collides_with_reserved(d.key)),
+        "a plugin-registered tool key collides with a reserved global chord — see chords::reserved_global_keys"
+    );
     rows
+}
+
+/// Whether `key` collides with a reserved global chord (`chords::reserved_global_keys()`) — the
+/// predicate `build_tools()`'s debug assertion checks every plugin-registered tool key against,
+/// pulled out as a pure function so the check is unit-testable without constructing a real
+/// colliding plugin and triggering the assert for it.
+pub(crate) fn tool_key_collides_with_reserved(key: egui::Key) -> bool {
+    chords::reserved_global_keys().any(|k| k == key)
 }
 
 /// The fixed, ordered list of plugin constructors. Read by two independent consumers in the *same
@@ -705,6 +764,11 @@ pub struct GasciiApp {
     /// across a pressure-modulated stroke. Reset to `None` whenever a stroke begins or ends, so a
     /// stale value never leaks onto a stroke that hasn't reported pressure yet.
     pub(crate) pressure_stamp_size: Option<u16>,
+    /// The cell `begin_gesture` pressed at, for the live stroke — the `anchor` `shift_constrain`
+    /// measures a Shift-held drag against (Line's 45° rays, Rectangle's square). `Some` for exactly
+    /// as long as `stroke_owner` is, set alongside it in `begin_gesture` and cleared alongside its
+    /// own reset in `show()`'s tail handling.
+    pub(crate) stroke_press_cell: Option<(u16, u16)>,
     pub(crate) space_pan_active: bool,
     /// Which slot's tool receives keystrokes. There is one keyboard and both slots can be bound to
     /// keyboard-driven tools, so ownership is explicit state rather than something derived: it is
@@ -741,6 +805,13 @@ pub struct GasciiApp {
     pub(crate) theme_pref: egui::ThemePreference,
     /// Whether the canvas cell-grid overlay is drawn. Persisted, off by default.
     pub(crate) show_grid: bool,
+    /// Whether the `?` keyboard-shortcuts overlay is showing. Session-only, never persisted —
+    /// mirrors `resize_dialog_open`/`export_dialog_open`'s own "starts closed every launch"
+    /// precedent. Built on the same `dialog::modal` surface as every other dialog and therefore
+    /// counted by `modal_open()` too: `canvas.rs` polls raw pointer/keyboard state rather than
+    /// using egui's occlusion system, so without this a click "through" the overlay would still
+    /// draw on the canvas underneath it.
+    pub(crate) help_overlay_open: bool,
     /// True once this session has observed a pressure-bearing `Event::Touch` (a stylus contact).
     /// Session-only, never persisted. A device-capability fact, not Brush-owned state — it only
     /// happens to gate the Pressure toggle's visibility in Brush's options block, exposed to
@@ -923,6 +994,7 @@ impl GasciiApp {
             options_focus: Binding::L,
             stroke_owner: None,
             pressure_stamp_size: None,
+            stroke_press_cell: None,
             space_pan_active: false,
             keyboard_owner: None,
             was_focused: true,
@@ -933,6 +1005,7 @@ impl GasciiApp {
             recent_glyphs: Vec::new(),
             theme_pref: egui::ThemePreference::System,
             show_grid: false,
+            help_overlay_open: false,
             stylus_detected: false,
             pinch_zoom_accum: 1.0,
             resize_dialog_open: false,
@@ -967,7 +1040,11 @@ impl GasciiApp {
     /// modal flag must be named here, and every raw-input-polling site in `canvas.rs`/`handle_keys`
     /// must gate on this rather than any single dialog's own flag.
     pub(crate) fn modal_open(&self) -> bool {
-        self.confirm.is_some() || self.resize_dialog_open || self.export_dialog_open || self.new_dialog_open
+        self.confirm.is_some()
+            || self.resize_dialog_open
+            || self.export_dialog_open
+            || self.new_dialog_open
+            || self.help_overlay_open
     }
 
     /// Whether any pointer gesture — primary stroke or right-click stroke — currently owns the
@@ -1013,6 +1090,12 @@ impl GasciiApp {
         self.end_session(b);
         self.slots[b.ix()].kind = kind;
         self.slots[b.ix()].tool = make_tool(kind);
+        // A rebind away from Line invalidates any remembered shift-click-continue point — otherwise
+        // a later rebind back to Line would resume "continue from" a point left over from a
+        // completely different editing session.
+        if kind != ToolKind::Line {
+            self.slots[b.ix()].last_line_point = None;
+        }
         // The [/] size keys follow the binding the user just acted on — the same rule a canvas
         // gesture applies. Without this, picking a tool by shortcut or toolbox click leaves the
         // keys adjusting the OTHER binding's stamp.
@@ -1142,6 +1225,18 @@ impl GasciiApp {
         for p in self.plugins.iter_mut() {
             outcomes.push(p.panel(ui, kiosk, &host));
         }
+        self.drain_panel_outcomes(outcomes);
+    }
+
+    /// Applies every `PanelOutcome` a plugin's `panel` or `tick` returned this frame, in order —
+    /// the drain half of the two-pass draw-then-drain (or tick-then-drain) shape `run_plugin_panels`
+    /// and `handle_keys` both need: `apply_edit`/`switch_active_frame` need the whole of `&mut self`,
+    /// which would conflict with `self.plugins`'s still-live mutable borrow if called from inside
+    /// the draw/tick loop itself. A returned `PanelOutcome::error` is written straight into
+    /// `self.last_error` — the same status-bar channel every other structural trigger already uses
+    /// (`add_frame_via_menu`, "Resize Canvas…"), so a plugin-originated failure reads identically to
+    /// a host-originated one.
+    fn drain_panel_outcomes(&mut self, outcomes: Vec<gascii_plugin_api::PanelOutcome>) {
         for outcome in outcomes {
             for edit in outcome.edits {
                 self.apply_edit(edit, None);
@@ -1342,6 +1437,55 @@ impl GasciiApp {
         self.internal_clipboard = Some(patch);
     }
 
+    /// `Ctrl+X`/Edit ▸ Cut: copies the live selection (`copy_selection`), then deletes it — one
+    /// atomic change, never "copies but doesn't delete" for even a frame. Mirrors `canvas.rs`'s
+    /// existing Selection-Delete-key branch exactly, just triggered from here instead of that
+    /// per-frame key routing. A no-op unless a Selection binding has a region defined, same as
+    /// `copy_selection`.
+    pub(crate) fn cut_selection(&mut self, ctx: &egui::Context) {
+        let Some(b) = self.selection_slot() else {
+            return;
+        };
+        self.copy_selection(ctx);
+        let tctx = crate::canvas::tool_ctx(self, b);
+        let resp = self.slots[b.ix()].tool.update(ToolEvent::Delete, &tctx, &self.doc);
+        if let ToolResponse::Commit(Some(edit)) = resp {
+            self.apply_edit(edit, Some(b));
+        }
+    }
+
+    /// `Ctrl+A`/Edit ▸ Select All: selects the whole document via whichever binding already holds
+    /// Selection (`paste_target`'s own rule, default L) — never silently no-ops for lack of a
+    /// binding to act through.
+    pub(crate) fn select_all(&mut self) {
+        let b = paste_target(self.slot(Binding::L).kind, self.slot(Binding::R).kind);
+        if self.slot(b).kind != ToolKind::Selection {
+            self.set_tool(b, ToolKind::Selection);
+        }
+        self.acquire_keyboard(b);
+        let tctx = crate::canvas::tool_ctx(self, b);
+        self.slots[b.ix()].tool.update(ToolEvent::SelectAll, &tctx, &self.doc);
+    }
+
+    /// `Ctrl+D`/Edit ▸ Deselect: clears the marquee/keyboard claim without deleting document
+    /// content — the identical pair `canvas.rs`'s own Selection-Escape branch already performs. A
+    /// no-op unless a Selection binding currently holds the keyboard.
+    ///
+    /// "Without deleting content" means the document, not an uncommitted float: `ToolEvent::Cancel`
+    /// discards a lifted-but-not-dropped float outright rather than committing it, matching
+    /// `canvas.rs`'s own Selection-Escape precedent exactly (that branch is deliberately
+    /// non-flushing so Escape-as-abort can discard an in-progress move). A user who has moved or
+    /// pasted a float and presses `Ctrl+D` expecting to "just clear the selection" loses that
+    /// float's content, not just the marquee outline.
+    pub(crate) fn deselect(&mut self) {
+        let Some(b) = self.selection_slot() else {
+            return;
+        };
+        let tctx = crate::canvas::tool_ctx(self, b);
+        self.slots[b.ix()].tool.update(ToolEvent::Cancel, &tctx, &self.doc);
+        self.release_keyboard(b);
+    }
+
     /// Reconciles a pasted `Event::Paste` text against the internal clipboard: if it matches the
     /// internal patch's own flattening, the OS clipboard still holds our own colored copy, so that
     /// gets pasted; otherwise the text came from elsewhere and is treated as external plain text,
@@ -1422,30 +1566,50 @@ impl GasciiApp {
         let widget_focused = ui.memory(|m| m.focused().is_some());
         let focused = widget_focused || suppresses_tool_shortcuts(owner_kind);
         let is_fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
-        let (redo_shift, undo, redo_y, save, copy_all, copy, export_dialog, fit) = ui.input_mut(|i| {
+        let (redo_shift, undo, redo_y, select_all, copy, copy_all, cut, generic_always) = ui.input_mut(|i| {
             // Cmd/Ctrl+Shift+Z must be consumed before the plain Cmd/Ctrl+Z pattern, since
             // `matches_logically` ignores extra Shift/Alt — checking undo first would swallow
             // the redo shortcut's Z key press. Same reasoning for Ctrl+Shift+C vs plain Ctrl+C.
-            let (redo_shift, undo, redo_y) = if widget_focused {
-                (false, false, false)
+            //
+            // Ctrl+A joins this same `widget_focused`-gated group, not the uniform generic subset:
+            // egui::TextEdit's own cursor handling treats Ctrl+A as "select all text in this field"
+            // while focused (confirmed against the vendored `text_selection/cursor_range.rs`), the
+            // same conflict that put Undo/Redo here in the first place. A canvas Text session sets
+            // no widget focus, so Ctrl+A there still reaches the Selection-tool chord below.
+            let (redo_shift, undo, redo_y, select_all) = if widget_focused {
+                (false, false, false, false)
             } else {
                 (
                     i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z),
                     i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z),
                     i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::A),
                 )
             };
-            let save = i.consume_key(egui::Modifiers::COMMAND, egui::Key::S);
-            let copy_all = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::C);
-            let copy = i.consume_key(egui::Modifiers::COMMAND, egui::Key::C);
-            let export_dialog = i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::E);
-            // Ctrl+0 is a distinct modifier pattern from the Brush's plain `0` (no modifiers) —
-            // `matches_logically` requires ctrl/command to be entirely absent for a `NONE`
-            // pattern, so the two can never collide regardless of which is consumed first; this
-            // is simply where every global chord is consumed.
-            let fit = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num0);
-            (redo_shift, undo, redo_y, save, copy_all, copy, export_dialog, fit)
+            // The uniform, unconditional subset — one shared consume-and-dispatch loop over
+            // `chords::CHORDS`'s `GenericAlways` rows in table order, rather than one near-identical
+            // individual `consume_key` call per chord. None of these collide with each other or with
+            // anything above, so table order carries no precedence weight here — it exists only
+            // because the registry always consumes in table order, the same rule `tools()`'s own
+            // shortcut lookup already follows.
+            let generic_always = chords::consume_generic_chords(i, ChordDispatch::GenericAlways);
+            // Ctrl+C/Cmd+C/Ctrl+Insert (and Ctrl+X) never reach `Event::Key` — egui-winit
+            // intercepts the clipboard chord and emits `Event::Copy`/`Event::Cut` instead, which
+            // `consume_key` can never see. Scanned (not consumed): nothing else in this app reads
+            // these events this frame, so there is no double-handling to guard against.
+            let (copy, copy_all) = copy_events(&i.events, i.modifiers.shift);
+            let cut = cut_event(&i.events);
+            (redo_shift, undo, redo_y, select_all, copy, copy_all, cut, generic_always)
         });
+        let save = generic_always.contains(&ChordId::Save);
+        let export_dialog = generic_always.contains(&ChordId::ExportDialog);
+        let fit = generic_always.contains(&ChordId::Fit);
+        let new_document = generic_always.contains(&ChordId::New);
+        let open_document = generic_always.contains(&ChordId::Open);
+        let save_as = generic_always.contains(&ChordId::SaveAs);
+        let deselect = generic_always.contains(&ChordId::Deselect);
+        let zoom_in_alias = generic_always.contains(&ChordId::ZoomInAlias);
+        let zoom_out_alias = generic_always.contains(&ChordId::ZoomOutAlias);
 
         // Undo/redo mid-pointer-gesture would mutate the document under the stroke's pinned
         // `before` values — the eventual commit would write stale planes back over the undone
@@ -1466,6 +1630,21 @@ impl GasciiApp {
         if fit {
             self.pending_fit = true;
         }
+        if new_document {
+            self.new_document_via_menu();
+        }
+        if open_document {
+            self.open_file();
+        }
+        if save_as {
+            self.save_file_as();
+        }
+        if zoom_in_alias {
+            self.step_zoom(1);
+        }
+        if zoom_out_alias {
+            self.step_zoom(-1);
+        }
         // The tool shortcuts come from the tool registry, so a tool and its key can never drift
         // apart. A shortcut always sets the L binding; right-clicking a toolbox cell is the only
         // way to set R. Text is excluded from the lookup while fullscreen — see
@@ -1473,13 +1652,7 @@ impl GasciiApp {
         // rebinding L to a tool that kiosk's own sidebar has no cell for.
         if !focused {
             let picked = ui.input_mut(|i| {
-                tools()
-                    .iter()
-                    .find(|def| {
-                        tool_shortcut_reachable(def.kind, is_fullscreen)
-                            && i.consume_key(egui::Modifiers::NONE, def.key)
-                    })
-                    .map(|def| def.kind)
+                tools().iter().find(|def| tool_shortcut_fires_and_consumes_its_key(def, i, is_fullscreen)).map(|def| def.kind)
             });
             if let Some(kind) = picked {
                 self.set_tool(Binding::L, kind);
@@ -1509,9 +1682,15 @@ impl GasciiApp {
             self.toggle_fullscreen(&ctx);
         }
         if !focused {
-            let want_swap = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::X));
-            if want_swap {
+            let fired = ui.input_mut(|i| chords::consume_generic_chords(i, ChordDispatch::GenericUnfocused));
+            if fired.contains(&ChordId::SwapColors) {
                 self.swap_colors();
+            }
+            if fired.contains(&ChordId::ToggleGrid) {
+                self.show_grid = !self.show_grid;
+            }
+            if fired.contains(&ChordId::HelpOverlay) {
+                self.help_overlay_open = !self.help_overlay_open;
             }
         }
         if copy_all {
@@ -1519,6 +1698,15 @@ impl GasciiApp {
             ui.ctx().copy_text(export_text(&self.doc));
         } else if copy {
             self.copy_selection(ui.ctx());
+        }
+        if cut {
+            self.cut_selection(ui.ctx());
+        }
+        if select_all {
+            self.select_all();
+        }
+        if deselect {
+            self.deselect();
         }
         // `+`/`=`/`-`, no modifiers: the same zoom step the status bar's buttons and the View menu
         // use. Guarded like the tool-select keys so typing into a focused field never zooms.
@@ -1537,16 +1725,23 @@ impl GasciiApp {
             }
         }
         // Per-frame plugin input outside a canvas gesture (Brush's digit-key intensity shortcut, a
-        // playback clock, and whatever a future plugin needs the same hook for). Called
-        // unconditionally now — `focused` is passed through as a plain parameter instead of gating
-        // the call site, so a plugin that doesn't care about shortcuts (a playback clock) isn't
-        // starved whenever any field has focus; a plugin that DOES consume a shortcut (Brush's
-        // digit keys) checks `focused` itself.
+        // playback clock, gascii-anim's frame-navigation/duplicate-frame shortcuts, and whatever a
+        // future plugin needs the same hook for). Called unconditionally now — `focused` is passed
+        // through as a plain parameter instead of gating the call site, so a plugin that doesn't
+        // care about shortcuts (a playback clock) isn't starved whenever any field has focus; a
+        // plugin that DOES consume a shortcut (Brush's digit keys) checks `focused` itself.
+        //
+        // Two passes, mirroring `run_plugin_panels`'s own draw-then-drain shape: `tick` needs only
+        // `&host` (borrowing `self.doc`) while it runs, so every plugin's outcome is collected here
+        // and applied afterward via the same `drain_panel_outcomes` helper, once `host`'s borrow of
+        // `self.doc` has ended (NLL) and `&mut self` is free again.
         let (stylus_detected, bound) = host_context(self);
         let host = host_facts(&self.doc, stylus_detected, bound);
+        let mut tick_outcomes = Vec::with_capacity(self.plugins.len());
         for p in self.plugins.iter_mut() {
-            p.tick(ui, focused, &host);
+            tick_outcomes.push(p.tick(ui, focused, &host));
         }
+        self.drain_panel_outcomes(tick_outcomes);
         // `[`/`]` adjust the stamp of whichever binding was last used — a gesture on either button
         // selects it, as does binding a tool, so the keys follow the button you last drew with.
         let focus = self.options_focus;
@@ -1559,8 +1754,11 @@ impl GasciiApp {
                     )
                 });
                 let stamp = &mut self.slots[focus.ix()].stamps[slot];
-                if shrink {
-                    stamp.size = stamp.size.saturating_sub(1).max(1);
+                // `size` is always >= 1 by construction, so a plain decrement guarded on `> 1` is
+                // the whole floor check — no need for the `saturating_sub(1).max(1)` double-guard
+                // that pattern used to require.
+                if shrink && stamp.size > 1 {
+                    stamp.size -= 1;
                 }
                 if grow {
                     stamp.size = (stamp.size + 1).min(MAX_TOOL_SIZE);
@@ -1577,29 +1775,42 @@ impl GasciiApp {
         self.recent_files.truncate(8);
     }
 
+    /// File ▸ New…'s body: flush first, then either open the New dialog directly (a clean document)
+    /// or veto through the unsaved-changes confirm. Shared by the menu click and the `Ctrl+N` chord
+    /// so the two can never drift apart.
+    fn new_document_via_menu(&mut self) {
+        self.flush_all();
+        if self.is_dirty() {
+            self.confirm = Some(PendingConfirm::NewDocument);
+        } else {
+            self.open_new_dialog();
+        }
+    }
+
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
-                if ui.button("New…").clicked() {
-                    self.flush_all();
-                    if self.is_dirty() {
-                        self.confirm = Some(PendingConfirm::NewDocument);
-                    } else {
-                        self.open_new_dialog();
-                    }
+                if ui.add(egui::Button::new("New…").shortcut_text(chords::chord_label(ChordId::New))).clicked() {
+                    self.new_document_via_menu();
                 }
-                if ui.button("Open…").clicked() {
+                if ui.add(egui::Button::new("Open…").shortcut_text(chords::chord_label(ChordId::Open))).clicked() {
                     self.open_file();
                 }
                 ui.separator();
-                if ui.add(egui::Button::new("Save").shortcut_text("Ctrl+S")).clicked() {
+                if ui.add(egui::Button::new("Save").shortcut_text(chords::chord_label(ChordId::Save))).clicked() {
                     self.save_file();
                 }
-                if ui.button("Save As…").clicked() {
+                if ui
+                    .add(egui::Button::new("Save As…").shortcut_text(chords::chord_label(ChordId::SaveAs)))
+                    .clicked()
+                {
                     self.save_file_as();
                 }
                 ui.separator();
-                if ui.add(egui::Button::new("Export…").shortcut_text("Ctrl+Shift+E")).clicked() {
+                if ui
+                    .add(egui::Button::new("Export…").shortcut_text(chords::chord_label(ChordId::ExportDialog)))
+                    .clicked()
+                {
                     self.open_export_dialog();
                 }
                 ui.separator();
@@ -1626,11 +1837,14 @@ impl GasciiApp {
                 // Disabled mid-gesture for the same reason handle_keys ignores Ctrl+Z/Y then:
                 // an undo under an in-flight stroke's pinned `before` values commits stale cells.
                 let no_stroke = !self.stroke_in_progress();
-                let undo = egui::Button::new("Undo").shortcut_text("Ctrl+Z");
+                let undo = egui::Button::new("Undo").shortcut_text(chords::chord_label(ChordId::Undo));
                 if ui.add_enabled(self.history.can_undo() && no_stroke, undo).clicked() {
                     self.request_undo();
                 }
-                let redo = egui::Button::new("Redo").shortcut_text("Ctrl+Y");
+                // Both Ctrl+Shift+Z and Ctrl+Y trigger a redo — `ChordId::Redo`'s label documents
+                // both, closing a label-drift gap (Ctrl+Shift+Z was previously undocumented here
+                // even though it already worked).
+                let redo = egui::Button::new("Redo").shortcut_text(chords::chord_label(ChordId::Redo));
                 if ui.add_enabled(self.history.can_redo() && no_stroke, redo).clicked() {
                     self.request_redo();
                 }
@@ -1640,11 +1854,12 @@ impl GasciiApp {
                     .and_then(|b| self.slot(b).tool.selection_overlay())
                     .and_then(|v| v.marquee)
                     .is_some();
-                let copy = egui::Button::new("Copy Selection").shortcut_text("Ctrl+C");
+                let copy = egui::Button::new("Copy Selection").shortcut_text(chords::chord_label(ChordId::Copy));
                 if ui.add_enabled(can_copy, copy).clicked() {
                     self.copy_selection(ui.ctx());
                 }
-                let copy_all = egui::Button::new("Copy All as Text").shortcut_text("Ctrl+Shift+C");
+                let copy_all =
+                    egui::Button::new("Copy All as Text").shortcut_text(chords::chord_label(ChordId::CopyAll));
                 if ui.add(copy_all).clicked() {
                     // Flush first: a pending text burst or floating selection lives only in
                     // `self.slots[0].tool`'s overlay until committed into `self.doc` — copying without
@@ -1653,9 +1868,24 @@ impl GasciiApp {
                     self.flush_all();
                     ui.ctx().copy_text(export_text(&self.doc));
                 }
-                let paste = egui::Button::new("Paste").shortcut_text("Ctrl+V");
+                let paste = egui::Button::new("Paste").shortcut_text(chords::chord_label(ChordId::Paste));
                 if ui.add(paste).clicked() {
                     self.paste_from_os_clipboard();
+                }
+                let cut = egui::Button::new("Cut").shortcut_text(chords::chord_label(ChordId::Cut));
+                if ui.add_enabled(can_copy, cut).clicked() {
+                    let ctx = ui.ctx().clone();
+                    self.cut_selection(&ctx);
+                }
+                ui.separator();
+                let select_all = egui::Button::new("Select All").shortcut_text(chords::chord_label(ChordId::SelectAll));
+                if ui.add(select_all).clicked() {
+                    self.select_all();
+                }
+                let can_deselect = self.selection_slot().is_some();
+                let deselect = egui::Button::new("Deselect").shortcut_text(chords::chord_label(ChordId::Deselect));
+                if ui.add_enabled(can_deselect, deselect).clicked() {
+                    self.deselect();
                 }
                 ui.separator();
                 if ui.button("Resize Canvas…").clicked() {
@@ -1675,17 +1905,20 @@ impl GasciiApp {
                 }
             });
             ui.menu_button("View", |ui| {
-                if ui.add(egui::Button::new("Zoom In").shortcut_text("+")).clicked() {
+                if ui.add(egui::Button::new("Zoom In").shortcut_text(chords::chord_label(ChordId::ZoomIn))).clicked() {
                     self.step_zoom(1);
                 }
-                if ui.add(egui::Button::new("Zoom Out").shortcut_text("−")).clicked() {
+                if ui
+                    .add(egui::Button::new("Zoom Out").shortcut_text(chords::chord_label(ChordId::ZoomOut)))
+                    .clicked()
+                {
                     self.step_zoom(-1);
                 }
-                if ui.add(egui::Button::new("Fit").shortcut_text("Ctrl+0")).clicked() {
+                if ui.add(egui::Button::new("Fit").shortcut_text(chords::chord_label(ChordId::Fit))).clicked() {
                     self.pending_fit = true;
                 }
                 ui.separator();
-                ui.checkbox(&mut self.show_grid, "Grid");
+                ui.checkbox(&mut self.show_grid, format!("Grid  ({})", chords::chord_label(ChordId::ToggleGrid)));
                 ui.separator();
                 ui.menu_button("Theme", |ui| {
                     let mut pref = self.theme_pref;
@@ -1704,7 +1937,10 @@ impl GasciiApp {
                 // hold regardless of which chrome happens to expose it.
                 let is_fs = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
                 let label = if is_fs { "Exit Full Screen Mode" } else { "Enter Full Screen Mode" };
-                if ui.add(egui::Button::new(label).shortcut_text("F11")).clicked() {
+                if ui
+                    .add(egui::Button::new(label).shortcut_text(chords::chord_label(ChordId::ToggleFullscreen)))
+                    .clicked()
+                {
                     let ctx = ui.ctx().clone();
                     self.toggle_fullscreen(&ctx);
                 }
@@ -1751,6 +1987,39 @@ impl GasciiApp {
         // An unrelated prior error must not read as if this fresh dialog already failed.
         self.last_error = None;
         self.export_dialog_open = true;
+    }
+
+    /// The `?` keyboard-shortcuts overlay: every tool's own letter shortcut (`tools()`) plus every
+    /// host chord (`chords::chord_rows()`), read-only. Built on the same `dialog::modal` surface as
+    /// every other dialog, so it inherits Escape/backdrop-click/close-box dismissal for free and
+    /// needs no bespoke Cancel/Confirm row of its own. A plugin-registered `tick`-driven shortcut
+    /// (e.g. `gascii-anim`'s `Space`/`,`/`.`/`Shift+D`) has no enforced way to surface a label here
+    /// today — see `gascii_plugin_api::Plugin::tick`'s own doc comment for that limitation.
+    fn help_overlay(&mut self, ctx: &egui::Context) {
+        if !self.help_overlay_open {
+            return;
+        }
+        let t = crate::ui::theme::current(ctx);
+        let resp = dialog::modal(ctx, "help_overlay", "Keyboard Shortcuts", |ui| {
+            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("TOOLS").font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary),
+                );
+                for def in tools() {
+                    help_overlay_row(ui, &t, def.key.name(), def.name);
+                }
+                ui.add_space(10.0);
+                ui.label(
+                    egui::RichText::new("COMMANDS").font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary),
+                );
+                for (name, label) in chords::chord_rows() {
+                    help_overlay_row(ui, &t, label, name);
+                }
+            });
+        });
+        if resp.dismissed {
+            self.help_overlay_open = false;
+        }
     }
 
     /// New Document dialog: width/height steppers, a preset segment, and a background well.
@@ -2460,6 +2729,17 @@ fn anchor_grid(ui: &mut egui::Ui, anchor: &mut ResizeAnchor) {
     painter.rect_stroke(rect, 0.0, eframe::egui::Stroke::new(1.0, t.border_strong), eframe::egui::StrokeKind::Inside);
 }
 
+/// One row of the `?` overlay: a fixed-width key label, then the action it fires.
+fn help_overlay_row(ui: &mut egui::Ui, t: &crate::ui::theme::Tokens, key_label: &str, name: &str) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            egui::Vec2::new(90.0, 16.0),
+            egui::Label::new(egui::RichText::new(key_label).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_text)),
+        );
+        ui.label(egui::RichText::new(name).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary));
+    });
+}
+
 impl eframe::App for GasciiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if self.first_frame {
@@ -2581,6 +2861,7 @@ impl eframe::App for GasciiApp {
         self.resize_dialog(&ctx);
         self.export_dialog(&ctx);
         self.confirm_dialog(&ctx);
+        self.help_overlay(&ctx);
 
         // Last, on the foreground layer: with the OS frame gone, nothing else draws the window's
         // own outline. Skipped while fullscreen — there is no window edge to outline, and kiosk's
@@ -3515,7 +3796,7 @@ mod tests {
         let brush_slot = sized_slot(ToolKind::Brush).expect("Brush is a sized tool");
         app.slots[Binding::L.ix()].stamps[brush_slot].size = 10;
 
-        crate::canvas::begin_gesture(&mut app, Binding::L, 0, 0);
+        crate::canvas::begin_gesture(&mut app, Binding::L, 0, 0, false, false);
         assert_eq!(app.stroke_owner, Some(Binding::L), "sanity: L is mid-stroke");
         assert_eq!(
             app.pressure_stamp_size, None,
@@ -3735,7 +4016,7 @@ mod tests {
         assert_eq!(tctx.layer, 2, "tool_ctx's layer must follow active_layer");
 
         app.bind(Binding::L, ToolKind::Eyedropper);
-        crate::canvas::begin_gesture(&mut app, Binding::L, 3, 3);
+        crate::canvas::begin_gesture(&mut app, Binding::L, 3, 3, false, false);
         let (expected_fg, _) = gascii_core::eyedrop(&app.doc.cell(2, 3, 3).copied().unwrap());
         assert_eq!(
             app.active_fg, expected_fg,
@@ -3811,7 +4092,7 @@ mod tests {
         app.active_fg = Rgba::WHITE;
         app.active_bg = Rgba::TRANSPARENT;
 
-        crate::canvas::begin_gesture(&mut app, Binding::L, 2, 2);
+        crate::canvas::begin_gesture(&mut app, Binding::L, 2, 2, false, false);
         let tctx = crate::canvas::tool_ctx(&app, Binding::L);
         if let ToolResponse::Commit(Some(edit)) = app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc) {
             app.apply_edit(edit, Some(Binding::L));
@@ -3998,12 +4279,12 @@ mod tests {
         app.slots[Binding::R.ix()] = ToolSlot::new(ToolKind::Selection);
 
         // A press on L starts a marquee and claims the keyboard.
-        crate::canvas::begin_gesture(&mut app, Binding::L, 1, 1);
+        crate::canvas::begin_gesture(&mut app, Binding::L, 1, 1, false, false);
         assert_eq!(app.keyboard_owner, Some(Binding::L));
         assert_eq!(app.selection_slot(), Some(Binding::L));
 
         // A press on R takes over: ownership moves, and it is still the only session.
-        crate::canvas::begin_gesture(&mut app, Binding::R, 4, 4);
+        crate::canvas::begin_gesture(&mut app, Binding::R, 4, 4, false, false);
         assert_eq!(app.keyboard_owner, Some(Binding::R));
         assert_eq!(app.selection_slot(), Some(Binding::R), "two selections would be ambiguous");
     }
@@ -4052,6 +4333,35 @@ mod tests {
     fn paste_text_with_no_internal_clipboard_is_always_external() {
         assert!(!is_own_clipboard_text("anything", None));
         assert!(!is_own_clipboard_text("", None));
+    }
+
+    #[test]
+    fn copy_events_with_no_event_copy_present_fires_neither_copy_nor_copy_all() {
+        let events = [egui::Event::Key {
+            key: egui::Key::C,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        }];
+        assert_eq!(
+            copy_events(&events, false),
+            (false, false),
+            "a bare Event::Key{{C}} is the exact fiction egui-winit never produces for the clipboard \
+             chord — it must not fire copy"
+        );
+    }
+
+    #[test]
+    fn copy_events_with_event_copy_and_no_shift_fires_plain_copy_only() {
+        let events = [egui::Event::Copy];
+        assert_eq!(copy_events(&events, false), (true, false));
+    }
+
+    #[test]
+    fn copy_events_with_event_copy_and_shift_held_fires_copy_all_only() {
+        let events = [egui::Event::Copy];
+        assert_eq!(copy_events(&events, true), (false, true));
     }
 
     #[test]
@@ -4162,7 +4472,7 @@ mod tests {
         app.acquire_keyboard(Binding::L);
 
         // Grab the float: the press starts a Move stroke and takes stroke ownership.
-        crate::canvas::begin_gesture(&mut app, Binding::L, 3, 3);
+        crate::canvas::begin_gesture(&mut app, Binding::L, 3, 3, false, false);
         assert_eq!(app.stroke_owner, Some(Binding::L), "sanity: L is mid-stroke");
         assert!(!app.is_dirty(), "sanity: nothing committed yet");
 
@@ -4180,7 +4490,7 @@ mod tests {
     fn end_session_commits_pending_work_even_for_the_stroke_owning_binding() {
         let mut app = GasciiApp::headless();
         app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
-        crate::canvas::begin_gesture(&mut app, Binding::L, 0, 0);
+        crate::canvas::begin_gesture(&mut app, Binding::L, 0, 0, false, false);
         assert_eq!(app.stroke_owner, Some(Binding::L), "sanity: the press is still held");
         let tctx = crate::canvas::tool_ctx(&app, Binding::L);
         app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('h'), &tctx, &app.doc);
@@ -4262,14 +4572,14 @@ mod tests {
         app.slots[Binding::R.ix()] = ToolSlot::new(ToolKind::Selection);
 
         // A press on L starts a marquee and claims the keyboard.
-        crate::canvas::begin_gesture(&mut app, Binding::L, 1, 1);
+        crate::canvas::begin_gesture(&mut app, Binding::L, 1, 1, false, false);
         assert!(
             app.slots[Binding::L.ix()].tool.selection_overlay().and_then(|v| v.marquee).is_some(),
             "sanity: L has a marquee"
         );
 
         // A press on R takes over: L's session must be fully ended, not just masked.
-        crate::canvas::begin_gesture(&mut app, Binding::R, 4, 4);
+        crate::canvas::begin_gesture(&mut app, Binding::R, 4, 4, false, false);
 
         assert_eq!(app.keyboard_owner(), Some(Binding::R));
         assert!(
@@ -4351,7 +4661,7 @@ mod tests {
         assert_eq!(app.doc.cell(0, 0, 0).unwrap().ch, ' ', "sanity: a paste floats, it doesn't write yet");
 
         // Grab the float and drag it.
-        assert!(crate::canvas::begin_gesture(&mut app, Binding::L, 0, 0), "the press on the float starts a drag");
+        assert!(crate::canvas::begin_gesture(&mut app, Binding::L, 0, 0, false, false), "the press on the float starts a drag");
         assert_eq!(app.stroke_owner, Some(Binding::L));
         let tctx = crate::canvas::tool_ctx(&app, Binding::L);
         app.slots[Binding::L.ix()].tool.update(ToolEvent::Drag { x: 2, y: 2 }, &tctx, &app.doc);
@@ -4523,7 +4833,7 @@ mod tests {
         app.acquire_keyboard(Binding::L);
 
         // R: a pencil stroke still physically held when Open fires.
-        assert!(crate::canvas::begin_gesture(&mut app, Binding::R, 2, 2));
+        assert!(crate::canvas::begin_gesture(&mut app, Binding::R, 2, 2, false, false));
         let r = crate::canvas::tool_ctx(&app, Binding::R);
         app.slots[Binding::R.ix()].tool.update(ToolEvent::Drag { x: 3, y: 2 }, &r, &app.doc);
         assert_eq!(app.stroke_owner, Some(Binding::R), "sanity: R is mid-stroke");
@@ -4633,6 +4943,10 @@ mod tests {
         app.new_dialog_open = true;
         assert!(app.modal_open());
         app.new_dialog_open = false;
+
+        app.help_overlay_open = true;
+        assert!(app.modal_open());
+        app.help_overlay_open = false;
 
         assert!(!app.modal_open());
     }
@@ -5148,7 +5462,7 @@ mod tests {
         let old_bg = Rgba(10, 20, 30, 255);
         app.doc.set_cell(0, 2, 2, gascii_core::Cell { ch: 'x', fg: Rgba::WHITE, bg: old_bg });
 
-        crate::canvas::begin_gesture(&mut app, Binding::L, 2, 2);
+        crate::canvas::begin_gesture(&mut app, Binding::L, 2, 2, false, false);
         assert_eq!(app.stroke_owner, Some(Binding::L));
         assert!(
             !app.slots[Binding::L.ix()].tool.pending().is_empty(),
@@ -5191,7 +5505,7 @@ mod tests {
         app.slots[Binding::R.ix()] = ToolSlot::new(ToolKind::Pencil);
         app.pressure_stamp_size = Some(3); // simulates a leftover value some other path failed to clear
 
-        crate::canvas::begin_gesture(&mut app, Binding::R, 0, 0);
+        crate::canvas::begin_gesture(&mut app, Binding::R, 0, 0, false, false);
 
         assert_eq!(
             app.pressure_stamp_size, None,
@@ -5289,7 +5603,7 @@ mod tests {
     #[test]
     fn escape_does_not_exit_fullscreen_while_a_stroke_is_mid_drag() {
         let mut app = GasciiApp::headless();
-        crate::canvas::begin_gesture(&mut app, Binding::L, 0, 0);
+        crate::canvas::begin_gesture(&mut app, Binding::L, 0, 0, false, false);
         assert!(app.stroke_in_progress(), "sanity: a stroke is mid-drag");
 
         let ctx = egui::Context::default();
@@ -5615,7 +5929,7 @@ mod tests {
             app.active_glyph = 'Q';
             assert!(app.recent_glyphs.is_empty(), "{kind:?}: sanity, RECENT starts empty");
 
-            crate::canvas::begin_gesture(&mut app, Binding::L, 0, 0);
+            crate::canvas::begin_gesture(&mut app, Binding::L, 0, 0, false, false);
             let tctx = crate::canvas::tool_ctx(&app, Binding::L);
             let resp = app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc);
             app.stroke_owner = None;
@@ -5659,7 +5973,7 @@ mod tests {
         // R: a first Pencil stroke stamps layer 2's (2,2) with 'Z'.
         app.bind(Binding::R, ToolKind::Pencil);
         app.active_glyph = 'Z';
-        crate::canvas::begin_gesture(&mut app, Binding::R, 2, 2);
+        crate::canvas::begin_gesture(&mut app, Binding::R, 2, 2, false, false);
         let r_tctx = crate::canvas::tool_ctx(&app, Binding::R);
         if let ToolResponse::Commit(Some(edit)) =
             app.slots[Binding::R.ix()].tool.update(ToolEvent::Release, &r_tctx, &app.doc)
@@ -5682,7 +5996,7 @@ mod tests {
         // R: a second Pencil stroke, still mid-L-session, touches the SAME cell again — its commit
         // must resync L against layer 2's new value ('Y'), not layer 0's untouched blank.
         app.active_glyph = 'Y';
-        crate::canvas::begin_gesture(&mut app, Binding::R, 2, 2);
+        crate::canvas::begin_gesture(&mut app, Binding::R, 2, 2, false, false);
         let r_tctx2 = crate::canvas::tool_ctx(&app, Binding::R);
         if let ToolResponse::Commit(Some(edit)) =
             app.slots[Binding::R.ix()].tool.update(ToolEvent::Release, &r_tctx2, &app.doc)
@@ -5726,5 +6040,616 @@ mod tests {
         let a = tools().as_ptr();
         let b = tools().as_ptr();
         assert_eq!(a, b, "tools() must not rebuild the registry on every call");
+    }
+
+    fn selection_at_1_1(app: &mut GasciiApp) {
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Selection);
+        app.doc.set_cell(0, 1, 1, cell('x'));
+        let tctx = crate::canvas::tool_ctx(app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 1, y: 1 }, &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc);
+        app.acquire_keyboard(Binding::L);
+    }
+
+    fn copy_event() -> egui::Event {
+        egui::Event::Copy
+    }
+
+    /// The real fix `handle_keys` needed: `Event::Copy` (what egui-winit actually emits for
+    /// Ctrl+C/Cmd+C) with a live selection must copy that selection's text into the internal
+    /// clipboard — not the dead `consume_key(COMMAND, C)` pair that never fired because
+    /// `Event::Key{C}` is never produced for this chord.
+    #[test]
+    fn ctrl_c_via_event_copy_copies_the_live_selections_text_to_the_internal_clipboard() {
+        let mut app = GasciiApp::headless();
+        selection_at_1_1(&mut app);
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(copy_event());
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        let patch = app.internal_clipboard.as_ref().expect("Ctrl+C must populate the internal clipboard");
+        assert_eq!(patch.to_text(), "x", "the copied patch must hold the selected cell's glyph");
+    }
+
+    /// `Ctrl+Shift+C`'s copy-all path, discriminated purely from `InputState::modifiers.shift` at
+    /// the moment `Event::Copy` is observed, must copy the whole document as text to the OS
+    /// clipboard, not just the live selection.
+    #[test]
+    fn ctrl_shift_c_via_event_copy_with_shift_held_copies_the_whole_document_as_text() {
+        let mut app = GasciiApp::headless();
+        app.doc.set_cell(0, 0, 0, cell('z'));
+
+        let ctx = egui::Context::default();
+        let mut raw =
+            egui::RawInput { modifiers: egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, ..Default::default() };
+        raw.events.push(copy_event());
+        let output = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        let expected = export_text(&app.doc);
+        let copied = output
+            .platform_output
+            .commands
+            .iter()
+            .any(|c| matches!(c, egui::OutputCommand::CopyText(t) if *t == expected));
+        assert!(copied, "Ctrl+Shift+C must copy the whole document's exported text to the OS clipboard");
+    }
+
+    /// A bare `Event::Key{key: C, modifiers: COMMAND}` — the event egui-winit never actually
+    /// produces for this chord — must NOT fire copy. Reproducing that event shape as if it were
+    /// real is the exact fiction that let the dead `consume_key` pair look correct while never
+    /// actually firing.
+    #[test]
+    fn a_bare_event_key_c_with_no_event_copy_present_does_not_fire_copy() {
+        let mut app = GasciiApp::headless();
+        selection_at_1_1(&mut app);
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput { modifiers: egui::Modifiers::COMMAND, ..Default::default() };
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::C,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        });
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert!(
+            app.internal_clipboard.is_none(),
+            "a synthetic Event::Key{{C}} with no real Event::Copy must not copy anything — this is the \
+             exact fiction that let the dead consume_key pair look correct while never actually firing"
+        );
+    }
+
+    /// `Event::Copy` also fires on `Ctrl+Insert` (Windows) — the app receives the exact same event
+    /// shape either way, so scanning for the event variant (rather than a specific key chord)
+    /// handles this chord for free. Pinned as its own dedicated test.
+    #[test]
+    fn event_copy_from_ctrl_insert_copies_the_live_selection_identically_to_ctrl_c() {
+        let mut app = GasciiApp::headless();
+        selection_at_1_1(&mut app);
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(copy_event()); // egui-winit emits the identical Event::Copy for Ctrl+Insert
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert_eq!(
+            app.internal_clipboard.as_ref().map(|p| p.to_text()).as_deref(),
+            Some("x"),
+            "Ctrl+Insert's Event::Copy must copy the live selection just like Ctrl+C's"
+        );
+    }
+
+    /// The more-specific chord (Redo, Ctrl+Shift+Z) must win over the less-specific one (Undo,
+    /// Ctrl+Z) that would otherwise also match via `matches_logically`'s modifier-superset rule —
+    /// driven through the real `handle_keys`, not just a pure predicate, so a future reordering of
+    /// the two `consume_key` calls is actually caught.
+    #[test]
+    fn ctrl_shift_z_via_handle_keys_fires_redo_not_undo() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Pencil);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &app.doc);
+        if let ToolResponse::Commit(Some(edit)) =
+            app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc)
+        {
+            app.apply_edit(edit, Some(Binding::L));
+        }
+        app.stroke_owner = None;
+        app.request_undo(); // one edit undone: redo is now available, undo is not
+        assert!(app.history.can_redo(), "sanity: a redo is available");
+        assert!(!app.history.can_undo(), "sanity: no undo is available after the single edit was undone");
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        });
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert_eq!(app.doc.cell(0, 0, 0).unwrap().ch, '#', "Ctrl+Shift+Z must have redone the edit");
+        assert!(!app.history.can_redo(), "the redo must have actually fired, emptying the redo stack");
+    }
+
+    /// The other precedence-sensitive pair: Ctrl+Shift+C (copy-all) firing must mean plain Ctrl+C's
+    /// copy-selection path does NOT also run — proven by asserting the internal (selection)
+    /// clipboard stays untouched while the OS clipboard receives the whole document, not merely
+    /// that copy-all's own effect happened in isolation.
+    #[test]
+    fn ctrl_shift_c_fires_copy_all_and_never_also_the_plain_selection_copy_path() {
+        let mut app = GasciiApp::headless();
+        selection_at_1_1(&mut app);
+        assert!(app.internal_clipboard.is_none(), "sanity: nothing has been copied yet");
+
+        let ctx = egui::Context::default();
+        let mut raw =
+            egui::RawInput { modifiers: egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, ..Default::default() };
+        raw.events.push(copy_event());
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert!(
+            app.internal_clipboard.is_none(),
+            "Ctrl+Shift+C must not also run the plain-copy path (copy_selection), which would have \
+             populated the internal clipboard"
+        );
+    }
+
+    #[test]
+    fn tool_key_collides_with_reserved_flags_a_key_a_global_chord_already_owns() {
+        assert!(tool_key_collides_with_reserved(egui::Key::X), "X is SwapColors's reserved key");
+        assert!(!tool_key_collides_with_reserved(egui::Key::Q), "Q is not reserved by any global chord");
+    }
+
+    /// `Space` has no `CHORDS` row of its own (the animation play/pause hold lives entirely inside
+    /// `gascii-anim`, driven by `key_down` rather than a `consume_key` pattern this table could
+    /// represent) — it must still be caught by the collision predicate, or a plugin could silently
+    /// claim it as a tool shortcut with nothing to stop it.
+    #[test]
+    fn tool_key_collides_with_reserved_flags_space_even_though_it_has_no_chords_row_of_its_own() {
+        assert!(tool_key_collides_with_reserved(egui::Key::Space), "Space must be reserved for gascii-anim's play/pause hold");
+    }
+
+    /// Mirrors `tool_shortcuts_are_unique`'s shape, but for the collision `tools()`-internal check
+    /// structurally cannot see: a synthetic plugin tool row bound to a reserved global chord key
+    /// must be caught by `tool_key_collides_with_reserved`, driven against a real row from `tools()`
+    /// rather than only the bare predicate.
+    #[test]
+    fn a_plugin_tool_row_bound_to_a_reserved_global_chord_key_is_caught_by_the_collision_predicate() {
+        // `X` is real production data (SwapColors's own key) — reusing it here proves the
+        // predicate reads the live registry, not a hand-copied literal.
+        let colliding = ToolDef {
+            kind: ToolKind::Brush,
+            name: "synthetic",
+            key: egui::Key::X,
+            tip: "",
+            make: || Box::new(InertTool),
+            stamp_slot: None,
+            holds_session: false,
+            shows_hover: false,
+            stamps_glyph: false,
+            suppresses_shortcuts: false,
+            kiosk_visible: false,
+            plugin_slot: Some(0),
+            pressure_sizeable: false,
+            wants_extra_ctx: false,
+        };
+        assert!(
+            tool_key_collides_with_reserved(colliding.key),
+            "a plugin row bound to X must be flagged — X is already SwapColors's reserved key"
+        );
+    }
+
+    fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
+    }
+
+    /// `Ctrl+N` on a clean document must open the New dialog directly, exactly like clicking
+    /// File ▸ New… on a clean document — no confirm veto in the way.
+    #[test]
+    fn ctrl_n_on_a_clean_document_opens_the_new_dialog_directly() {
+        let mut app = GasciiApp::headless();
+        assert!(!app.is_dirty(), "sanity: a fresh headless app starts clean");
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput { modifiers: egui::Modifiers::COMMAND, ..Default::default() };
+        raw.events.push(key_event(egui::Key::N, egui::Modifiers::COMMAND));
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert!(app.new_dialog_open, "Ctrl+N on a clean document must open the New dialog");
+        assert!(app.confirm.is_none(), "a clean document must not raise the unsaved-changes veto");
+    }
+
+    /// `Ctrl+N` on a dirty document must veto through the same unsaved-changes confirm the menu
+    /// click uses — proving `new_document_via_menu` is genuinely shared, not reimplemented.
+    #[test]
+    fn ctrl_n_on_a_dirty_document_raises_the_unsaved_changes_confirm_instead_of_opening_new_directly() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Pencil);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &app.doc);
+        if let ToolResponse::Commit(Some(edit)) =
+            app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc)
+        {
+            app.apply_edit(edit, Some(Binding::L));
+        }
+        app.stroke_owner = None;
+        assert!(app.is_dirty(), "sanity: the committed stroke made the document dirty");
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput { modifiers: egui::Modifiers::COMMAND, ..Default::default() };
+        raw.events.push(key_event(egui::Key::N, egui::Modifiers::COMMAND));
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert_eq!(app.confirm, Some(PendingConfirm::NewDocument), "a dirty document must veto through the confirm");
+        assert!(!app.new_dialog_open, "the New dialog must not open directly while the veto is pending");
+    }
+
+    /// `G` toggles the grid overlay, gated on `!focused` exactly like `X` (SwapColors) already is —
+    /// driven through the real `handle_keys`, not the pure `consume_generic_chords` helper alone.
+    #[test]
+    fn g_toggles_the_grid_overlay_through_handle_keys_while_unfocused() {
+        let mut app = GasciiApp::headless();
+        let starting = app.show_grid;
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(key_event(egui::Key::G, egui::Modifiers::NONE));
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert_eq!(app.show_grid, !starting, "G must flip show_grid");
+    }
+
+    /// `G` must be suppressed while a widget has focus — the same `!focused` gate `X` already
+    /// obeys, so typing "g" into a focused field never toggles the grid.
+    #[test]
+    fn g_is_suppressed_while_a_widget_has_keyboard_focus() {
+        let mut app = GasciiApp::headless();
+        let starting = app.show_grid;
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(key_event(egui::Key::G, egui::Modifiers::NONE));
+        let _ = ctx.run_ui(raw, |ui| {
+            ui.memory_mut(|m| m.request_focus(egui::Id::new("qa_test_fake_focused_widget")));
+            app.handle_keys(ui);
+        });
+
+        assert_eq!(app.show_grid, starting, "a focused widget must suppress G");
+    }
+
+    /// `?` opens the keyboard-shortcuts overlay while unfocused, the same `GenericUnfocused` gate
+    /// `G`/`X` already use.
+    #[test]
+    fn question_mark_via_handle_keys_opens_the_help_overlay_while_unfocused() {
+        let mut app = GasciiApp::headless();
+        assert!(!app.help_overlay_open, "sanity: the overlay starts closed");
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(key_event(egui::Key::Questionmark, egui::Modifiers::NONE));
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert!(app.help_overlay_open, "? must open the overlay");
+    }
+
+    #[test]
+    fn question_mark_is_suppressed_while_a_widget_has_keyboard_focus() {
+        let mut app = GasciiApp::headless();
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(key_event(egui::Key::Questionmark, egui::Modifiers::NONE));
+        let _ = ctx.run_ui(raw, |ui| {
+            ui.memory_mut(|m| m.request_focus(egui::Id::new("qa_test_fake_focused_widget")));
+            app.handle_keys(ui);
+        });
+
+        assert!(!app.help_overlay_open, "a focused widget must suppress ?");
+    }
+
+    /// While open, the overlay counts as a modal — `handle_keys` (and therefore every other chord)
+    /// must stop running, matching every other dialog's own `modal_open()` coverage.
+    #[test]
+    fn help_overlay_open_suppresses_handle_keys_via_modal_open() {
+        let mut app = GasciiApp::headless();
+        app.help_overlay_open = true;
+        assert!(app.modal_open(), "the open overlay must count as a modal");
+    }
+
+    /// The overlay renders without panicking and is dismissed (Escape, matching every other
+    /// `dialog::modal`-built dialog) by clearing `help_overlay_open` — not by a second `?` press,
+    /// which can never reach `handle_keys` while the overlay counts as a modal.
+    #[test]
+    fn help_overlay_renders_and_closes_on_escape_dismiss() {
+        let mut app = GasciiApp::headless();
+        app.help_overlay_open = true;
+
+        let ctx = egui::Context::default();
+        fonts::install_fonts(&ctx);
+        // `egui::Modal`'s "am I the topmost modal" bookkeeping is layer-order state the context
+        // only has after at least one real frame — mirrors how the overlay is always already open
+        // for at least a frame before a real Escape press can reach it.
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.help_overlay(ui.ctx()));
+        assert!(app.help_overlay_open, "sanity: a no-input frame must not close the overlay");
+
+        let mut raw = egui::RawInput::default();
+        raw.events.push(key_event(egui::Key::Escape, egui::Modifiers::NONE));
+        let _ = ctx.run_ui(raw, |ui| app.help_overlay(ui.ctx()));
+
+        assert!(!app.help_overlay_open, "Escape must dismiss the overlay, matching every other dialog");
+    }
+
+    /// `Ctrl+=`/`Ctrl+-` request the same one-step zoom the plain `+`/`-` chords and the View menu
+    /// already do — proven through the deferred `pending_step_zoom` field `step_zoom` writes,
+    /// mirroring how `canvas::show` itself applies the request.
+    #[test]
+    fn ctrl_equals_and_ctrl_minus_request_the_same_one_step_zoom_as_the_plain_aliases() {
+        for (key, expected_dir) in [(egui::Key::Equals, 1), (egui::Key::Minus, -1)] {
+            let mut app = GasciiApp::headless();
+            let ctx = egui::Context::default();
+            let mut raw = egui::RawInput { modifiers: egui::Modifiers::COMMAND, ..Default::default() };
+            raw.events.push(key_event(key, egui::Modifiers::COMMAND));
+            let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+            assert_eq!(
+                app.pending_step_zoom, expected_dir,
+                "{key:?} with Ctrl held must request a one-step zoom in direction {expected_dir}"
+            );
+        }
+    }
+
+    /// `Ctrl+A` with neither binding already holding Selection must rebind L (`paste_target`'s
+    /// default) and select the whole document, without requiring a prior manual tool switch.
+    #[test]
+    fn ctrl_a_via_handle_keys_rebinds_l_to_selection_and_selects_the_whole_document_by_default() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Pencil);
+        app.bind(Binding::R, ToolKind::Eraser);
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput { modifiers: egui::Modifiers::COMMAND, ..Default::default() };
+        raw.events.push(key_event(egui::Key::A, egui::Modifiers::COMMAND));
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert_eq!(app.slot(Binding::L).kind, ToolKind::Selection, "Ctrl+A must rebind L by default");
+        assert_eq!(app.selection_slot(), Some(Binding::L));
+        assert_eq!(
+            app.slot(Binding::L).tool.selection_overlay().and_then(|v| v.marquee),
+            Some(gascii_core::CellRect {
+                x0: 0,
+                y0: 0,
+                x1: app.doc.width - 1,
+                y1: app.doc.height - 1
+            }),
+            "the marquee must span the full document"
+        );
+    }
+
+    /// `Ctrl+A` must prefer whichever binding already holds Selection — the same `paste_target`
+    /// rule `paste_text` already follows — rather than always defaulting to L.
+    #[test]
+    fn ctrl_a_via_handle_keys_prefers_a_binding_that_already_holds_selection() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Pencil);
+        app.bind(Binding::R, ToolKind::Selection);
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput { modifiers: egui::Modifiers::COMMAND, ..Default::default() };
+        raw.events.push(key_event(egui::Key::A, egui::Modifiers::COMMAND));
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert_eq!(app.slot(Binding::L).kind, ToolKind::Pencil, "L must be left untouched");
+        assert_eq!(app.selection_slot(), Some(Binding::R), "Ctrl+A must select through R, which already held it");
+    }
+
+    /// `Ctrl+A` must be suppressed while a widget has focus, matching Undo/Redo's own gate —
+    /// `egui::TextEdit`'s own Ctrl+A (select-all-in-field) must win instead.
+    #[test]
+    fn ctrl_a_is_suppressed_while_a_widget_has_keyboard_focus() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Pencil);
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput { modifiers: egui::Modifiers::COMMAND, ..Default::default() };
+        raw.events.push(key_event(egui::Key::A, egui::Modifiers::COMMAND));
+        let _ = ctx.run_ui(raw, |ui| {
+            ui.memory_mut(|m| m.request_focus(egui::Id::new("qa_test_fake_focused_widget")));
+            app.handle_keys(ui);
+        });
+
+        assert_eq!(app.slot(Binding::L).kind, ToolKind::Pencil, "a focused widget must suppress Ctrl+A");
+    }
+
+    /// A live canvas Text burst sets no egui widget focus, so the `widget_focused` gate above does
+    /// NOT suppress Ctrl+A during one — `select_all` still fires and rebinds the Text slot to
+    /// Selection via `set_tool`'s own `end_session`. The one thing that must never happen is silent
+    /// data loss: `end_session` flushes (commits) the pending burst before the slot's tool is
+    /// replaced, exactly like an Escape or a toolbox click already would, so the typed content lands
+    /// in the document rather than vanishing underneath the tool switch.
+    #[test]
+    fn ctrl_a_during_a_live_text_burst_commits_the_burst_before_switching_to_select_all() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &app.doc);
+        app.acquire_keyboard(Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('h'), &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('i'), &tctx, &app.doc);
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput { modifiers: egui::Modifiers::COMMAND, ..Default::default() };
+        raw.events.push(key_event(egui::Key::A, egui::Modifiers::COMMAND));
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert_eq!(app.doc.cell(0, 0, 0).unwrap().ch, 'h', "the burst's typed text must be committed, not discarded");
+        assert_eq!(app.doc.cell(0, 1, 0).unwrap().ch, 'i', "the burst's typed text must be committed, not discarded");
+        assert_eq!(app.slot(Binding::L).kind, ToolKind::Selection, "Ctrl+A must switch the Text binding to Selection");
+        assert_eq!(
+            app.slot(Binding::L).tool.selection_overlay().and_then(|v| v.marquee),
+            Some(gascii_core::CellRect { x0: 0, y0: 0, x1: app.doc.width - 1, y1: app.doc.height - 1 }),
+            "the marquee must span the full document"
+        );
+    }
+
+    /// The user-facing checkpoint dropped `D` (reset fg/bg) entirely: a bare, unmodified `D` press
+    /// must not be bound to anything — no color change, no tool switch, no document mutation.
+    /// `Ctrl+D`/`Shift+D` (Deselect/animation duplicate-frame) are unaffected; this only pins the
+    /// bare key.
+    #[test]
+    fn bare_d_key_is_bound_to_nothing_and_leaves_colors_and_tools_untouched() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Pencil);
+        app.bind(Binding::R, ToolKind::Eraser);
+        let (fg_before, bg_before) = (app.active_fg, app.active_bg);
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(key_event(egui::Key::D, egui::Modifiers::NONE));
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert_eq!(app.active_fg, fg_before, "bare D must not touch the active foreground color");
+        assert_eq!(app.active_bg, bg_before, "bare D must not touch the active background color");
+        assert_eq!(app.slot(Binding::L).kind, ToolKind::Pencil, "bare D must not rebind L");
+        assert_eq!(app.slot(Binding::R).kind, ToolKind::Eraser, "bare D must not rebind R");
+    }
+
+    /// `Ctrl+X` must copy the live selection AND delete it in the same change — never leave an
+    /// interim state where it only copied.
+    #[test]
+    fn ctrl_x_via_handle_keys_copies_and_deletes_the_selection_in_one_change() {
+        let mut app = GasciiApp::headless();
+        selection_at_1_1(&mut app);
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Cut);
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert_eq!(
+            app.internal_clipboard.as_ref().map(|p| p.to_text()).as_deref(),
+            Some("x"),
+            "Ctrl+X must copy the selection's text"
+        );
+        assert_eq!(app.doc.cell(0, 1, 1).unwrap().ch, ' ', "Ctrl+X must also delete the selected cell");
+    }
+
+    /// `Ctrl+X` with no live selection must be a true no-op — no clipboard write, no document
+    /// mutation, no panic.
+    #[test]
+    fn ctrl_x_via_handle_keys_is_a_no_op_without_a_live_selection() {
+        let mut app = GasciiApp::headless();
+        app.doc.set_cell(0, 1, 1, cell('x'));
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Cut);
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert!(app.internal_clipboard.is_none());
+        assert_eq!(app.doc.cell(0, 1, 1).unwrap().ch, 'x', "no selection: nothing may be deleted");
+    }
+
+    /// `Ctrl+D` must clear the marquee and release the keyboard without deleting the selection's
+    /// content — the same pair `canvas.rs`'s own Selection-Escape handling already performs.
+    #[test]
+    fn ctrl_d_via_handle_keys_clears_the_marquee_and_releases_the_keyboard_without_deleting_content() {
+        let mut app = GasciiApp::headless();
+        selection_at_1_1(&mut app);
+        assert_eq!(app.selection_slot(), Some(Binding::L), "sanity: L holds the live selection");
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput { modifiers: egui::Modifiers::COMMAND, ..Default::default() };
+        raw.events.push(key_event(egui::Key::D, egui::Modifiers::COMMAND));
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert_eq!(app.keyboard_owner(), None, "Ctrl+D must release the keyboard");
+        assert!(
+            app.slot(Binding::L).tool.selection_overlay().is_none(),
+            "Ctrl+D must clear the marquee"
+        );
+        assert_eq!(app.doc.cell(0, 1, 1).unwrap().ch, 'x', "Ctrl+D must never delete the selected content");
+    }
+
+    /// `Ctrl+D` with no live selection must be a true no-op.
+    #[test]
+    fn ctrl_d_via_handle_keys_is_a_no_op_without_a_live_selection() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Pencil);
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput { modifiers: egui::Modifiers::COMMAND, ..Default::default() };
+        raw.events.push(key_event(egui::Key::D, egui::Modifiers::COMMAND));
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert_eq!(app.slot(Binding::L).kind, ToolKind::Pencil, "nothing may change with no live selection");
+    }
+
+    /// `Plugin::tick`'s breaking return-type change end to end, mirroring
+    /// `digit_key_intensity_shortcut_through_handle_keys_sets_fixed_intensity_while_bound_and_unfocused`:
+    /// `AnimPlugin::tick`'s `Shift+D` duplicate-frame shortcut returns a `PanelOutcome` whose `edits`
+    /// must reach `apply_edit` via `handle_keys`'s new two-pass tick-then-drain loop
+    /// (`drain_panel_outcomes`), not just be silently discarded.
+    #[test]
+    fn plugin_tick_panel_outcome_edits_reach_apply_edit_via_handle_keys() {
+        let mut app = GasciiApp::headless();
+        let before_frame_count = app.doc.frame_count();
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput { modifiers: egui::Modifiers::SHIFT, ..Default::default() };
+        raw.events.push(key_event(egui::Key::D, egui::Modifiers::SHIFT));
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert_eq!(
+            app.doc.frame_count(), before_frame_count + 1,
+            "Shift+D's PanelOutcome::edits must reach apply_edit through drain_panel_outcomes"
+        );
+    }
+
+    /// The other half of the same wiring: `.`'s `PanelOutcome::set_active_frame` must reach
+    /// `switch_active_frame` through the same drain pass.
+    #[test]
+    fn plugin_tick_panel_outcome_set_active_frame_reaches_switch_active_frame_via_handle_keys() {
+        let mut app = GasciiApp::headless();
+        app.add_frame_via_menu(); // now 2 frames, so '.' has somewhere to advance to
+        assert_eq!(app.active_frame, 0);
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(key_event(egui::Key::Period, egui::Modifiers::NONE));
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert_eq!(
+            app.active_frame, 1,
+            "'.'s PanelOutcome::set_active_frame must reach switch_active_frame through drain_panel_outcomes"
+        );
+    }
+
+    /// `,`/`.`/`Shift+D` must all be suppressed while a widget has focus, matching every other
+    /// `gascii-anim` shortcut's own `!focused` gate.
+    #[test]
+    fn comma_period_and_shift_d_are_suppressed_while_a_widget_has_keyboard_focus() {
+        let mut app = GasciiApp::headless();
+        app.add_frame_via_menu();
+        app.switch_active_frame(1);
+        let before_frame_count = app.doc.frame_count();
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput { modifiers: egui::Modifiers::SHIFT, ..Default::default() };
+        raw.events.push(key_event(egui::Key::Comma, egui::Modifiers::NONE));
+        raw.events.push(key_event(egui::Key::D, egui::Modifiers::SHIFT));
+        let _ = ctx.run_ui(raw, |ui| {
+            ui.memory_mut(|m| m.request_focus(egui::Id::new("qa_test_fake_focused_widget")));
+            app.handle_keys(ui);
+        });
+
+        assert_eq!(app.active_frame, 1, "a focused widget must suppress ','");
+        assert_eq!(app.doc.frame_count(), before_frame_count, "a focused widget must suppress Shift+D");
     }
 }
