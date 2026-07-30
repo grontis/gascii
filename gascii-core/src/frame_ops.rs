@@ -83,10 +83,17 @@ fn check_caps(
     Ok(())
 }
 
-/// Inserts `frame` at `at` (clamped nowhere — an out-of-range `at` is a caller bug, not a runtime
-/// condition; `at == doc.frame_count()` appends). Validates `MAX_FRAMES`/the inserted frame's own
-/// `MAX_LAYERS`/`MAX_TOTAL_CELLS` before returning the `Edit` — defense in depth, mirroring
+/// Inserts `frame` at `at` (clamped nowhere within this crate — every in-crate caller is expected
+/// to pass a valid index, and this function itself still panics on one that isn't, exactly like
+/// `Vec::insert`; `at == doc.frame_count()` appends). Validates `MAX_FRAMES`/the inserted frame's
+/// own `MAX_LAYERS`/`MAX_TOTAL_CELLS` before returning the `Edit` — defense in depth, mirroring
 /// `resize_document`'s own belt-and-suspenders validation regardless of where the size originated.
+///
+/// The `Edit` this returns is still checked again at the one boundary that actually needs to
+/// survive a bad index without panicking: `History::apply` rejects a structural edit whose index
+/// no longer matches the document's shape as a silent no-op (see `edit.rs`'s
+/// `structural_edit_is_valid`) — that's the defense against an `Edit::AddFrame`/etc. arriving from
+/// outside this crate (e.g. a plugin's `PanelOutcome.edits`), not this function's own contract.
 pub fn add_frame(doc: &Document, at: usize, frame: Frame) -> Result<Edit, FrameOpError> {
     check_caps(doc, doc.frame_count() + 1, frame.layers.len(), frame.layers.len())?;
     let active_before = doc.active_frame();

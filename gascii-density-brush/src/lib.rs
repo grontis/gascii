@@ -3,8 +3,10 @@
 //! itself (`gascii_core::DensityBrush`) stays in `gascii-core`, unchanged — only what used to live
 //! directly on `GasciiApp` moves here.
 
+mod icon;
 mod plugin;
 mod theme;
 mod widgets;
 
-pub use plugin::{BrushPlugin, BRUSH};
+pub use icon::BRUSH_ICON;
+pub use plugin::{make, BrushPlugin, BRUSH, DESCRIPTOR};

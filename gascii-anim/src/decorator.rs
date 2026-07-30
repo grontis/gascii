@@ -35,6 +35,28 @@ impl OnionRenderer {
     }
 }
 
+/// The viewport facts every cell/frame paint helper below needs, bundled so those helpers stay
+/// under clippy's argument-count threshold without dropping any of them — `vp`/`origin`/`cell`/
+/// `visible` are exactly what every one of `OnionRenderer::paint`'s own calls into this module
+/// already had to thread through uniformly, and `font` is computed once (`vp.font_px()`) rather
+/// than recomputed per frame or per cell. The trait method itself (`OnionRenderer::paint`) still
+/// carries its own `#[allow(clippy::too_many_arguments)]`: its signature is `CanvasRenderer::
+/// paint`'s, defined in `gascii-plugin-api` and shared by every renderer/decorator in the
+/// workspace, not something this module can shrink unilaterally.
+struct PaintCtx<'a> {
+    vp: &'a dyn CellGrid,
+    origin: Pos2,
+    cell: Vec2,
+    visible: (u16, u16, u16, u16),
+    font: egui::FontId,
+}
+
+impl<'a> PaintCtx<'a> {
+    fn new(vp: &'a dyn CellGrid, origin: Pos2, cell: Vec2, visible: (u16, u16, u16, u16)) -> Self {
+        Self { vp, origin, cell, visible, font: font_id(vp.font_px()) }
+    }
+}
+
 impl CanvasRenderer for OnionRenderer {
     #[allow(clippy::too_many_arguments)]
     fn paint(
@@ -50,6 +72,7 @@ impl CanvasRenderer for OnionRenderer {
         caret: Option<(u16, u16, bool)>,
         selection: Option<SelectionView>,
     ) {
+        let ctx = PaintCtx::new(vp, origin, cell, visible);
         let s = self.state.borrow();
         if s.playing {
             // Render-only override: paint the playback frame's committed cells only — never the
@@ -59,7 +82,7 @@ impl CanvasRenderer for OnionRenderer {
             // appear against a frame that isn't the one being edited.
             let frame = s.playback_frame;
             drop(s);
-            paint_frame_cells(painter, doc, frame, vp, origin, cell, visible);
+            paint_frame_cells(painter, doc, frame, &ctx);
             return;
         }
         // The instant `s.playing` goes false — including the moment playback stops naturally, at
@@ -74,7 +97,7 @@ impl CanvasRenderer for OnionRenderer {
             let active = doc.active_frame();
             let (prev, next) = (s.onion_prev, s.onion_next);
             drop(s);
-            paint_onion(painter, doc, active, prev, next, vp, origin, cell, visible);
+            paint_onion(painter, doc, active, prev, next, &ctx);
         } else {
             drop(s);
         }
@@ -85,60 +108,99 @@ impl CanvasRenderer for OnionRenderer {
 /// Paints frame `frame`'s committed cells only — no pending/hover/caret/selection overlay. Mirrors
 /// `NaiveRenderer::paint`'s own cell-drawing loop in shape, reading an explicit frame via
 /// `doc.cell_at` instead of the active one via `doc.cell`.
-fn paint_frame_cells(painter: &Painter, doc: &Document, frame: usize, vp: &dyn CellGrid, origin: Pos2, cell: Vec2, visible: (u16, u16, u16, u16)) {
-    let (x0, y0, x1, y1) = visible;
-    let font = font_id(vp.font_px());
+fn paint_frame_cells(painter: &Painter, doc: &Document, frame: usize, ctx: &PaintCtx) {
+    let (x0, y0, x1, y1) = ctx.visible;
     for y in y0..y1 {
         for x in x0..x1 {
             let Some(c) = doc.cell_at(frame, 0, x, y) else { continue };
-            paint_cell(painter, c, vp, origin, cell, x, y, &font, None);
+            paint_cell(painter, c, ctx, x, y, None);
         }
     }
 }
 
 /// Tinted neighbor content from up to `prev` frames before and `next` frames after `active`,
 /// beneath the active frame's own render (which the caller paints separately via `inner.paint`).
-/// Out-of-range neighbors (`doc.frame_layers` returning `None`) are silently skipped — clamped at
-/// document edges, never an error.
-#[allow(clippy::too_many_arguments)]
-fn paint_onion(painter: &Painter, doc: &Document, active: usize, prev: u8, next: u8, vp: &dyn CellGrid, origin: Pos2, cell: Vec2, visible: (u16, u16, u16, u16)) {
-    let font = font_id(vp.font_px());
-    for i in 1..=prev as usize {
-        let Some(idx) = active.checked_sub(i) else { break };
-        paint_tinted_frame(painter, doc, idx, vp, origin, cell, visible, &font, ONION_PREV_TINT);
+/// The visitation order and per-step tint are entirely decided by the pure `onion_paint_plan` —
+/// this just executes it, so the ordering/alpha-fade logic is unit-testable independent of any
+/// actual painting.
+fn paint_onion(painter: &Painter, doc: &Document, active: usize, prev: u8, next: u8, ctx: &PaintCtx) {
+    for (idx, tint) in onion_paint_plan(active, prev, next, doc) {
+        paint_tinted_frame(painter, doc, idx, ctx, tint);
     }
-    for i in 1..=next as usize {
+}
+
+/// The pure decision core of `paint_onion`: which frame indices to paint, in what order, tinted
+/// how strongly. Out-of-range neighbors (before frame 0, or past the last frame) are silently
+/// skipped — clamped at document edges, never an error.
+///
+/// Ordered **farthest-to-nearest**, the reverse of the configured depth order: the active frame's
+/// immediate neighbor is the most useful onion-skin reference (the very next/previous drawing
+/// step) and must never be hidden beneath a farther, less relevant one — painting nearest last (on
+/// top, since painters draw over what came before) is what guarantees that regardless of overlap.
+/// `onion_alpha_scale` fades each step's tint alpha by its distance from `active` (nearest = full
+/// strength, farthest configured depth = `ONION_FAR_SCALE`), so depth also reads visually, not
+/// just via occlusion order.
+fn onion_paint_plan(active: usize, prev: u8, next: u8, doc: &Document) -> Vec<(usize, Color32)> {
+    let mut plan = Vec::new();
+    for i in (1..=prev as usize).rev() {
+        let Some(idx) = active.checked_sub(i) else { continue };
+        plan.push((idx, scaled_tint(ONION_PREV_TINT, onion_alpha_scale(i as u8, prev))));
+    }
+    for i in (1..=next as usize).rev() {
         let idx = active + i;
         if doc.frame(idx).is_none() {
-            break;
+            continue;
         }
-        paint_tinted_frame(painter, doc, idx, vp, origin, cell, visible, &font, ONION_NEXT_TINT);
+        plan.push((idx, scaled_tint(ONION_NEXT_TINT, onion_alpha_scale(i as u8, next))));
     }
+    plan
 }
 
 const ONION_PREV_TINT: Color32 = Color32::from_rgba_premultiplied(90, 20, 20, 90);
 const ONION_NEXT_TINT: Color32 = Color32::from_rgba_premultiplied(20, 70, 20, 90);
+/// The farthest configured neighbor's tint strength, as a fraction of the nearest neighbor's —
+/// see `onion_alpha_scale`.
+const ONION_FAR_SCALE: f32 = 0.35;
 
-#[allow(clippy::too_many_arguments)]
-fn paint_tinted_frame(painter: &Painter, doc: &Document, frame: usize, vp: &dyn CellGrid, origin: Pos2, cell: Vec2, visible: (u16, u16, u16, u16), font: &egui::FontId, tint: Color32) {
-    let (x0, y0, x1, y1) = visible;
+/// Linear fade from `1.0` (the nearest neighbor, `i == 1`) down to `ONION_FAR_SCALE` (the farthest
+/// *configured* neighbor, `i == depth`) — `depth` is the onion stepper's own value (`prev`/`next`),
+/// not however many neighbor frames actually exist near a document edge, so the fade rate stays
+/// stable regardless of where `active` sits. `depth <= 1` (nothing to fade across) returns full
+/// strength.
+fn onion_alpha_scale(i: u8, depth: u8) -> f32 {
+    if depth <= 1 {
+        return 1.0;
+    }
+    let t = (i - 1) as f32 / (depth - 1) as f32;
+    1.0 - t * (1.0 - ONION_FAR_SCALE)
+}
+
+/// Scales every channel of a premultiplied-alpha `Color32` by `scale` — premultiplied color
+/// requires scaling R/G/B alongside A to stay correctly premultiplied at the reduced opacity;
+/// scaling only the alpha channel would leave the RGB too bright for its new, lower alpha.
+fn scaled_tint(base: Color32, scale: f32) -> Color32 {
+    let ch = |c: u8| (c as f32 * scale).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgba_premultiplied(ch(base.r()), ch(base.g()), ch(base.b()), ch(base.a()))
+}
+
+fn paint_tinted_frame(painter: &Painter, doc: &Document, frame: usize, ctx: &PaintCtx, tint: Color32) {
+    let (x0, y0, x1, y1) = ctx.visible;
     for y in y0..y1 {
         for x in x0..x1 {
             let Some(c) = doc.cell_at(frame, 0, x, y) else { continue };
             if c.is_blank() {
                 continue;
             }
-            paint_cell(painter, c, vp, origin, cell, x, y, font, Some(tint));
+            paint_cell(painter, c, ctx, x, y, Some(tint));
         }
     }
 }
 
 /// Shared single-cell paint used by both the playback and onion paths: bg fill (tinted if `tint` is
 /// set) then glyph.
-#[allow(clippy::too_many_arguments)]
-fn paint_cell(painter: &Painter, c: &Cell, vp: &dyn CellGrid, origin: Pos2, cell: Vec2, x: u16, y: u16, font: &egui::FontId, tint: Option<Color32>) {
-    let rect_min = vp.cell_to_screen(x, y, cell, origin);
-    let rect = Rect::from_min_size(rect_min, cell);
+fn paint_cell(painter: &Painter, c: &Cell, ctx: &PaintCtx, x: u16, y: u16, tint: Option<Color32>) {
+    let rect_min = ctx.vp.cell_to_screen(x, y, ctx.cell, ctx.origin);
+    let rect = Rect::from_min_size(rect_min, ctx.cell);
     if let Some(tint) = tint {
         painter.rect_filled(rect, 0.0, tint);
     } else if c.bg.3 > 0 {
@@ -146,7 +208,7 @@ fn paint_cell(painter: &Painter, c: &Cell, vp: &dyn CellGrid, origin: Pos2, cell
     }
     if c.ch != ' ' {
         let fg = tint.unwrap_or_else(|| color32(c.fg));
-        painter.text(rect_min, Align2::LEFT_TOP, c.ch, font.clone(), fg);
+        painter.text(rect_min, Align2::LEFT_TOP, c.ch, ctx.font.clone(), fg);
     }
 }
 
@@ -314,5 +376,112 @@ mod tests {
         // called — proving onion's tint pass didn't run either, since it shares the same early
         // return as the playback override.
         assert_eq!(*calls.borrow(), 0);
+    }
+
+    fn doc_with_frames(n: usize) -> Document {
+        let mut doc = Document::new(2, 2);
+        let mut history = gascii_core::History::new();
+        for i in 1..n {
+            let edit = gascii_core::add_frame(&doc, i, gascii_core::Frame::blank(2, 2)).unwrap();
+            history.apply(&mut doc, edit);
+        }
+        doc
+    }
+
+    fn alpha_of(c: Color32) -> u8 {
+        c.a()
+    }
+
+    /// The direct H4/L3 regression: `onion_paint_plan` must visit farthest-to-nearest on both
+    /// sides, so a caller painting in that order naturally paints the active frame's immediate
+    /// neighbors last (on top).
+    #[test]
+    fn onion_paint_plan_orders_farthest_to_nearest_on_both_sides() {
+        let doc = doc_with_frames(10);
+        let plan = onion_paint_plan(5, 3, 2, &doc);
+        let indices: Vec<usize> = plan.iter().map(|(idx, _)| *idx).collect();
+        assert_eq!(
+            indices,
+            vec![2, 3, 4, 7, 6],
+            "prev side must run farthest (2) to nearest (4); next side must run farthest (7) to nearest (6)"
+        );
+    }
+
+    /// Alpha must strictly increase (weakest first) moving through the plan on each side, ending at
+    /// full strength for the nearest neighbor immediately adjacent to `active`.
+    #[test]
+    fn onion_paint_plan_alpha_increases_toward_the_nearest_neighbor_on_each_side() {
+        let doc = doc_with_frames(10);
+        let plan = onion_paint_plan(5, 4, 3, &doc);
+        let prev_alphas: Vec<u8> = plan[0..4].iter().map(|(_, c)| alpha_of(*c)).collect();
+        let next_alphas: Vec<u8> = plan[4..7].iter().map(|(_, c)| alpha_of(*c)).collect();
+        assert!(prev_alphas.windows(2).all(|w| w[0] <= w[1]), "prev-side alpha must never decrease moving toward active: {prev_alphas:?}");
+        assert!(next_alphas.windows(2).all(|w| w[0] <= w[1]), "next-side alpha must never decrease moving toward active: {next_alphas:?}");
+        assert_eq!(*prev_alphas.last().unwrap(), ONION_PREV_TINT.a(), "the nearest prev neighbor must be full strength");
+        assert_eq!(*next_alphas.last().unwrap(), ONION_NEXT_TINT.a(), "the nearest next neighbor must be full strength");
+    }
+
+    /// A neighbor at the document edge (out of range) is skipped without disturbing the ones still
+    /// in range, and the surviving entries keep the alpha they'd have had against the *configured*
+    /// depth (not a depth silently shrunk to however many frames actually exist).
+    #[test]
+    fn onion_paint_plan_skips_out_of_range_neighbors_without_shifting_the_alpha_of_the_rest() {
+        let doc = doc_with_frames(3); // valid indices 0, 1, 2
+        // active = 1, prev = 5 (only index 0 is actually reachable), next = 5 (only index 2).
+        let plan = onion_paint_plan(1, 5, 5, &doc);
+        let indices: Vec<usize> = plan.iter().map(|(idx, _)| *idx).collect();
+        assert_eq!(indices, vec![0, 2], "only the two in-range neighbors survive");
+        // Both are the *nearest* configured step (i == 1) on their respective side, so both must
+        // be full strength — proving the scale is computed against the requested depth (5), not a
+        // depth quietly reduced to "however many neighbors exist" (which would also read as i==1
+        // over depth==1, coincidentally full strength too — see the next test for a case that
+        // actually distinguishes the two).
+        assert_eq!(alpha_of(plan[0].1), ONION_PREV_TINT.a());
+        assert_eq!(alpha_of(plan[1].1), ONION_NEXT_TINT.a());
+    }
+
+    /// Distinguishes "scaled against the configured depth" from "scaled against however many
+    /// neighbors survive": the nearest neighbor (i==1) is unaffected either way (previous test), so
+    /// this checks the *farthest surviving* one, which only reads correctly against the configured
+    /// depth.
+    #[test]
+    fn onion_paint_plan_scales_against_the_configured_depth_not_the_surviving_neighbor_count() {
+        let doc = doc_with_frames(10);
+        // active = 2, prev = 5: only indices 0 and 1 (i == 2, i == 1) are reachable, i == 3..5 fall
+        // off the front. The surviving farthest (index 0, i == 2) must be scaled as "step 2 of a
+        // 5-deep fade", not as "step 2 of a 2-deep fade" (which would be a much weaker scale).
+        let plan = onion_paint_plan(2, 5, 0, &doc);
+        let indices: Vec<usize> = plan.iter().map(|(idx, _)| *idx).collect();
+        assert_eq!(indices, vec![0, 1]);
+        let scale_against_full_depth = onion_alpha_scale(2, 5);
+        let scale_against_shrunk_depth = onion_alpha_scale(2, 2);
+        assert_ne!(scale_against_full_depth, scale_against_shrunk_depth, "sanity: the two scales must actually differ for this to be a meaningful test");
+        assert_eq!(alpha_of(plan[0].1), (ONION_PREV_TINT.a() as f32 * scale_against_full_depth).round().clamp(0.0, 255.0) as u8);
+    }
+
+    #[test]
+    fn onion_alpha_scale_is_full_strength_at_i_1_and_far_scale_at_the_configured_depth() {
+        assert_eq!(onion_alpha_scale(1, 5), 1.0);
+        assert!((onion_alpha_scale(5, 5) - ONION_FAR_SCALE).abs() < 1e-6);
+        // Monotonic: every step farther from active must be weaker or equal, never stronger.
+        let scales: Vec<f32> = (1..=8u8).map(|i| onion_alpha_scale(i, 8)).collect();
+        assert!(scales.windows(2).all(|w| w[0] >= w[1]), "alpha must never increase with distance: {scales:?}");
+    }
+
+    #[test]
+    fn onion_alpha_scale_is_always_full_strength_when_depth_is_1_or_0() {
+        assert_eq!(onion_alpha_scale(1, 1), 1.0);
+        assert_eq!(onion_alpha_scale(1, 0), 1.0);
+    }
+
+    #[test]
+    fn scaled_tint_at_full_scale_is_the_identity() {
+        assert_eq!(scaled_tint(ONION_PREV_TINT, 1.0), ONION_PREV_TINT);
+    }
+
+    #[test]
+    fn scaled_tint_scales_every_channel_including_alpha() {
+        let half = scaled_tint(Color32::from_rgba_premultiplied(100, 50, 20, 200), 0.5);
+        assert_eq!(half, Color32::from_rgba_premultiplied(50, 25, 10, 100));
     }
 }

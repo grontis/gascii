@@ -1,13 +1,29 @@
 use egui::{Ui, Vec2};
 use gascii_core::{Buildup, DensityBrush, DensityMode, Fixed, Ramp};
-use gascii_plugin_api::{OptionsGeom, PanelOutcome, Plugin, PluginHost, PluginToolCapabilities};
+use gascii_plugin_api::{OptionsGeom, PanelOutcome, Plugin, PluginDescriptor, PluginHost, PluginToolCapabilities, ToolCtxPatch};
 
+use crate::icon::BRUSH_ICON;
 use crate::theme;
 use crate::widgets::{self, size};
 
 /// This plugin's own name for its one tool — the identity string the host's registry merge and
 /// `PluginHost::is_bound` both key off.
 pub const BRUSH: &str = "Brush";
+
+/// Constructs the one real, per-app `BrushPlugin` instance — the `PluginDescriptor.make` fn
+/// pointer. A named fn, not a closure, so `DESCRIPTOR` stays a plain `const`.
+pub fn make() -> Box<dyn Plugin> {
+    Box::new(BrushPlugin::new())
+}
+
+/// This crate's whole registration story, harvested by the host's `const PLUGINS` table without
+/// ever constructing a throwaway instance.
+pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
+    name: "gascii-density-brush",
+    make,
+    tools: BrushPlugin::tool_capabilities,
+    shortcuts: BrushPlugin::shortcuts,
+};
 
 /// Short display names for the built-in ramps — matches `gascii::ui::sidebar::ramp_label`'s exact
 /// mapping so the segmented control reads identically pre- and post-migration.
@@ -75,13 +91,44 @@ impl BrushPlugin {
     }
 }
 
+/// Every digit key `tick`'s intensity shortcut consumes, in dispatch order — shared with
+/// `DIGIT_KEY_LEVELS` (indexed from this same array, so the two can never drift apart) and with
+/// `shortcuts()`'s declared `PluginShortcut.keys`.
+const DIGIT_KEYS: [egui::Key; 10] = [
+    egui::Key::Num1,
+    egui::Key::Num2,
+    egui::Key::Num3,
+    egui::Key::Num4,
+    egui::Key::Num5,
+    egui::Key::Num6,
+    egui::Key::Num7,
+    egui::Key::Num8,
+    egui::Key::Num9,
+    egui::Key::Num0,
+];
+
+/// `DIGIT_KEYS` paired with the Fixed-intensity level each key sets.
+const DIGIT_KEY_LEVELS: [(egui::Key, f32); 10] = [
+    (DIGIT_KEYS[0], 0.1),
+    (DIGIT_KEYS[1], 0.2),
+    (DIGIT_KEYS[2], 0.3),
+    (DIGIT_KEYS[3], 0.4),
+    (DIGIT_KEYS[4], 0.5),
+    (DIGIT_KEYS[5], 0.6),
+    (DIGIT_KEYS[6], 0.7),
+    (DIGIT_KEYS[7], 0.8),
+    (DIGIT_KEYS[8], 0.9),
+    (DIGIT_KEYS[9], 1.0),
+];
+
 impl Plugin for BrushPlugin {
-    fn register_tools(&self) -> Vec<PluginToolCapabilities> {
+    fn tool_capabilities() -> Vec<PluginToolCapabilities> {
         vec![PluginToolCapabilities {
             name: BRUSH,
             key: egui::Key::B,
             tip: "Paint density ramps",
             make: || Box::new(DensityBrush::new()),
+            icon: BRUSH_ICON,
             sized: true,
             holds_session: false,
             shows_hover: true,
@@ -89,7 +136,15 @@ impl Plugin for BrushPlugin {
             suppresses_shortcuts: false,
             kiosk_visible: true,
             pressure_sizeable: true,
-            wants_extra_ctx: true,
+            wants_ctx_patch: true,
+        }]
+    }
+
+    fn shortcuts() -> Vec<gascii_plugin_api::PluginShortcut> {
+        vec![gascii_plugin_api::PluginShortcut {
+            name: "Brush intensity (while Brush is bound)",
+            label: "1-9, 0",
+            keys: &DIGIT_KEYS,
         }]
     }
 
@@ -119,7 +174,7 @@ impl Plugin for BrushPlugin {
                 DensityMode::Buildup(_) => 1.0,
             };
             let slider = ui.add_sized(
-                Vec2::new(100.0, geom.brush_slider_h),
+                Vec2::new(100.0, geom.slider_h),
                 egui::Slider::new(&mut level, 0.0..=1.0).show_value(false),
             );
             if slider.changed() || changed {
@@ -134,7 +189,7 @@ impl Plugin for BrushPlugin {
 
         let mut buildup = matches!(self.density_mode, DensityMode::Buildup(_));
         let modes = [(false, "Fixed"), (true, "Buildup")];
-        if geom.wrap_brush_mode {
+        if geom.inline_controls {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 let changed = widgets::segmented(ui, &mut buildup, &modes, false);
@@ -173,24 +228,15 @@ impl Plugin for BrushPlugin {
     /// playback clock needs `tick` even while a field has focus, so the gate moved here) — pressing
     /// a digit implicitly switches into Fixed mode at that level even if Buildup was active, since
     /// reaching for a number key expresses "I want this exact intensity now."
-    fn tick(&mut self, ui: &mut Ui, focused: bool, host: &dyn PluginHost) -> PanelOutcome {
+    fn tick(&mut self, ui: &mut Ui, focused: bool, _resumed_after_suppression: bool, host: &dyn PluginHost) -> PanelOutcome {
+        // No cross-frame key-hold state of its own (each digit key is a one-shot press, not a
+        // hold) — nothing here can go stale across a modal suppression window, unlike gascii-anim's
+        // Space hold, so `_resumed_after_suppression` is deliberately unused.
         if focused || !host.is_bound(BRUSH) {
             return PanelOutcome::default();
         }
-        const DIGIT_KEYS: [(egui::Key, f32); 10] = [
-            (egui::Key::Num1, 0.1),
-            (egui::Key::Num2, 0.2),
-            (egui::Key::Num3, 0.3),
-            (egui::Key::Num4, 0.4),
-            (egui::Key::Num5, 0.5),
-            (egui::Key::Num6, 0.6),
-            (egui::Key::Num7, 0.7),
-            (egui::Key::Num8, 0.8),
-            (egui::Key::Num9, 0.9),
-            (egui::Key::Num0, 1.0),
-        ];
         let level = ui.input_mut(|i| {
-            DIGIT_KEYS.iter().find(|&&(key, _)| i.consume_key(egui::Modifiers::NONE, key)).map(|&(_, level)| level)
+            DIGIT_KEY_LEVELS.iter().find(|&&(key, _)| i.consume_key(egui::Modifiers::NONE, key)).map(|&(_, level)| level)
         });
         if let Some(level) = level {
             self.density_mode = DensityMode::Fixed(Fixed(level));
@@ -199,8 +245,11 @@ impl Plugin for BrushPlugin {
         PanelOutcome::default()
     }
 
-    fn extra_tool_ctx(&self, tool_name: &str) -> Option<(DensityMode, Vec<char>)> {
-        (tool_name == BRUSH).then(|| (self.density_mode, self.ramps[self.active_ramp].chars.clone()))
+    fn tool_ctx_patch(&self, tool_name: &str) -> Option<ToolCtxPatch> {
+        (tool_name == BRUSH).then(|| ToolCtxPatch {
+            density: Some(self.density_mode),
+            ramp: Some(self.ramps[self.active_ramp].chars.clone()),
+        })
     }
 
     /// The "Pressure" checkbox's own opt-in — distinct from Brush's static `pressure_sizeable`
@@ -238,21 +287,25 @@ mod tests {
         fn document(&self) -> &gascii_core::Document {
             &self.doc
         }
+        fn top_edit_id(&self) -> Option<u64> {
+            None
+        }
     }
 
     fn geom() -> OptionsGeom {
-        OptionsGeom { stepper_h: 26.0, shape_indent: 0.0, item_spacing_y: Some(6.0), wrap_brush_mode: false, brush_slider_h: 20.0 }
+        OptionsGeom { stepper_h: 26.0, shape_indent: 0.0, item_spacing_y: Some(6.0), inline_controls: false, slider_h: 20.0 }
     }
 
     /// The merged tool row must carry exactly the pre-migration literal `ToolDef` row's capability
     /// values — a transcription slip here would silently change Brush's registry-visible behavior.
     #[test]
-    fn register_tools_returns_the_expected_single_brush_row() {
-        let rows = BrushPlugin::new().register_tools();
+    fn tool_capabilities_returns_the_expected_single_brush_row() {
+        let rows = BrushPlugin::tool_capabilities();
         assert_eq!(rows.len(), 1);
         let r = &rows[0];
         assert_eq!(r.name, "Brush");
         assert_eq!(r.key, egui::Key::B);
+        assert!(!r.icon.is_empty(), "Brush must carry its own icon now that icons live per-row");
         assert!(r.sized);
         assert!(!r.holds_session);
         assert!(r.shows_hover);
@@ -260,7 +313,19 @@ mod tests {
         assert!(!r.suppresses_shortcuts);
         assert!(r.kiosk_visible);
         assert!(r.pressure_sizeable);
-        assert!(r.wants_extra_ctx);
+        assert!(r.wants_ctx_patch);
+    }
+
+    /// `shortcuts()` must declare exactly the ten keys `tick`'s digit-key dispatch actually
+    /// consumes — the pairing that keeps the declaration from going stale.
+    #[test]
+    fn shortcuts_declares_every_key_tick_actually_consumes() {
+        let rows = BrushPlugin::shortcuts();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].keys, &DIGIT_KEYS);
+        for &(key, _) in &DIGIT_KEY_LEVELS {
+            assert!(rows[0].keys.contains(&key), "{key:?} must be in the declared shortcut's keys");
+        }
     }
 
     /// Two `BrushPlugin`s must never share state — the property a process-global design would have
@@ -278,16 +343,16 @@ mod tests {
         assert!(!b.pressure_enabled());
     }
 
-    /// `extra_tool_ctx` must answer only for its own tool name, and must reflect live state (not a
+    /// `tool_ctx_patch` must answer only for its own tool name, and must reflect live state (not a
     /// snapshot taken at construction).
     #[test]
-    fn extra_tool_ctx_answers_only_for_brush_and_reflects_live_state() {
+    fn tool_ctx_patch_answers_only_for_brush_and_reflects_live_state() {
         let mut p = BrushPlugin::new();
         p.set_active_ramp(1);
-        assert!(p.extra_tool_ctx("Pencil").is_none());
-        let (density, ramp) = p.extra_tool_ctx("Brush").expect("Brush wants extra context");
-        assert!(matches!(density, DensityMode::Fixed(_)));
-        assert_eq!(ramp, gascii_core::builtin_ramps()[1].chars);
+        assert!(p.tool_ctx_patch("Pencil").is_none());
+        let patch = p.tool_ctx_patch("Brush").expect("Brush wants a ctx patch");
+        assert!(matches!(patch.density, Some(DensityMode::Fixed(_))));
+        assert_eq!(patch.ramp, Some(gascii_core::builtin_ramps()[1].chars.clone()));
     }
 
     /// `tick` must only react while Brush is actually bound, and must switch into Fixed mode at the
@@ -307,7 +372,7 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         });
-        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, &FakeHost::new(false, false)); });
+        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, false, &FakeHost::new(false, false)); });
         assert!(matches!(p.density_mode(), DensityMode::Buildup(_)), "unbound tick must not react");
 
         let mut raw = egui::RawInput::default();
@@ -318,7 +383,7 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         });
-        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, &FakeHost::new(false, true)); });
+        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, false, &FakeHost::new(false, true)); });
         match p.density_mode() {
             DensityMode::Fixed(Fixed(level)) => assert!((level - 0.5).abs() < 1e-4),
             other => panic!("expected Fixed(0.5), got {other:?}"),
@@ -342,7 +407,7 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         });
-        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, true, &FakeHost::new(false, true)); });
+        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, true, false, &FakeHost::new(false, true)); });
         assert!(matches!(p.density_mode(), DensityMode::Buildup(_)), "a focused tick must not react even while bound");
     }
 

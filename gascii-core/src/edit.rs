@@ -11,6 +11,12 @@
 //! history, selective per-frame undo, etc.) without re-deriving this argument — see the pinned
 //! test `history_is_a_single_strictly_lifo_stack_across_mixed_edit_kinds` and
 //! `undoing_a_reorder_before_an_older_cell_edit_targets_the_correct_frame`.
+//!
+//! `History::apply` validates a structural frame edit's index against `doc`'s current frame count
+//! before touching anything — see `structural_edit_is_valid`. An out-of-range structural edit
+//! (reachable from outside this crate through `PanelOutcome.edits`, a public plugin channel) is a
+//! silent no-op, never a panic, mirroring `Edit::Cells`' own graceful out-of-range handling via
+//! `set_cell_at`.
 
 use crate::model::{Cell, DocExtent, Document, Frame};
 
@@ -94,6 +100,28 @@ fn apply_forward(doc: &mut Document, edit: &Edit) {
     }
 }
 
+/// Whether `edit`'s structural frame variants (`AddFrame`/`RemoveFrame`/`ReorderFrame`/
+/// `SetFrameDuration`) address a frame that actually exists in `doc` right now. `Edit::Cells`
+/// already no-ops gracefully per out-of-range cell via `set_cell_at`, and `Edit::Resize` carries a
+/// full snapshot with nothing to index — both are unconditionally valid here. `PanelOutcome.edits`
+/// is a public plugin channel (see `gascii-plugin-api`), so a buggy or adversarial plugin can hand
+/// `History::apply` an `Edit` built against a document shape that no longer matches — this is the
+/// one place every such edit is checked before `frames.insert`/`frames.remove`/`frames[..]` would
+/// otherwise panic on it.
+fn structural_edit_is_valid(doc: &Document, edit: &Edit) -> bool {
+    let len = doc.frames.len();
+    match edit {
+        Edit::Cells(_) | Edit::Resize { .. } => true,
+        // `Vec::insert` accepts `index == len` (append) but panics past it.
+        Edit::AddFrame { index, .. } => *index <= len,
+        // A document with zero frames must stay unreachable, mirroring `frame_ops::remove_frame`'s
+        // own `LastFrame` guard for the same invariant at the pure-fn level.
+        Edit::RemoveFrame { index, .. } => *index < len && len > 1,
+        Edit::ReorderFrame { from, to, .. } => *from < len && *to < len,
+        Edit::SetFrameDuration { index, .. } => *index < len,
+    }
+}
+
 fn apply_backward(doc: &mut Document, edit: &Edit) {
     match edit {
         Edit::Cells(cells) => {
@@ -153,7 +181,16 @@ impl History {
 
     /// Writes `edit`'s `after` cells into `doc`, pushes it onto the undo stack under a fresh id,
     /// and clears redo.
+    ///
+    /// A structural frame edit (`AddFrame`/`RemoveFrame`/`ReorderFrame`/`SetFrameDuration`)
+    /// addressing a frame `doc` no longer has is a silent no-op — never applied, never pushed,
+    /// undo/redo left completely untouched — rather than panicking. Rejecting here, before
+    /// `apply_forward` ever runs, is what keeps the undo stack from ever holding a no-op structural
+    /// edit (see `structural_edit_is_valid`'s doc comment for why this channel needs the guard).
     pub fn apply(&mut self, doc: &mut Document, edit: Edit) {
+        if !structural_edit_is_valid(doc, &edit) {
+            return;
+        }
         apply_forward(doc, &edit);
         let id = self.next_id;
         self.next_id += 1;
@@ -784,5 +821,102 @@ mod tests {
             None,
             "undo must restore the prior override exactly, including a None baseline"
         );
+    }
+
+    // `structural_edit_is_valid`/`History::apply`'s OOB-no-op contract: a structural frame edit
+    // addressing an index the document no longer has must never panic, never mutate, and never
+    // land on the undo stack — the direct regression coverage for a buggy/adversarial plugin's
+    // `PanelOutcome.edits`.
+
+    #[test]
+    fn add_frame_at_len_plus_one_is_a_silent_no_op() {
+        let mut doc = Document::new(3, 3); // frame_count() == 1
+        let mut history = History::new();
+        let edit = Edit::AddFrame { index: 2, frame: Frame::blank(3, 3), active_frame_before: 0, active_frame_after: 0 };
+        history.apply(&mut doc, edit);
+        assert_eq!(doc.frame_count(), 1, "an out-of-range AddFrame index must not touch the document");
+        assert_eq!(history.top_edit_id(), None, "a rejected edit must never reach the undo stack");
+    }
+
+    #[test]
+    fn add_frame_at_exactly_len_still_appends_normally() {
+        // The boundary just inside the guard: `index == frame_count()` is a valid append (mirrors
+        // `Vec::insert`'s own contract), not an off-by-one rejection.
+        let mut doc = Document::new(3, 3);
+        let mut history = History::new();
+        let edit = Edit::AddFrame { index: 1, frame: Frame::blank(3, 3), active_frame_before: 0, active_frame_after: 1 };
+        history.apply(&mut doc, edit);
+        assert_eq!(doc.frame_count(), 2);
+        assert!(history.top_edit_id().is_some());
+    }
+
+    #[test]
+    fn remove_frame_out_of_range_is_a_silent_no_op() {
+        let mut doc = Document::new(3, 3);
+        let mut history = History::new();
+        let edit = Edit::RemoveFrame { index: 5, frame: Frame::blank(3, 3), active_frame_before: 0, active_frame_after: 0 };
+        history.apply(&mut doc, edit);
+        assert_eq!(doc.frame_count(), 1);
+        assert_eq!(history.top_edit_id(), None);
+    }
+
+    /// The last-frame case even when the index itself is in range: a `RemoveFrame` targeting a
+    /// document's only remaining frame must also no-op, mirroring `frame_ops::remove_frame`'s own
+    /// `LastFrame` guard rather than ever leaving `doc.frames` empty.
+    #[test]
+    fn remove_frame_of_the_only_remaining_frame_is_a_silent_no_op() {
+        let mut doc = Document::new(3, 3);
+        let mut history = History::new();
+        let edit = Edit::RemoveFrame { index: 0, frame: Frame::blank(3, 3), active_frame_before: 0, active_frame_after: 0 };
+        history.apply(&mut doc, edit);
+        assert_eq!(doc.frame_count(), 1, "a document must never be left with zero frames");
+        assert_eq!(history.top_edit_id(), None);
+    }
+
+    #[test]
+    fn reorder_frame_out_of_range_from_or_to_is_a_silent_no_op() {
+        let mut doc = Document::new(3, 3);
+        let mut history = History::new();
+        let edit = Edit::AddFrame { index: 1, frame: Frame::blank(3, 3), active_frame_before: 0, active_frame_after: 0 };
+        history.apply(&mut doc, edit); // 2 frames now
+        let marker = history.top_edit_id();
+
+        let bad_from = Edit::ReorderFrame { from: 9, to: 0, active_frame_before: 0, active_frame_after: 0 };
+        history.apply(&mut doc, bad_from);
+        assert_eq!(history.top_edit_id(), marker, "an out-of-range `from` must not push a no-op edit");
+
+        let bad_to = Edit::ReorderFrame { from: 0, to: 9, active_frame_before: 0, active_frame_after: 0 };
+        history.apply(&mut doc, bad_to);
+        assert_eq!(history.top_edit_id(), marker, "an out-of-range `to` must not push a no-op edit");
+    }
+
+    #[test]
+    fn set_frame_duration_out_of_range_is_a_silent_no_op() {
+        let mut doc = Document::new(3, 3);
+        let mut history = History::new();
+        let edit = Edit::SetFrameDuration { index: 7, before: None, after: Some(50) };
+        history.apply(&mut doc, edit);
+        assert_eq!(history.top_edit_id(), None);
+        assert_eq!(doc.frame(0).unwrap().duration_override, None);
+    }
+
+    /// A no-op rejection must leave the undo stack exactly as coherent as it was before the
+    /// attempt — a later, legitimate undo must still reverse the correct (last real) edit, not
+    /// anything the rejected call might have half-applied.
+    #[test]
+    fn undo_after_a_rejected_structural_edit_still_reverses_the_correct_prior_edit() {
+        let mut doc = Document::new(3, 3);
+        let mut history = History::new();
+        let real_edit = Edit::Cells(vec![CellEdit { frame: 0, layer: 0, x: 0, y: 0, before: Cell::BLANK, after: cell('a') }]);
+        history.apply(&mut doc, real_edit);
+        assert_eq!(doc.cell(0, 0, 0), Some(&cell('a')));
+
+        let bad_edit = Edit::RemoveFrame { index: 9, frame: Frame::blank(3, 3), active_frame_before: 0, active_frame_after: 0 };
+        history.apply(&mut doc, bad_edit);
+        assert_eq!(doc.cell(0, 0, 0), Some(&cell('a')), "the rejected edit must not disturb the document");
+
+        assert!(history.undo(&mut doc));
+        assert_eq!(doc.cell(0, 0, 0), Some(&Cell::BLANK), "undo must still reverse the one real edit that was applied");
+        assert!(!history.can_undo());
     }
 }

@@ -62,6 +62,82 @@ fn blend_pixel(img: &mut image::RgbaImage, x: u32, y: u32, color: Rgba) {
 
 use crate::image_bg::{premultiply, unpremultiply};
 
+/// The background image composited beneath every cell, pre-resized to the exact export pixel
+/// dimensions and ready to blend straight in — `buf` is already the unpremultiplied, opacity-scaled
+/// result `rasterize_composited`'s per-frame loop used to recompute from scratch on every call; this
+/// stores it once. `offset` is where `buf`'s own (0,0) pixel lands in the destination image (the
+/// `fit_cover` placement, rounded — can be negative on the cropped axis).
+struct PreparedBg {
+    offset: (i64, i64),
+    buf: image::RgbaImage,
+}
+
+/// Builds `PreparedBg` from a raw source image + opacity, exactly reproducing what
+/// `rasterize_composited` used to do inline per call: premultiply, Cover-resize to fill `px_w x
+/// px_h`, then un-premultiply and bake `opacity` into the alpha channel. `None` whenever the old
+/// inline code would have skipped the blend entirely (a degenerate `fit_cover`).
+fn prepare_bg(src: &image::RgbaImage, opacity: f32, px_w: u32, px_h: u32) -> Option<PreparedBg> {
+    let (ox, oy, w, h) = crate::image_bg::fit_cover(src.width(), src.height(), px_w as f32, px_h as f32)?;
+    let (fw, fh) = ((w.round() as u32).max(1), (h.round() as u32).max(1));
+    let premultiplied = premultiply(src);
+    let resized = image::imageops::resize(&premultiplied, fw, fh, image::imageops::FilterType::Triangle);
+    let mut buf = image::RgbaImage::new(fw, fh);
+    for (x, y, px) in resized.enumerate_pixels() {
+        let p = unpremultiply(px.0);
+        let a = (p[3] as f32 * opacity).round().clamp(0.0, 255.0) as u8;
+        buf.put_pixel(x, y, image::Rgba([p[0], p[1], p[2], a]));
+    }
+    Some(PreparedBg { offset: (ox.round() as i64, oy.round() as i64), buf })
+}
+
+/// Fixed, per-export assets that used to be rebuilt on every `rasterize_composited` call: the parsed
+/// font, the Cover-fitted background (premultiplied + resized once, see `PreparedBg`), the glyph
+/// ascent for this `cell_px`, and a per-character glyph bitmap cache. Every field here is invariant
+/// across a document's frames for one export at one `cell_px` — a GIF/spritesheet export builds this
+/// once (`build_raster_assets`) and reuses it for every frame via `rasterize_frame_rgba8_with_assets`;
+/// a single-PNG export builds one too, just for its one call.
+///
+/// The glyph cache uses interior mutability (`RefCell`) rather than `&mut` so callers don't need
+/// `let mut assets` just to pass it around — `rasterize_composited` only ever needs shared access.
+pub(crate) struct RasterAssets {
+    font: fontdue::Font,
+    ascent: f32,
+    bg: Option<PreparedBg>,
+    glyph_cache: std::cell::RefCell<std::collections::HashMap<char, (fontdue::Metrics, Vec<u8>)>>,
+}
+
+impl RasterAssets {
+    fn prepare(px_w: u32, px_h: u32, cell_px: u32, bg_image: Option<(&image::RgbaImage, f32)>) -> Result<Self, PngExportAppError> {
+        let font = fontdue::Font::from_bytes(crate::fonts::CANVAS_FONT_BYTES, fontdue::FontSettings::default())
+            .map_err(|e| PngExportAppError::Font(e.to_string()))?;
+        let ascent = font.horizontal_line_metrics(cell_px as f32).map(|m| m.ascent).unwrap_or(cell_px as f32 * 0.8);
+        let bg = bg_image.and_then(|(src, opacity)| prepare_bg(src, opacity, px_w, px_h));
+        Ok(Self { font, ascent, bg, glyph_cache: std::cell::RefCell::new(std::collections::HashMap::new()) })
+    }
+
+    /// Rasterized glyph bitmap for `ch` at this asset set's own `cell_px`, built once and reused for
+    /// every subsequent frame/document that shares this `RasterAssets`.
+    fn glyph(&self, ch: char, cell_px: u32) -> (fontdue::Metrics, Vec<u8>) {
+        if let Some(cached) = self.glyph_cache.borrow().get(&ch) {
+            return cached.clone();
+        }
+        let rasterized = self.font.rasterize(ch, cell_px as f32);
+        self.glyph_cache.borrow_mut().insert(ch, rasterized.clone());
+        rasterized
+    }
+}
+
+/// Builds the shared `RasterAssets` for an export at `cell_px` pixels per cell — call once per
+/// export (not per frame) and thread the result through `rasterize_frame_rgba8_with_assets`.
+pub(crate) fn build_raster_assets(
+    doc: &Document,
+    cell_px: u32,
+    bg_image: Option<(&image::RgbaImage, f32)>,
+) -> Result<RasterAssets, PngExportAppError> {
+    let (px_w, px_h) = validate_png_dimensions(doc.width, doc.height, cell_px).map_err(PngExportAppError::Dimensions)?;
+    RasterAssets::prepare(px_w, px_h, cell_px, bg_image)
+}
+
 /// Rasterizes an already-composited grid at `cell_px` pixels per cell into a straight-alpha RGBA8
 /// pixel buffer (row-major, `4 * width * height` bytes) plus its `(width, height)`. `opaque_bg`
 /// pre-fills every pixel with that color before compositing cell content over it (`None` keeps the
@@ -74,50 +150,41 @@ use crate::image_bg::{premultiply, unpremultiply};
 ///
 /// The pure pixel-math half of PNG export, parameterized by an explicit composited grid so both
 /// the active-frame (`rasterize_rgba8`) and frame-explicit (`rasterize_frame_rgba8`) entry points
-/// share one glyph/background blending loop.
+/// share one glyph/background blending loop. `assets` carries everything fixed across an export's
+/// frames (the parsed font, the pre-resized background, the glyph bitmap cache) — see
+/// `RasterAssets`'s own doc comment. `assets.bg`, if present, was already built for exactly this
+/// `doc`/`cell_px`'s own `px_w x px_h`; a caller passing assets from a different document/`cell_px`
+/// would get nonsense placement, but every caller in this module builds them together (`
+/// rasterize_rgba8`/`rasterize_frame_rgba8`/`rasterize_frame_rgba8_with_assets`), so that mismatch
+/// never actually happens.
 fn rasterize_composited(
     doc: &Document,
     composited: &[Vec<Cell>],
     cell_px: u32,
     opaque_bg: Option<Rgba>,
-    bg_image: Option<(&image::RgbaImage, f32)>,
+    assets: &RasterAssets,
 ) -> Result<(u32, u32, Vec<u8>), PngExportAppError> {
     let (px_w, px_h) = validate_png_dimensions(doc.width, doc.height, cell_px)
         .map_err(PngExportAppError::Dimensions)?;
-    let font = fontdue::Font::from_bytes(crate::fonts::CANVAS_FONT_BYTES, fontdue::FontSettings::default())
-        .map_err(|e| PngExportAppError::Font(e.to_string()))?;
     let mut img = image::RgbaImage::new(px_w, px_h);
     if let Some(bg) = opaque_bg {
         for px in img.pixels_mut() {
             px.0 = [bg.0, bg.1, bg.2, bg.3];
         }
     }
-    if let Some((src, opacity)) = bg_image {
+    if let Some(prepared) = &assets.bg {
         // Cover (see `image_bg::fit_cover`): the fitted rect fills px_w×px_h and overflows on one
         // axis with a negative offset; the bounds check below crops that overflow, so no
         // transparent letterbox gap remains — every export pixel gets a source sample.
-        if let Some((ox, oy, w, h)) = crate::image_bg::fit_cover(src.width(), src.height(), px_w as f32, px_h as f32) {
-            let (fw, fh) = ((w.round() as u32).max(1), (h.round() as u32).max(1));
-            let premultiplied = premultiply(src);
-            let resized = image::imageops::resize(&premultiplied, fw, fh, image::imageops::FilterType::Triangle);
-            let (ox, oy) = (ox.round() as i64, oy.round() as i64);
-            for ry in 0..resized.height() as i64 {
-                for rx in 0..resized.width() as i64 {
-                    let (dx, dy) = (ox + rx, oy + ry);
-                    if dx < 0 || dy < 0 || dx as u32 >= px_w || dy as u32 >= px_h {
-                        continue;
-                    }
-                    let p = unpremultiply(resized.get_pixel(rx as u32, ry as u32).0);
-                    let a = (p[3] as f32 * opacity).round().clamp(0.0, 255.0) as u8;
-                    blend_pixel(&mut img, dx as u32, dy as u32, Rgba(p[0], p[1], p[2], a));
-                }
+        let (ox, oy) = prepared.offset;
+        for (rx, ry, px) in prepared.buf.enumerate_pixels() {
+            let (dx, dy) = (ox + rx as i64, oy + ry as i64);
+            if dx < 0 || dy < 0 || dx as u32 >= px_w || dy as u32 >= px_h {
+                continue;
             }
+            blend_pixel(&mut img, dx as u32, dy as u32, Rgba(px.0[0], px.0[1], px.0[2], px.0[3]));
         }
     }
-    let ascent = font
-        .horizontal_line_metrics(cell_px as f32)
-        .map(|m| m.ascent)
-        .unwrap_or(cell_px as f32 * 0.8);
 
     for y in 0..doc.height {
         for x in 0..doc.width {
@@ -137,9 +204,9 @@ fn rasterize_composited(
             }
 
             if cell.ch != ' ' {
-                let (metrics, bitmap) = font.rasterize(cell.ch, cell_px as f32);
+                let (metrics, bitmap) = assets.glyph(cell.ch, cell_px);
                 let origin_x = cell_x0 + metrics.xmin as i64;
-                let origin_y = cell_y0 + ascent.round() as i64 - metrics.height as i64 - metrics.ymin as i64;
+                let origin_y = cell_y0 + assets.ascent.round() as i64 - metrics.height as i64 - metrics.ymin as i64;
                 for gy in 0..metrics.height {
                     for gx in 0..metrics.width {
                         let coverage = bitmap[gy * metrics.width + gx];
@@ -170,20 +237,31 @@ fn rasterize_composited(
 
 /// Rasterizes `doc`'s active-frame composited cells at `cell_px` pixels per cell. See
 /// `rasterize_composited` for the pixel-math contract; this is the active-frame convenience
-/// wrapper the export dialog's live preview and single-frame PNG export both use.
+/// wrapper the export dialog's live preview and single-frame PNG export both use. Builds its own
+/// one-shot `RasterAssets` — correct for a lone call, but a multi-frame export must build one
+/// `RasterAssets` up front and drive `rasterize_frame_rgba8_with_assets` in a loop instead, or it
+/// pays the font-parse/background-resize cost on every frame again (see that function's doc
+/// comment).
 pub fn rasterize_rgba8(
     doc: &Document,
     cell_px: u32,
     opaque_bg: Option<Rgba>,
     bg_image: Option<(&image::RgbaImage, f32)>,
 ) -> Result<(u32, u32, Vec<u8>), PngExportAppError> {
-    rasterize_composited(doc, &composite(doc), cell_px, opaque_bg, bg_image)
+    let assets = build_raster_assets(doc, cell_px, bg_image)?;
+    rasterize_composited(doc, &composite(doc), cell_px, opaque_bg, &assets)
 }
 
 /// Frame-explicit analog of `rasterize_rgba8`, for a caller that already needs cross-frame
-/// awareness (GIF/spritesheet export) rather than the active frame. `frame` is always a valid
-/// index for every caller in this crate (`0..doc.frame_count()`), so an out-of-range index is an
-/// internal invariant violation, not a user-facing error.
+/// awareness rather than the active frame. `frame` is always a valid index for every caller in
+/// this crate (`0..doc.frame_count()`), so an out-of-range index is an internal invariant
+/// violation, not a user-facing error. Builds its own one-shot `RasterAssets` — see
+/// `rasterize_rgba8`'s doc comment for why a multi-frame caller should use
+/// `rasterize_frame_rgba8_with_assets` instead; `anim_export.rs`'s GIF/spritesheet export is exactly
+/// that caller, which is why this single-call convenience has no production call site of its own
+/// left (kept — tested directly, and it's what `rasterize_frame_rgba8_with_assets`'s own doc
+/// comment points a reader at first).
+#[allow(dead_code)]
 pub fn rasterize_frame_rgba8(
     doc: &Document,
     frame: usize,
@@ -191,9 +269,26 @@ pub fn rasterize_frame_rgba8(
     opaque_bg: Option<Rgba>,
     bg_image: Option<(&image::RgbaImage, f32)>,
 ) -> Result<(u32, u32, Vec<u8>), PngExportAppError> {
+    let assets = build_raster_assets(doc, cell_px, bg_image)?;
+    rasterize_frame_rgba8_with_assets(doc, frame, cell_px, opaque_bg, &assets)
+}
+
+/// The multi-frame entry point: identical pixel math to `rasterize_frame_rgba8`, but takes a
+/// `RasterAssets` built once (`build_raster_assets`) and reused across every frame of an export —
+/// the font is parsed once instead of once per frame, the background is premultiplied/resized once
+/// instead of once per frame, and each distinct glyph is rasterized at most once regardless of how
+/// many frames or cells reuse it. `anim_export.rs`'s `export_gif`/`export_spritesheet` are the real
+/// callers; both build one `RasterAssets` before their per-frame loop.
+pub(crate) fn rasterize_frame_rgba8_with_assets(
+    doc: &Document,
+    frame: usize,
+    cell_px: u32,
+    opaque_bg: Option<Rgba>,
+    assets: &RasterAssets,
+) -> Result<(u32, u32, Vec<u8>), PngExportAppError> {
     let composited =
         composite_frame(doc, frame).expect("frame is always in 0..doc.frame_count() for every caller in this crate");
-    rasterize_composited(doc, &composited, cell_px, opaque_bg, bg_image)
+    rasterize_composited(doc, &composited, cell_px, opaque_bg, assets)
 }
 
 /// Rasterizes `doc`'s composited cells at `cell_px` pixels per cell into PNG bytes. Blank cells
@@ -601,5 +696,41 @@ mod tests {
             "the crop must not expose the hidden red either — neither the visible source region nor the \
              backdrop carries any red channel, so any non-zero red pixel is a bleed surviving the crop"
         );
+    }
+
+    /// `RasterAssets`' whole point is that a shared font/background/glyph-cache produces pixel-
+    /// identical output to rebuilding everything from scratch per frame — pins that the caching
+    /// introduced by `build_raster_assets`/`rasterize_frame_rgba8_with_assets` never changes a
+    /// single pixel, only how much work it takes to get there. Exercises glyphs, cell backgrounds,
+    /// and a Cover-fitted background image together (the three things `RasterAssets` caches) across
+    /// three frames whose content differs, so a stale-cache bug (an entry from frame 0 leaking into
+    /// frame 1's output) would also be caught.
+    #[test]
+    fn a_multi_frame_export_through_shared_raster_assets_is_byte_identical_to_independent_single_frame_rasterizations() {
+        use gascii_core::{add_frame, History};
+
+        let mut doc = doc_with(3, 2);
+        let mut history = History::new();
+        for i in 1..3 {
+            let edit = add_frame(&doc, i, gascii_core::Frame::blank(3, 2)).unwrap();
+            history.apply(&mut doc, edit);
+        }
+        let glyphs = ['a', 'b', 'c'];
+        for (i, &ch) in glyphs.iter().enumerate() {
+            doc.set_active_frame(i);
+            doc.set_cell(0, 0, 0, Cell { ch, fg: Rgba((i as u8) * 40 + 10, 20, 30, 255), bg: Rgba(1, 2, 3, 200) });
+        }
+        doc.set_active_frame(0);
+
+        let src = image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 100, 50, 255]));
+        let bg_image = Some((&src, 0.75f32));
+        let opaque_bg = Some(Rgba(5, 6, 7, 255));
+
+        let assets = build_raster_assets(&doc, 8, bg_image).unwrap();
+        for i in 0..3 {
+            let shared = rasterize_frame_rgba8_with_assets(&doc, i, 8, opaque_bg, &assets).unwrap();
+            let independent = rasterize_frame_rgba8(&doc, i, 8, opaque_bg, bg_image).unwrap();
+            assert_eq!(shared, independent, "frame {i}: shared RasterAssets must produce byte-identical output to an independent rasterization");
+        }
     }
 }

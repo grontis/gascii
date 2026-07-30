@@ -12,9 +12,15 @@ use eframe::egui;
 use gascii_core::BrushShape;
 use serde::{Deserialize, Serialize};
 
-use crate::app::{tool_def, tools, Binding, ExportFormat, ExportSettings, GasciiApp, ToolKind, SIZED_TOOL_COUNT};
+use crate::app::{tool_def, tools, Binding, ExportFormat, ExportSettings, GasciiApp, ToolKind};
 
 const KEY: &str = "gascii_prefs";
+
+/// Frozen historical artifact of the pre-name-keyed positional stamp format — the `sized_slot`
+/// order `build_tools`'s literal rows assigned before stamp slots were derived (Pencil, Eraser,
+/// Line, Brush). Read-only forever (the legacy read path never goes away); must never be reordered
+/// or extended, since a stored positional index only means anything against this exact sequence.
+const LEGACY_STAMP_ORDER: [&str; 4] = ["Pencil", "Eraser", "Line", "Brush"];
 
 #[derive(Serialize, Deserialize, Default)]
 pub(crate) struct Prefs {
@@ -29,8 +35,23 @@ pub(crate) struct Prefs {
 #[derive(Serialize, Deserialize, Clone)]
 struct SlotPrefs {
     kind: String,
-    /// `(size, shape)` per sized-tool slot, in `sized_slot` order.
+    /// Legacy positional stamps, `LEGACY_STAMP_ORDER` order. Authoritative on read only when
+    /// `stamps_by_name` is empty; still WRITTEN for one release as downgrade insurance.
+    // remove after merge to main: delete this legacy-write half of `SlotPrefs::from` (restore
+    // `skip_serializing_if = "Vec::is_empty"` below) once this round has shipped one release on
+    // `main` — the legacy *read* path in `apply_to` stays indefinitely.
+    #[serde(default)]
     stamps: Vec<(u16, u8)>,
+    /// Name-keyed stamps: the tool registry `.name` this footprint belongs to.
+    #[serde(default)]
+    stamps_by_name: Vec<StampPref>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct StampPref {
+    tool: String,
+    size: u16,
+    shape: u8,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -127,10 +148,26 @@ impl Prefs {
             .iter()
             .map(|&b| {
                 let slot = app.slot(b);
-                let stamps = (0..SIZED_TOOL_COUNT)
+                let stamps_by_name: Vec<StampPref> = tools()
+                    .iter()
+                    .filter_map(|d| d.stamp_slot.map(|i| (d.name, i as usize)))
+                    .map(|(name, i)| StampPref {
+                        tool: name.to_owned(),
+                        size: slot.stamps[i].size,
+                        shape: shape_to_u8(slot.stamps[i].shape),
+                    })
+                    .collect();
+                // remove after merge to main: the legacy positional array, written for exactly the
+                // four `LEGACY_STAMP_ORDER` tools so a downgrade to a pre-migration build doesn't
+                // lose their footprints. A sized tool outside that frozen list (were one ever added)
+                // is name-only — a legacy build could not have understood it anyway.
+                let stamps: Vec<(u16, u8)> = LEGACY_STAMP_ORDER
+                    .iter()
+                    .filter_map(|&name| tools().iter().find(|d| d.name == name))
+                    .filter_map(|d| d.stamp_slot.map(|i| i as usize))
                     .map(|i| (slot.stamps[i].size, shape_to_u8(slot.stamps[i].shape)))
                     .collect();
-                SlotPrefs { kind: tool_kind_to_str(slot.kind).to_owned(), stamps }
+                SlotPrefs { kind: tool_kind_to_str(slot.kind).to_owned(), stamps, stamps_by_name }
             })
             .collect();
         Prefs {
@@ -153,6 +190,12 @@ impl Prefs {
     /// than erroring — a stored prefs blob must never be able to break startup. Only sets
     /// `app.theme_pref` — the caller (`GasciiApp::new`) is responsible for pushing it onto the
     /// `egui::Context` once, since this function deliberately takes no `Context` at all.
+    ///
+    /// Stamps read named-first: `stamps_by_name`, when non-empty, is authoritative and `stamps` is
+    /// ignored entirely; only when it's empty (a pre-migration prefs file) does the legacy
+    /// positional array get zipped against `LEGACY_STAMP_ORDER`. Either way, an unrecognized tool
+    /// name (a plugin this build doesn't have) is skipped silently, leaving every other entry
+    /// applied.
     pub(crate) fn apply_to(&self, app: &mut GasciiApp) {
         app.theme_pref = theme_pref_from_str(&self.theme);
 
@@ -160,10 +203,25 @@ impl Prefs {
             if let Some(kind) = tool_kind_from_str(&slot_prefs.kind) {
                 app.bind(*b, kind);
             }
-            let slot = &mut app.slots[b.ix()];
-            for (i, &(size, shape_byte)) in slot_prefs.stamps.iter().enumerate().take(SIZED_TOOL_COUNT) {
-                slot.stamps[i].size = size.clamp(1, gascii_core::MAX_TOOL_SIZE);
-                slot.stamps[i].shape = shape_from_u8(shape_byte);
+            let apply_one = |app: &mut GasciiApp, name: &str, size: u16, shape_byte: u8| {
+                let Some(idx) = tools().iter().find(|d| d.name == name).and_then(|d| d.stamp_slot) else {
+                    return; // unknown tool name — skipped silently, every other entry still applies
+                };
+                let idx = idx as usize;
+                let slot = &mut app.slots[b.ix()];
+                if idx < slot.stamps.len() {
+                    slot.stamps[idx].size = size.clamp(1, gascii_core::MAX_TOOL_SIZE);
+                    slot.stamps[idx].shape = shape_from_u8(shape_byte);
+                }
+            };
+            if !slot_prefs.stamps_by_name.is_empty() {
+                for pref in &slot_prefs.stamps_by_name {
+                    apply_one(app, &pref.tool, pref.size, pref.shape);
+                }
+            } else {
+                for (&name, &(size, shape_byte)) in LEGACY_STAMP_ORDER.iter().zip(slot_prefs.stamps.iter()) {
+                    apply_one(app, name, size, shape_byte);
+                }
             }
         }
 
@@ -212,6 +270,7 @@ pub(crate) fn save(storage: &mut dyn eframe::Storage, app: &GasciiApp) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::BRUSH_KIND;
 
     #[test]
     fn shape_round_trips_through_its_u8_mapping() {
@@ -258,8 +317,8 @@ mod tests {
     #[test]
     fn prefs_round_trip_through_json_preserves_every_field() {
         let mut app = GasciiApp::headless();
-        app.bind(Binding::L, ToolKind::Brush);
-        app.slots[Binding::L.ix()].stamps[crate::app::sized_slot(ToolKind::Brush).unwrap()] =
+        app.bind(Binding::L, BRUSH_KIND);
+        app.slots[Binding::L.ix()].stamps[crate::app::sized_slot(BRUSH_KIND).unwrap()] =
             crate::app::StampSettings { size: 7, shape: BrushShape::Circle };
         app.recent_glyphs = vec!['a', 'b', 'c'];
         app.recent_files = vec![PathBuf::from("a.gascii"), PathBuf::from("b.gascii")];
@@ -275,9 +334,9 @@ mod tests {
         back.apply_to(&mut restored);
 
         assert_eq!(restored.theme_pref, egui::ThemePreference::Dark);
-        assert_eq!(restored.slot(Binding::L).kind, ToolKind::Brush);
+        assert_eq!(restored.slot(Binding::L).kind, BRUSH_KIND);
         assert_eq!(
-            restored.slot(Binding::L).stamps[crate::app::sized_slot(ToolKind::Brush).unwrap()],
+            restored.slot(Binding::L).stamps[crate::app::sized_slot(BRUSH_KIND).unwrap()],
             crate::app::StampSettings { size: 7, shape: BrushShape::Circle }
         );
         assert_eq!(restored.recent_glyphs, vec!['a', 'b', 'c']);
@@ -295,8 +354,8 @@ mod tests {
     #[test]
     fn prefs_round_trip_resolves_brush_through_the_plugin_backed_row_on_either_binding() {
         let mut app = GasciiApp::headless();
-        app.bind(Binding::L, ToolKind::Brush);
-        app.bind(Binding::R, ToolKind::Brush);
+        app.bind(Binding::L, BRUSH_KIND);
+        app.bind(Binding::R, BRUSH_KIND);
 
         let prefs = Prefs::from_app(&app);
         let json = serde_json::to_string(&prefs).unwrap();
@@ -305,8 +364,8 @@ mod tests {
         let mut restored = GasciiApp::headless();
         back.apply_to(&mut restored);
 
-        assert_eq!(restored.slot(Binding::L).kind, ToolKind::Brush, "L must resolve back through the plugin-backed row");
-        assert_eq!(restored.slot(Binding::R).kind, ToolKind::Brush, "R must resolve back through the plugin-backed row too");
+        assert_eq!(restored.slot(Binding::L).kind, BRUSH_KIND, "L must resolve back through the plugin-backed row");
+        assert_eq!(restored.slot(Binding::R).kind, BRUSH_KIND, "R must resolve back through the plugin-backed row too");
     }
 
     #[test]
@@ -363,10 +422,193 @@ mod tests {
     fn an_out_of_range_stamp_size_is_clamped_rather_than_stored_invalid() {
         let mut app = GasciiApp::headless();
         let mut prefs = Prefs::from_app(&app);
+        // Clear the named shape so this drives the legacy positional read path, matching the
+        // test's original intent against a pre-migration-shaped blob.
+        prefs.slots[Binding::L.ix()].stamps_by_name.clear();
         prefs.slots[Binding::L.ix()].stamps[0] = (u16::MAX, 0);
         prefs.apply_to(&mut app);
         let slot0 = crate::app::sized_slot(app.slot(Binding::L).kind).unwrap();
         assert!(app.slot(Binding::L).stamps[slot0].size <= gascii_core::MAX_TOOL_SIZE);
+    }
+
+    /// D3's direct regression test: a hand-written legacy positional blob (no `stamps_by_name` at
+    /// all) must land each footprint on the right tool, resolved through `LEGACY_STAMP_ORDER`.
+    #[test]
+    fn legacy_positional_stamps_migrate_onto_the_right_tools() {
+        let json = serde_json::json!({
+            "theme": "system",
+            "slots": [
+                { "kind": "Pencil", "stamps": [[3, 1], [4, 2], [5, 0], [6, 1]] },
+                { "kind": "Eraser", "stamps": [[1, 0], [1, 0], [1, 0], [1, 0]] }
+            ],
+            "recent_glyphs": "",
+            "recent_files": [],
+            "export": { "format": "text", "scale": 1, "transparent": true, "trim": true },
+            "show_grid": false
+        })
+        .to_string();
+
+        let prefs: Prefs = serde_json::from_str(&json).unwrap();
+        let mut app = GasciiApp::headless();
+        prefs.apply_to(&mut app);
+
+        let l = app.slot(Binding::L);
+        assert_eq!(
+            l.stamps[crate::app::sized_slot(ToolKind::Pencil).unwrap()],
+            crate::app::StampSettings { size: 3, shape: BrushShape::Square }
+        );
+        assert_eq!(
+            l.stamps[crate::app::sized_slot(ToolKind::Eraser).unwrap()],
+            crate::app::StampSettings { size: 4, shape: BrushShape::Circle }
+        );
+        assert_eq!(
+            l.stamps[crate::app::sized_slot(ToolKind::Line).unwrap()],
+            crate::app::StampSettings { size: 5, shape: BrushShape::Raw }
+        );
+        assert_eq!(
+            l.stamps[crate::app::sized_slot(BRUSH_KIND).unwrap()],
+            crate::app::StampSettings { size: 6, shape: BrushShape::Square }
+        );
+    }
+
+    /// A named stamp for a tool this build doesn't have (e.g. a removed plugin) must be skipped
+    /// silently, without disturbing any other entry in the same list.
+    #[test]
+    fn a_named_stamp_for_an_unknown_tool_is_skipped_without_disturbing_the_known_ones() {
+        let mut app = GasciiApp::headless();
+        let mut prefs = Prefs::from_app(&app);
+        prefs.slots[Binding::L.ix()].stamps_by_name.push(StampPref { tool: "NotARealPlugin".to_owned(), size: 9, shape: 2 });
+        if let Some(entry) = prefs.slots[Binding::L.ix()].stamps_by_name.iter_mut().find(|p| p.tool == "Pencil") {
+            entry.size = 5;
+        }
+        prefs.apply_to(&mut app);
+        assert_eq!(app.slot(Binding::L).stamps[crate::app::sized_slot(ToolKind::Pencil).unwrap()].size, 5);
+    }
+
+    /// `from_app` must emit both shapes for the four `LEGACY_STAMP_ORDER` tools, and they must
+    /// agree — the dual-write contract D3 selected.
+    #[test]
+    fn saved_prefs_emit_both_the_named_and_the_legacy_stamp_shapes_and_agree() {
+        let mut app = GasciiApp::headless();
+        app.slots[Binding::L.ix()].stamps[crate::app::sized_slot(ToolKind::Pencil).unwrap()] =
+            crate::app::StampSettings { size: 4, shape: BrushShape::Square };
+        let prefs = Prefs::from_app(&app);
+        let l = &prefs.slots[Binding::L.ix()];
+        assert!(!l.stamps_by_name.is_empty());
+        assert!(!l.stamps.is_empty());
+        for (i, name) in LEGACY_STAMP_ORDER.iter().enumerate() {
+            let named = l.stamps_by_name.iter().find(|p| &p.tool == name).unwrap();
+            assert_eq!(l.stamps[i], (named.size, named.shape), "{name} legacy/named must agree");
+        }
+    }
+
+    /// A blob whose two stamp shapes disagree must resolve through the named entries — the named
+    /// shape always wins when present.
+    #[test]
+    fn a_blob_carrying_both_shapes_lets_the_named_one_win() {
+        let json = serde_json::json!({
+            "theme": "system",
+            "slots": [
+                {
+                    "kind": "Pencil",
+                    "stamps": [[1, 0], [1, 0], [1, 0], [1, 0]],
+                    "stamps_by_name": [
+                        { "tool": "Pencil", "size": 9, "shape": 2 },
+                        { "tool": "Eraser", "size": 1, "shape": 0 },
+                        { "tool": "Line", "size": 1, "shape": 0 },
+                        { "tool": "Brush", "size": 1, "shape": 0 }
+                    ]
+                },
+                { "kind": "Eraser", "stamps": [[1, 0], [1, 0], [1, 0], [1, 0]] }
+            ],
+            "recent_glyphs": "",
+            "recent_files": [],
+            "export": { "format": "text", "scale": 1, "transparent": true, "trim": true },
+            "show_grid": false
+        })
+        .to_string();
+
+        let prefs: Prefs = serde_json::from_str(&json).unwrap();
+        let mut app = GasciiApp::headless();
+        prefs.apply_to(&mut app);
+
+        assert_eq!(
+            app.slot(Binding::L).stamps[crate::app::sized_slot(ToolKind::Pencil).unwrap()],
+            crate::app::StampSettings { size: 9, shape: BrushShape::Circle },
+            "the named shape must win over the disagreeing legacy positional shape"
+        );
+    }
+
+    /// Guards the `#[serde(default)]` trap directly: a blob that OMITS `stamps_by_name` entirely
+    /// (not merely an empty array) must still load every other field — the field's own doc comment
+    /// calls out that its absence, without `#[serde(default)]`, would fail the whole `SlotPrefs` and
+    /// discard every prefs field, not just stamps.
+    #[test]
+    fn a_prefs_blob_missing_stamps_by_name_still_loads_every_other_field() {
+        let json = serde_json::json!({
+            "theme": "dark",
+            "slots": [
+                { "kind": "Pencil", "stamps": [[1, 0], [1, 0], [1, 0], [1, 0]] },
+                { "kind": "Eraser", "stamps": [[1, 0], [1, 0], [1, 0], [1, 0]] }
+            ],
+            "recent_glyphs": "xyz",
+            "recent_files": ["a.gascii"],
+            "export": { "format": "png", "scale": 2, "transparent": false, "trim": true },
+            "show_grid": true
+        })
+        .to_string();
+
+        let prefs: Prefs = serde_json::from_str(&json).expect("a blob missing stamps_by_name must still parse");
+        let mut app = GasciiApp::headless();
+        prefs.apply_to(&mut app);
+
+        assert_eq!(app.theme_pref, egui::ThemePreference::Dark);
+        assert_eq!(app.recent_glyphs, vec!['x', 'y', 'z']);
+        assert_eq!(app.recent_files, vec![PathBuf::from("a.gascii")]);
+        assert_eq!(app.export.format, ExportFormat::Png);
+        assert!(app.show_grid);
+    }
+
+    /// A hostile named-shape blob (an unrecognized tool name, a wildly out-of-range size, an
+    /// unrecognized shape byte) must load without panicking and leave every stamp sanitized — the
+    /// named-shape counterpart to the existing legacy-shape hostile-blob test below.
+    #[test]
+    fn a_hostile_named_stamp_shape_blob_loads_without_panicking_and_sanitizes_every_stamp() {
+        let json = serde_json::json!({
+            "theme": "not_a_real_theme",
+            "slots": [
+                {
+                    "kind": "TotallyMadeUpTool",
+                    "stamps": [],
+                    "stamps_by_name": [
+                        { "tool": "Pencil", "size": 65535, "shape": 200 },
+                        { "tool": "NotAToolAtAll", "size": 3, "shape": 1 }
+                    ]
+                },
+                { "kind": "AlsoNotARealTool", "stamps": [], "stamps_by_name": [] }
+            ],
+            "recent_glyphs": "abcXYZ123",
+            "recent_files": [
+                "0.gascii", "1.gascii", "2.gascii", "3.gascii", "4.gascii",
+                "5.gascii", "6.gascii", "7.gascii", "8.gascii", "9.gascii", "5.gascii"
+            ],
+            "export": { "format": "not_a_real_format", "scale": 200, "transparent": true, "trim": false },
+            "show_grid": true
+        })
+        .to_string();
+
+        let mut app = GasciiApp::headless();
+        let before_kind = app.slot(Binding::L).kind;
+        let prefs: Prefs = serde_json::from_str(&json).expect("well-typed JSON, even with hostile values, must parse");
+        prefs.apply_to(&mut app);
+
+        assert_eq!(app.theme_pref, egui::ThemePreference::System);
+        assert_eq!(app.slot(Binding::L).kind, before_kind, "an unrecognized tool name must not change the bound kind");
+        for b in Binding::ALL {
+            for stamp in &app.slot(b).stamps {
+                assert!(stamp.size >= 1 && stamp.size <= gascii_core::MAX_TOOL_SIZE, "every stamp size must be in range");
+            }
+        }
     }
 
     /// A single hostile-but-well-typed prefs JSON blob combining several adversarial values at

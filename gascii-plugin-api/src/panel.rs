@@ -18,6 +18,16 @@ pub struct PanelOutcome {
     /// mirrors `set_active_frame`'s exact shape: a plain field write the host applies outside
     /// `History`, not an undo entry. `None` means "no change requested this frame."
     pub set_loop_playback: Option<bool>,
+    /// A request to overwrite `Document.frame_duration_ms` (the document-level default playback
+    /// duration) directly — the same plain, non-`Edit`-tracked "set-and-forget" shape as
+    /// `set_loop_playback`, for the identical reason (mirrors `background`'s own precedent). `None`
+    /// means "no change requested this frame."
+    ///
+    /// Growth policy for this struct: one `Option<T>` field per non-`Edit` document property the
+    /// host applies outside `History`. If this list reaches four, replace it with a
+    /// `Vec<DocProperty>` enum so `drain_panel_outcomes` gets an exhaustive match instead of one
+    /// more hand-written `if let` per property.
+    pub set_default_frame_duration: Option<u32>,
     /// A readable failure message for a control this panel drew that could not carry out its
     /// requested change (e.g. a `frame_ops::*` call rejected by `MAX_FRAMES`/the cell budget). The
     /// host writes this straight into `last_error`, the same channel every other structural action
@@ -38,6 +48,7 @@ mod tests {
         assert!(outcome.edits.is_empty());
         assert!(outcome.set_active_frame.is_none());
         assert!(outcome.set_loop_playback.is_none());
+        assert!(outcome.set_default_frame_duration.is_none());
         assert!(outcome.error.is_none());
     }
 }

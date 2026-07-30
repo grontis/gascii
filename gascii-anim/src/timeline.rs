@@ -6,16 +6,24 @@
 //!
 //! Document-level `frame_duration_ms`/`loop_playback` (the animation's default fps/loop) are plain
 //! `pub`, non-`Edit`-tracked fields on `Document` (the same "set-and-forget" precedent `background`
-//! already follows) — unreachable through `PanelOutcome`'s edits-only mutation channel, so this
-//! panel only ever *reads* them (for the tick's loop behavior and this display), never offers a
-//! control to change them. The only mutable timing control exposed is the active frame's own
-//! duration override, via `frame_ops::set_frame_duration` — an `Edit`, reachable normally.
+//! already follows) — unreachable through `PanelOutcome`'s edits-only mutation channel. Both are
+//! writable from this panel now: the Loop checkbox (via `PanelOutcome::set_loop_playback`) and the
+//! header's Default duration stepper (via `PanelOutcome::set_default_frame_duration`) — plain field
+//! writes the host applies outside `History`, exactly like `set_active_frame`. The active frame's
+//! own duration override is the one timing control that *is* an `Edit`, via
+//! `frame_ops::set_frame_duration` — reachable normally, with a clear-override control next to it
+//! once a frame actually carries one.
 //!
 //! `frame_ops::*` failures from Add/Duplicate (hitting `MAX_FRAMES`, the cell budget) surface
 //! through `PanelOutcome::error`, using `frame_op_error_message`'s per-variant wording — the host
 //! writes it into `last_error`, the same channel every other structural action already uses. Delete
 //! instead disables itself outright at its one cheap-to-prevent boundary (`frame_count() <= 1`), so
 //! it never reaches `frame_ops` in a state that could fail.
+//!
+//! The thumbnail strip only calls `ThumbnailCache::get_or_build` for a frame whose allocated rect
+//! actually intersects the scroll area's visible clip rect (`thumb_is_visible`) — every frame still
+//! gets `ui.allocate_exact_size`'d at the identical size regardless, so layout, scroll extent, and
+//! drag-reorder geometry are unaffected by which indices are currently offscreen.
 
 use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
 use gascii_core::{Document, Edit, FrameOpError};
@@ -28,11 +36,12 @@ use crate::widgets;
 
 pub(crate) const PANEL_H: f32 = 132.0;
 
-/// Ceiling on the onion-skin prev/next steppers. `paint_onion` already stops as soon as it runs
-/// past an actual neighbor frame, so the real per-paint cost is bounded by
-/// `min(configured depth, frame_count() - 1)`, not the raw stepper value — this cap only removes the
-/// rarely-reachable case of a document near `MAX_FRAMES` combined with a stepper clicked far beyond
-/// any realistic depth (1-3), which would otherwise cost noticeably more per idle paint than intended.
+/// Ceiling on the onion-skin prev/next steppers. `paint_onion` (`decorator.rs`) scans farthest-to-
+/// nearest and no longer stops at the first out-of-range neighbor (painting nearest-last needs the
+/// full configured depth visited every time, not just however many neighbor frames actually
+/// exist), so the per-paint cost per side is exactly this cap, not `frame_count()`-dependent — the
+/// cap is what keeps a stepper clicked far beyond any realistic depth (1-3) from costing
+/// noticeably more per idle paint than intended, regardless of document size.
 const ONION_DEPTH_MAX: u8 = 8;
 
 pub(crate) fn panel_frame(ctx: &egui::Context) -> egui::Frame {
@@ -40,10 +49,10 @@ pub(crate) fn panel_frame(ctx: &egui::Context) -> egui::Frame {
     egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::symmetric(12, 8)).stroke(egui::Stroke::new(1.0, t.window_edge))
 }
 
-pub(crate) fn show(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mut ThumbnailCache) -> PanelOutcome {
+pub(crate) fn show(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mut ThumbnailCache, top_edit_id: Option<u64>) -> PanelOutcome {
     let mut outcome = PanelOutcome::default();
     egui::Panel::bottom("gascii_anim_timeline").frame(panel_frame(ui.ctx())).exact_size(PANEL_H).show(ui, |ui| {
-        outcome = body(ui, doc, state, thumbs, Vec2::new(64.0, 40.0), 26.0);
+        outcome = body(ui, doc, state, thumbs, Vec2::new(64.0, 40.0), 26.0, top_edit_id);
     });
     outcome
 }
@@ -91,18 +100,46 @@ fn move_active_right(doc: &Document) -> Option<Edit> {
     gascii_core::reorder_frame(doc, a, a + 1).ok().flatten()
 }
 
-/// Steps the active frame's own duration override by `delta_ms`, floored at 10ms so a runaway
-/// negative step can never reach (or go below) zero.
+/// Steps the active frame's own duration override by `delta_ms`, clamped to `[10,
+/// Document::MAX_FRAME_DURATION_MS]`. The arithmetic runs in `i64` — `current` can be as large as
+/// `MAX_FRAME_DURATION_MS` (a file-sourced value, already clamped at load but still far above
+/// `i32`'s safe step-by-`delta_ms` range), and `i32` addition panics on overflow in a release build
+/// (`overflow-checks` are on) rather than wrapping, so doing this step in `i32` risks a crash on a
+/// document that came from a hostile or simply very old file.
 fn step_duration(doc: &Document, delta_ms: i32) -> Option<Edit> {
     let idx = doc.active_frame();
     let current = doc.resolved_frame_duration_ms(idx)?;
-    let updated = (current as i32 + delta_ms).max(10) as u32;
+    let updated = (current as i64 + delta_ms as i64).clamp(10, gascii_core::Document::MAX_FRAME_DURATION_MS as i64) as u32;
     gascii_core::set_frame_duration(doc, idx, Some(updated)).ok().flatten()
 }
 
+/// Clears the active frame's own duration override, falling back to the document default —
+/// `None`-shaped exactly like `step_duration`/`frame_ops::set_frame_duration`'s own contract, so it
+/// only produces an `Edit` when there was actually an override to clear.
+fn clear_duration_override(doc: &Document) -> Option<Edit> {
+    let idx = doc.active_frame();
+    gascii_core::set_frame_duration(doc, idx, None).ok().flatten()
+}
+
+/// Steps the document-level default duration (`Document.frame_duration_ms`) by `delta_ms`, clamped
+/// identically to `step_duration`. Not an `Edit` — reported through `PanelOutcome::
+/// set_default_frame_duration`, the same plain-field-write shape `set_loop_playback` already uses.
+fn step_default_duration(current: u32, delta_ms: i32) -> u32 {
+    (current as i64 + delta_ms as i64).clamp(10, gascii_core::Document::MAX_FRAME_DURATION_MS as i64) as u32
+}
+
+/// Whether a thumb allocated at `[rect_min_x, rect_min_x + thumb_w)` intersects the visible clip
+/// range `[clip_min_x, clip_max_x]` — the pure predicate `body`'s culling loop applies per frame,
+/// kept separate from `Ui`/`egui::Rect` so it's testable headlessly.
+fn thumb_is_visible(rect_min_x: f32, thumb_w: f32, clip_min_x: f32, clip_max_x: f32) -> bool {
+    rect_min_x < clip_max_x && rect_min_x + thumb_w > clip_min_x
+}
+
 /// The shared control-row + thumbnail-strip body both chrome variants render. `thumb_size` and
-/// `control_h` are the only geometry deltas between windowed and kiosk.
-pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mut ThumbnailCache, thumb_size: Vec2, control_h: f32) -> PanelOutcome {
+/// `control_h` are the only geometry deltas between windowed and kiosk. `top_edit_id` is threaded
+/// straight through to `ThumbnailCache::get_or_build` — see `thumbnail.rs`'s module doc for why the
+/// panel needs it.
+pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mut ThumbnailCache, thumb_size: Vec2, control_h: f32, top_edit_id: Option<u64>) -> PanelOutcome {
     let t = theme::current(ui.ctx());
     let mut outcome = PanelOutcome::default();
 
@@ -182,6 +219,24 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
                     outcome.edits.push(edit);
                 }
             }
+            // Shown only once the active frame actually carries an override — clears it back to
+            // tracking the document default rather than leaving it permanently pinned once set.
+            let has_override = doc.frame(doc.active_frame()).is_some_and(|f| f.duration_override.is_some());
+            if has_override && widgets::button(ui, "\u{00D7}", true, control_h).clicked() {
+                if let Some(edit) = clear_duration_override(doc) {
+                    outcome.edits.push(edit);
+                }
+            }
+
+            ui.add_space(10.0);
+            widgets::micro_label(ui, "DEFAULT");
+            if widgets::button(ui, "-10ms", true, control_h).clicked() {
+                outcome.set_default_frame_duration = Some(step_default_duration(doc.frame_duration_ms, -10));
+            }
+            ui.label(egui::RichText::new(format!("{}ms", doc.frame_duration_ms)).font(widgets::mono_id(widgets::size::LABEL)).color(t.fg_secondary));
+            if widgets::button(ui, "+10ms", true, control_h).clicked() {
+                outcome.set_default_frame_duration = Some(step_default_duration(doc.frame_duration_ms, 10));
+            }
 
             ui.add_space(10.0);
             let mut onion = state.borrow().onion_enabled;
@@ -214,10 +269,17 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 for i in 0..doc.frame_count() {
-                    let texture = thumbs.get_or_build(ui.ctx(), doc, i);
+                    // Allocated at the identical size regardless of visibility, so layout, scroll
+                    // extent, and drag-reorder geometry never depend on which indices are
+                    // currently culled — only whether `get_or_build` (and the texture paint below
+                    // it) actually runs does.
                     let (rect, resp) = ui.allocate_exact_size(thumb_size, Sense::click());
-                    if let Some(tex) = texture {
-                        ui.painter().image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                    let clip = ui.clip_rect();
+                    if thumb_is_visible(rect.min.x, thumb_size.x, clip.min.x, clip.max.x) {
+                        let texture = thumbs.get_or_build(ui.ctx(), doc, i, top_edit_id);
+                        if let Some(tex) = texture {
+                            ui.painter().image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                        }
                     }
                     let active = i == doc.active_frame();
                     let (border, width) = if active { (t.border_strong, 2.0) } else { (t.border_soft, 1.0) };
@@ -343,6 +405,27 @@ mod tests {
         }
     }
 
+    /// A `duration_override` sitting near `i32::MAX` (reachable only via a hostile/very old file —
+    /// `load_v2` clamps this at load time, but this pins `step_duration`'s own arithmetic
+    /// independent of that) must clamp at `Document::MAX_FRAME_DURATION_MS`, not panic on overflow
+    /// or wrap negative and collapse to the 10ms floor.
+    #[test]
+    fn step_duration_clamps_at_the_max_instead_of_overflowing_near_i32_max() {
+        let mut doc = doc_with_frames(1);
+        let near_max = i32::MAX as u32 - 5;
+        let dur_edit = gascii_core::set_frame_duration(&doc, 0, Some(near_max)).unwrap().unwrap();
+        let mut history = History::new();
+        history.apply(&mut doc, dur_edit);
+
+        let edit = step_duration(&doc, 1000).unwrap();
+        match edit {
+            Edit::SetFrameDuration { after, .. } => {
+                assert_eq!(after, Some(gascii_core::Document::MAX_FRAME_DURATION_MS), "must clamp at the max, not overflow or wrap");
+            }
+            other => panic!("expected SetFrameDuration, got {other:?}"),
+        }
+    }
+
     #[test]
     fn body_renders_a_thumbnail_strip_click_as_a_set_active_frame_request() {
         let doc = doc_with_frames(3);
@@ -353,12 +436,13 @@ mod tests {
         // requests a mutation.
         let mut outcome = None;
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            outcome = Some(body(ui, &doc, &state, &mut thumbs, Vec2::new(48.0, 30.0), 24.0));
+            outcome = Some(body(ui, &doc, &state, &mut thumbs, Vec2::new(48.0, 30.0), 24.0, Some(1)));
         });
         let outcome = outcome.unwrap();
         assert!(outcome.edits.is_empty());
         assert!(outcome.set_active_frame.is_none());
         assert!(outcome.set_loop_playback.is_none());
+        assert!(outcome.set_default_frame_duration.is_none());
         assert!(outcome.error.is_none());
     }
 
@@ -373,8 +457,86 @@ mod tests {
         let ctx = egui::Context::default();
         let mut outcome = None;
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            outcome = Some(body(ui, &doc, &state, &mut thumbs, Vec2::new(48.0, 30.0), 24.0));
+            outcome = Some(body(ui, &doc, &state, &mut thumbs, Vec2::new(48.0, 30.0), 24.0, Some(1)));
         });
         assert!(outcome.unwrap().set_loop_playback.is_none(), "a no-input render must not request a loop change");
+    }
+
+    /// The Default duration stepper reads `Document.frame_duration_ms` as its display value and, on
+    /// a no-input render, must request no change — proves it never drifts, mirroring the Loop
+    /// checkbox's own no-input contract above.
+    #[test]
+    fn body_default_duration_stepper_requests_nothing_on_a_no_input_render() {
+        let doc = doc_with_frames(2);
+        let state = SharedState::new();
+        let mut thumbs = ThumbnailCache::new();
+        let ctx = egui::Context::default();
+        let mut outcome = None;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            outcome = Some(body(ui, &doc, &state, &mut thumbs, Vec2::new(48.0, 30.0), 24.0, Some(1)));
+        });
+        assert!(outcome.unwrap().set_default_frame_duration.is_none());
+    }
+
+    #[test]
+    fn clear_duration_override_produces_none_only_when_an_override_actually_exists() {
+        let mut doc = doc_with_frames(1);
+        assert!(clear_duration_override(&doc).is_none(), "no override set: nothing to clear");
+
+        let mut history = History::new();
+        let set_edit = gascii_core::set_frame_duration(&doc, 0, Some(50)).unwrap().unwrap();
+        history.apply(&mut doc, set_edit);
+
+        let edit = clear_duration_override(&doc).unwrap();
+        match edit {
+            Edit::SetFrameDuration { after, .. } => assert_eq!(after, None),
+            other => panic!("expected SetFrameDuration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_default_duration_clamps_to_the_same_range_as_step_duration() {
+        assert_eq!(step_default_duration(gascii_core::Document::DEFAULT_FRAME_DURATION_MS, -1000), 10);
+        assert_eq!(step_default_duration(gascii_core::Document::MAX_FRAME_DURATION_MS, 1000), gascii_core::Document::MAX_FRAME_DURATION_MS);
+        assert_eq!(step_default_duration(100, 10), 110);
+    }
+
+    #[test]
+    fn thumb_is_visible_true_when_the_thumb_overlaps_the_clip_range_at_all() {
+        // Fully inside.
+        assert!(thumb_is_visible(10.0, 48.0, 0.0, 100.0));
+        // Straddling the left clip edge.
+        assert!(thumb_is_visible(-20.0, 48.0, 0.0, 100.0));
+        // Straddling the right clip edge.
+        assert!(thumb_is_visible(90.0, 48.0, 0.0, 100.0));
+    }
+
+    /// End-to-end through `body`: a document with far more frames than fit in a constrained
+    /// viewport must leave most of the strip's textures unbuilt — the direct H1 regression, proving
+    /// offscreen frames never reach `ThumbnailCache::get_or_build` at all, not merely that the
+    /// pure `thumb_is_visible` predicate is correct in isolation.
+    #[test]
+    fn body_never_builds_a_thumbnail_for_a_frame_scrolled_well_outside_a_constrained_viewport() {
+        let doc = doc_with_frames(200);
+        let state = SharedState::new();
+        let mut thumbs = ThumbnailCache::new();
+        let ctx = egui::Context::default();
+        // A narrow viewport: at ~52px/thumb (48px + 4px spacing) a 300px-wide window fits well
+        // under 200 of them.
+        let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 400.0))), ..Default::default() };
+        let _ = ctx.run_ui(raw, |ui| {
+            let _ = body(ui, &doc, &state, &mut thumbs, Vec2::new(48.0, 30.0), 24.0, Some(1));
+        });
+        assert!(thumbs.built_count() < doc.frame_count(), "culling must leave the far-offscreen majority of frames unbuilt");
+    }
+
+    #[test]
+    fn thumb_is_visible_false_when_the_thumb_is_entirely_outside_the_clip_range() {
+        // Entirely to the left.
+        assert!(!thumb_is_visible(-100.0, 48.0, 0.0, 100.0));
+        // Entirely to the right.
+        assert!(!thumb_is_visible(150.0, 48.0, 0.0, 100.0));
+        // Exactly touching the right edge (open interval: touching, not overlapping, is invisible).
+        assert!(!thumb_is_visible(100.0, 48.0, 0.0, 100.0));
     }
 }

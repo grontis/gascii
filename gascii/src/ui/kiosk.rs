@@ -176,8 +176,8 @@ fn binding_options(ui: &mut Ui, app: &mut GasciiApp, k: f32) {
             stepper_h: SIZE_STEPPER_H * k,
             shape_indent: 18.0,
             item_spacing_y: None,
-            wrap_brush_mode: true,
-            brush_slider_h: 24.0,
+            inline_controls: true,
+            slider_h: 24.0,
         },
     );
 }
@@ -255,7 +255,7 @@ pub fn status_bar(ui: &mut Ui, app: &mut GasciiApp) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{Binding, ToolKind};
+    use crate::app::{Binding, ToolKind, BRUSH_KIND};
     use gascii_core::{Buildup, BrushShape, DensityMode};
 
     /// Full size on tall panels, proportional shrink below `COMFORT_H`, floored at `SCALE_MIN` so
@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn brush_block_renders_when_a_binding_holds_brush_without_mutating_brush_state() {
         let mut app = crate::app::GasciiApp::headless();
-        app.bind(Binding::R, ToolKind::Brush);
+        app.bind(Binding::R, BRUSH_KIND);
         app.brush_plugin_mut().set_density_mode(DensityMode::Buildup(Buildup));
         let ramp_before = app.brush_plugin_mut().active_ramp();
 

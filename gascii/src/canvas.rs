@@ -289,6 +289,24 @@ fn drive_stroke_tail(
     StrokeTail { ended: ends, edit, last_drag_cell }
 }
 
+/// Applies a `ToolCtxPatch` over the `(density, ramp)` defaults, field by field: a `None` patch (no
+/// plugin, or the plugin answered "nothing to patch") leaves both defaults untouched, and a patch
+/// that sets only one field leaves the other at its default rather than zeroing it. Pulled out as a
+/// pure function so this field-by-field merge is directly unit-testable without a live `GasciiApp`.
+fn apply_ctx_patch(patch: Option<gascii_plugin_api::ToolCtxPatch>) -> (DensityMode, Vec<char>) {
+    let mut density = DEFAULT_DENSITY;
+    let mut ramp = Vec::new();
+    if let Some(patch) = patch {
+        if let Some(d) = patch.density {
+            density = d;
+        }
+        if let Some(r) = patch.ramp {
+            ramp = r;
+        }
+    }
+    (density, ramp)
+}
+
 /// The `ToolCtx` for one binding. Everything but the footprint is app-global shared state; the
 /// size/shape come from that binding's own slot, so each button draws with its own stamp.
 ///
@@ -303,16 +321,17 @@ pub(crate) fn tool_ctx(app: &GasciiApp, b: Binding) -> gascii_core::ToolCtx {
     } else {
         stamp.size
     };
-    // Only a tool whose row asks for it (Brush's, via `wants_extra_ctx`) reads `density`/`ramp`;
+    // Only a tool whose row asks for it (Brush's, via `wants_ctx_patch`) reads `density`/`ramp`;
     // for every other tool the ramp clone would be a per-drag-frame allocation on the stroke hot
     // path for data it ignores.
     let kind = app.slot(b).kind;
-    let (density, ramp) = if tool_def(kind).wants_extra_ctx {
-        let i = tool_def(kind).plugin_slot.expect("wants_extra_ctx implies a plugin_slot");
-        app.plugins[i].extra_tool_ctx(tool_def(kind).name).unwrap_or((DEFAULT_DENSITY, Vec::new()))
+    let patch = if tool_def(kind).wants_ctx_patch {
+        let i = tool_def(kind).plugin_slot.expect("wants_ctx_patch implies a plugin_slot");
+        app.plugins[i].tool_ctx_patch(tool_def(kind).name)
     } else {
-        (DEFAULT_DENSITY, Vec::new())
+        None
     };
+    let (density, ramp) = apply_ctx_patch(patch);
     gascii_core::ToolCtx {
         frame: app.active_frame,
         layer: app.active_layer,
@@ -401,6 +420,22 @@ pub(crate) fn begin_gesture(app: &mut GasciiApp, b: Binding, x: u16, y: u16, alt
 /// grip cannot win any other way.
 pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool) {
     let ctx = ui.ctx().clone();
+    let (response, painter, origin, cell, doc_extent) =
+        handle_canvas_input(ui, app, &ctx, pointer_on_resize_grip);
+    paint_canvas(ui, app, &ctx, &response, &painter, origin, cell, doc_extent, pointer_on_resize_grip);
+}
+
+/// The input-precedence pipeline for one frame: fit/refit policy, zoom (wheel/pinch/deferred
+/// step), pan, gesture press routing (stroke-vs-pan/zoom ownership), stroke driving, the
+/// keyboard-owner/paste dispatch (`route_owner_keys`), stylus pressure, and focus-loss
+/// stuck-stroke recovery — in that order, which is load-bearing. Returns the painter/geometry
+/// `paint_canvas` needs to render this same frame.
+fn handle_canvas_input(
+    ui: &mut egui::Ui,
+    app: &mut GasciiApp,
+    ctx: &egui::Context,
+    pointer_on_resize_grip: bool,
+) -> (egui::Response, Painter, Pos2, Vec2, DocExtent) {
     let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
     if app.pending_fit {
         app.pending_fit = false;
@@ -408,7 +443,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
         // would remap the still pointer to a different cell under a live gesture.
         if !app.stroke_in_progress() {
             app.viewport
-                .fit_to_window(ui.available_size(), DESK_MARGIN, app.doc.extent(), &ctx);
+                .fit_to_window(ui.available_size(), DESK_MARGIN, app.doc.extent(), ctx);
             app.kiosk_last_fit_size = Some(ui.available_size());
         }
     } else if is_fullscreen {
@@ -419,7 +454,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
         // size mismatch persists, so the refit lands on the first frame after release.
         let avail = ui.available_size();
         if app.kiosk_last_fit_size != Some(avail) && !app.stroke_in_progress() {
-            app.viewport.fit_to_window(avail, DESK_MARGIN, app.doc.extent(), &ctx);
+            app.viewport.fit_to_window(avail, DESK_MARGIN, app.doc.extent(), ctx);
             app.kiosk_last_fit_size = Some(avail);
         }
     } else {
@@ -430,7 +465,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
 
     let (response, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
     let origin = response.rect.min;
-    let mut cell = app.viewport.cell_size(&ctx);
+    let mut cell = app.viewport.cell_size(ctx);
     let doc_extent = app.doc.extent();
 
     // This function polls raw pointer/keyboard state (`ui.input(|i| i.pointer...)`) rather than
@@ -501,7 +536,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
         // own doc comment.
         let shift_held = ui.input(|i| i.modifiers.shift);
 
-        cell = app.viewport.cell_size(&ctx);
+        cell = app.viewport.cell_size(ctx);
         app.hovered_cell = response
             .hover_pos()
             .and_then(|p| app.viewport.screen_to_cell(p, cell, origin, doc_extent));
@@ -611,104 +646,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
             }
         }
 
-        // Keyboard routing: the owning slot's tool receives keys, dispatched by that slot's kind.
-        // At most one slot owns the keyboard, so the Text and Selection routings are mutually
-        // exclusive by construction.
-        //
-        // Both are gated on no widget having focus. `TextEdit`'s own key handling (e.g. the hex
-        // color popup) reads events via `filtered_events`, which clones rather than consumes, so an
-        // unguarded block would fire on keys typed into an unrelated focused field — feeding
-        // `Event::Text` to `TextTool` while you type into the color picker.
-        let widget_focused = ui.memory(|m| m.focused().is_some());
-        if let Some(b) = app.keyboard_owner().filter(|_| !widget_focused) {
-            let bi = b.ix();
-            let events = ui.input(|i| i.events.clone());
-            match app.slots[bi].kind {
-                ToolKind::Text => {
-                    for ev in events {
-                        match ev {
-                            egui::Event::Text(s) => {
-                                for ch in s.chars() {
-                                    // The tool's own entry validation drops a rejected character
-                                    // either way; this pre-check only makes the drop visible.
-                                    if let Err(reject) = gascii_core::validate_width(ch) {
-                                        app.warn_rejected_char(ch, reject);
-                                        continue;
-                                    }
-                                    let tctx = tool_ctx(app, b);
-                                    let resp =
-                                        app.slots[bi].tool.update(ToolEvent::Char(ch), &tctx, &app.doc);
-                                    if let ToolResponse::Commit(Some(edit)) = resp {
-                                        app.apply_edit(edit, Some(b));
-                                    }
-                                }
-                            }
-                            egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => {
-                                let tctx = tool_ctx(app, b);
-                                app.slots[bi].tool.update(ToolEvent::Enter, &tctx, &app.doc);
-                            }
-                            egui::Event::Key { key: egui::Key::Backspace, pressed: true, .. } => {
-                                let tctx = tool_ctx(app, b);
-                                app.slots[bi].tool.update(ToolEvent::Backspace, &tctx, &app.doc);
-                            }
-                            egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
-                                // Escape ends the session; only the owner's, never the other slot's.
-                                app.end_session(b);
-                            }
-                            egui::Event::Key { key, pressed: true, .. } => {
-                                if let Some(dir) = arrow_direction(key) {
-                                    let tctx = tool_ctx(app, b);
-                                    app.slots[bi].tool.update(ToolEvent::Arrow(dir), &tctx, &app.doc);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                ToolKind::Selection => {
-                    for ev in events {
-                        match ev {
-                            egui::Event::Key { key: egui::Key::Delete, pressed: true, .. } => {
-                                let tctx = tool_ctx(app, b);
-                                let resp = app.slots[bi].tool.update(ToolEvent::Delete, &tctx, &app.doc);
-                                if let ToolResponse::Commit(Some(edit)) = resp {
-                                    app.apply_edit(edit, Some(b));
-                                }
-                            }
-                            egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => {
-                                app.flush_slot(b);
-                            }
-                            egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
-                                // Bespoke, deliberately non-flushing: Escape-as-abort must be able to
-                                // discard an in-progress move rather than commit it, so this does NOT
-                                // route through `end_session` (which always commits first).
-                                let tctx = tool_ctx(app, b);
-                                app.slots[bi].tool.update(ToolEvent::Cancel, &tctx, &app.doc);
-                                app.release_keyboard(b);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Clipboard paste: lands as a floating Selection stamp regardless of the active tool. Read
-        // (not consumed) alongside the text/selection keyboard blocks above — Event::Paste is never
-        // matched by either of those, so there's no double-handling.
-        let paste_texts: Vec<String> = ui.input(|i| {
-            i.events
-                .iter()
-                .filter_map(|e| match e {
-                    egui::Event::Paste(text) => Some(text.clone()),
-                    _ => None,
-                })
-                .collect()
-        });
-        for text in paste_texts {
-            app.paste_text(&text);
-        }
+        route_owner_keys(ui, app);
 
         // Stylus pressure. `force` is `Some` only for an actual contact — never hover — so this
         // naturally only fires mid-stroke, exactly when it should affect what's being stamped. The
@@ -761,6 +699,138 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
         app.was_focused = focused;
     }
 
+    (response, painter, origin, cell, doc_extent)
+}
+
+/// The keyboard-owner event dispatch (Text/Selection, mutually exclusive by construction) plus
+/// clipboard paste — both gated on the same `widget_focused` check, so a focused `TextEdit` (e.g.
+/// the hex color popup) never leaks canvas-tool keystrokes or a floating paste stamp underneath it.
+fn route_owner_keys(ui: &egui::Ui, app: &mut GasciiApp) {
+    // Keyboard routing: the owning slot's tool receives keys, dispatched by that slot's kind.
+    // At most one slot owns the keyboard, so the Text and Selection routings are mutually
+    // exclusive by construction.
+    //
+    // Both are gated on no widget having focus. `TextEdit`'s own key handling (e.g. the hex
+    // color popup) reads events via `filtered_events`, which clones rather than consumes, so an
+    // unguarded block would fire on keys typed into an unrelated focused field — feeding
+    // `Event::Text` to `TextTool` while you type into the color picker.
+    let widget_focused = ui.memory(|m| m.focused().is_some());
+    if let Some(b) = app.keyboard_owner().filter(|_| !widget_focused) {
+        let bi = b.ix();
+        let events = ui.input(|i| i.events.clone());
+        match app.slots[bi].kind {
+            ToolKind::Text => {
+                for ev in events {
+                    match ev {
+                        egui::Event::Text(s) => {
+                            for ch in s.chars() {
+                                // The tool's own entry validation drops a rejected character
+                                // either way; this pre-check only makes the drop visible.
+                                if let Err(reject) = gascii_core::validate_width(ch) {
+                                    app.warn_rejected_char(ch, reject);
+                                    continue;
+                                }
+                                let tctx = tool_ctx(app, b);
+                                let resp =
+                                    app.slots[bi].tool.update(ToolEvent::Char(ch), &tctx, &app.doc);
+                                if let ToolResponse::Commit(Some(edit)) = resp {
+                                    app.apply_edit(edit, Some(b));
+                                }
+                            }
+                        }
+                        egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => {
+                            let tctx = tool_ctx(app, b);
+                            app.slots[bi].tool.update(ToolEvent::Enter, &tctx, &app.doc);
+                        }
+                        egui::Event::Key { key: egui::Key::Backspace, pressed: true, .. } => {
+                            let tctx = tool_ctx(app, b);
+                            app.slots[bi].tool.update(ToolEvent::Backspace, &tctx, &app.doc);
+                        }
+                        egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
+                            // Escape ends the session; only the owner's, never the other slot's.
+                            app.end_session(b);
+                        }
+                        egui::Event::Key { key, pressed: true, .. } => {
+                            if let Some(dir) = arrow_direction(key) {
+                                let tctx = tool_ctx(app, b);
+                                app.slots[bi].tool.update(ToolEvent::Arrow(dir), &tctx, &app.doc);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            ToolKind::Selection => {
+                for ev in events {
+                    match ev {
+                        egui::Event::Key { key: egui::Key::Delete, pressed: true, .. } => {
+                            let tctx = tool_ctx(app, b);
+                            let resp = app.slots[bi].tool.update(ToolEvent::Delete, &tctx, &app.doc);
+                            if let ToolResponse::Commit(Some(edit)) = resp {
+                                app.apply_edit(edit, Some(b));
+                            }
+                        }
+                        egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => {
+                            app.flush_slot(b);
+                        }
+                        egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
+                            // Bespoke, deliberately non-flushing: Escape-as-abort must be able to
+                            // discard an in-progress move rather than commit it, so this does NOT
+                            // route through `end_session` (which always commits first).
+                            let tctx = tool_ctx(app, b);
+                            app.slots[bi].tool.update(ToolEvent::Cancel, &tctx, &app.doc);
+                            app.release_keyboard(b);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Clipboard paste: lands as a floating Selection stamp regardless of the active tool. Read
+    // (not consumed) alongside the text/selection keyboard blocks above — Event::Paste is never
+    // matched by either of those, so there's no double-handling there. It IS gated on the same
+    // `widget_focused` check the session-key block above uses, though: a focused `TextEdit`
+    // (the hex color popup) reads `Event::Paste` off this same frame's event list too, via its
+    // own `filtered_events` — cloned, not consumed — so an unguarded scan here would land a
+    // floating canvas stamp (rebinding a slot to Selection, stealing `keyboard_owner`) at the
+    // same time the field pastes its own text.
+    let paste_texts: Vec<String> = if widget_focused {
+        Vec::new()
+    } else {
+        ui.input(|i| {
+            i.events
+                .iter()
+                .filter_map(|e| match e {
+                    egui::Event::Paste(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+    };
+    for text in paste_texts {
+        app.paste_text(&text);
+    }
+}
+
+/// The five painting phases: the document card (shadow + solid background), the trace-image
+/// overlay, the `CanvasRenderer`, the grid overlay, the window-edge border, and finally the
+/// tool-icon cursor — in that order. Runs unconditionally, even while a modal is open, so the
+/// canvas keeps showing its last frame frozen underneath whichever dialog is open.
+#[allow(clippy::too_many_arguments)]
+fn paint_canvas(
+    ui: &egui::Ui,
+    app: &mut GasciiApp,
+    ctx: &egui::Context,
+    response: &egui::Response,
+    painter: &Painter,
+    origin: Pos2,
+    cell: Vec2,
+    doc_extent: DocExtent,
+    pointer_on_resize_grip: bool,
+) {
     let visible = app.viewport.visible_cell_rect(painter.clip_rect(), cell, origin, doc_extent);
 
     // The text caret follows keyboard ownership, which is what keeps it honest: no caret means "not
@@ -840,7 +910,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
     // border over it. Painted here rather than in the renderer because the border is a chrome
     // colour and follows the theme, while everything the renderer draws is document content and
     // deliberately does not.
-    let t = crate::ui::theme::current(&ctx);
+    let t = crate::ui::theme::current(ctx);
     let doc_rect = Rect::from_min_size(
         origin + app.viewport.pan,
         Vec2::new(app.doc.width as f32 * cell.x, app.doc.height as f32 * cell.y),
@@ -875,7 +945,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
     }
 
     app.renderer.paint(
-        &painter,
+        painter,
         &app.doc,
         &app.viewport as &dyn CellGrid,
         origin,
@@ -888,7 +958,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
     );
 
     if app.show_grid {
-        paint_grid(&painter, &app.viewport, cell, origin, doc_rect, visible, doc_extent);
+        paint_grid(painter, &app.viewport, cell, origin, doc_rect, visible, doc_extent);
     }
 
     painter.rect_stroke(doc_rect, 0.0, Stroke::new(1.0, t.window_edge), StrokeKind::Outside);
@@ -912,7 +982,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
                 _ => {
                     ctx.set_cursor_icon(egui::CursorIcon::None);
                     if let Some(pos) = ctx.pointer_latest_pos() {
-                        paint_tool_cursor(&painter, preview_kind, pos);
+                        paint_tool_cursor(painter, preview_kind, pos);
                     }
                 }
             }
@@ -949,14 +1019,38 @@ fn paint_grid(
 fn paint_tool_cursor(painter: &Painter, kind: ToolKind, pos: Pos2) {
     const ICON_SIZE: f32 = 17.0;
     let rect = Rect::from_center_size(pos, Vec2::splat(ICON_SIZE));
-    crate::ui::icons::paint(painter, kind, rect.translate(Vec2::splat(1.0)), Color32::BLACK);
-    crate::ui::icons::paint(painter, kind, rect, Color32::WHITE);
+    let def = tool_def(kind);
+    let fallback_letter = def.name.chars().next().unwrap_or('?');
+    crate::ui::icons::paint(painter, def.icon, rect.translate(Vec2::splat(1.0)), Color32::BLACK, fallback_letter);
+    crate::ui::icons::paint(painter, def.icon, rect, Color32::WHITE, fallback_letter);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::GasciiApp;
+    use crate::app::{GasciiApp, BRUSH_KIND};
+
+    /// A patch setting only `ramp` must not zero the density default back to some unset state —
+    /// `apply_ctx_patch`'s field-by-field merge, not a wholesale replace.
+    #[test]
+    fn a_patch_with_no_density_leaves_the_tool_ctx_default() {
+        let patch = gascii_plugin_api::ToolCtxPatch { density: None, ramp: Some(vec!['a', 'b']) };
+        let (density, ramp) = apply_ctx_patch(Some(patch));
+        assert!(
+            matches!(density, DensityMode::Fixed(Fixed(l)) if (l - 1.0).abs() < f32::EPSILON),
+            "an unset density field must leave the default (Fixed(1.0)) untouched, got {density:?}"
+        );
+        assert_eq!(ramp, vec!['a', 'b']);
+    }
+
+    /// A `None` patch (no plugin, or the plugin declined to patch) must leave both fields at their
+    /// defaults — the true no-op case every non-ctx-patch-wanting tool relies on.
+    #[test]
+    fn a_none_patch_leaves_both_fields_at_their_defaults() {
+        let (density, ramp) = apply_ctx_patch(None);
+        assert!(matches!(density, DensityMode::Fixed(Fixed(l)) if (l - 1.0).abs() < f32::EPSILON));
+        assert!(ramp.is_empty());
+    }
 
     fn headless_ctx() -> egui::Context {
         let ctx = egui::Context::default();
@@ -1024,7 +1118,7 @@ mod tests {
         ];
         for (force, expected) in cases {
             let mut app = GasciiApp::headless();
-            app.bind(Binding::L, ToolKind::Brush);
+            app.bind(Binding::L, BRUSH_KIND);
             app.brush_plugin_mut().set_pressure_enabled(true);
             begin_gesture(&mut app, Binding::L, 2, 2, false, false);
 
@@ -1102,7 +1196,7 @@ mod tests {
     #[test]
     fn a_pressure_sizeable_tool_with_the_pressure_toggle_off_gets_no_size_override() {
         let mut app = GasciiApp::headless();
-        app.bind(Binding::L, ToolKind::Brush);
+        app.bind(Binding::L, BRUSH_KIND);
         assert!(!app.brush_plugin_mut().pressure_enabled(), "sanity: the Pressure opt-in starts off");
         begin_gesture(&mut app, Binding::L, 2, 2, false, false);
 
@@ -1178,7 +1272,7 @@ mod tests {
     #[test]
     fn a_focus_loss_mid_pressure_modulated_stroke_clears_both_the_stroke_and_its_pressure_override() {
         let mut app = GasciiApp::headless();
-        app.bind(Binding::L, ToolKind::Brush);
+        app.bind(Binding::L, BRUSH_KIND);
         app.brush_plugin_mut().set_pressure_enabled(true);
         begin_gesture(&mut app, Binding::L, 0, 0, false, false);
         app.pressure_stamp_size = Some(2); // as if a light-pressure dab already landed
@@ -1335,7 +1429,7 @@ mod tests {
         ToolKind::Rectangle,
         ToolKind::Line,
         ToolKind::Selection,
-        ToolKind::Brush,
+        BRUSH_KIND,
     ];
 
     /// The unconstrained path (`shift: false`, for every `ToolKind`, including `Line`/`Rectangle`
@@ -1527,5 +1621,48 @@ mod tests {
             app.slots[Binding::L.ix()].last_line_point, None,
             "rebinding away from Line and back must not resurrect a stale continuation point"
         );
+    }
+
+    /// `Event::Paste` must be gated on the same `widget_focused` check the session-key routing
+    /// above already uses: pasting into a focused popup field (the hex color field) must not also
+    /// spawn a floating Selection stamp on the canvas underneath it.
+    #[test]
+    fn paste_is_suppressed_while_a_widget_has_keyboard_focus() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Pencil);
+        app.bind(Binding::R, ToolKind::Eraser);
+        assert_eq!(app.keyboard_owner(), None, "sanity: nothing owns the keyboard yet");
+
+        let ctx = headless_ctx();
+        let mut raw = raw_input_with_screen(900.0, 700.0, false);
+        raw.events.push(egui::Event::Paste("hi".to_string()));
+        let _ = ctx.run_ui(raw, |ui| {
+            ui.memory_mut(|m| m.request_focus(egui::Id::new("qa_test_fake_focused_widget")));
+            show(ui, &mut app, false);
+        });
+
+        assert_eq!(
+            app.slot(Binding::L).kind,
+            ToolKind::Pencil,
+            "a focused widget must suppress the paste, leaving L unrebound"
+        );
+        assert_eq!(app.keyboard_owner(), None, "a focused widget must suppress the paste's keyboard claim");
+    }
+
+    /// Regression guard: with no widget focused, `Event::Paste` still lands as a floating Selection
+    /// stamp exactly as before this gate was added.
+    #[test]
+    fn paste_still_lands_a_float_while_unfocused() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Pencil);
+        app.bind(Binding::R, ToolKind::Eraser);
+
+        let ctx = headless_ctx();
+        let mut raw = raw_input_with_screen(900.0, 700.0, false);
+        raw.events.push(egui::Event::Paste("hi".to_string()));
+        let _ = ctx.run_ui(raw, |ui| show(ui, &mut app, false));
+
+        assert_eq!(app.slot(Binding::L).kind, ToolKind::Selection, "an unfocused paste must rebind L to Selection");
+        assert_eq!(app.keyboard_owner(), Some(Binding::L), "an unfocused paste must claim the keyboard");
     }
 }

@@ -1,5 +1,5 @@
 use egui::Ui;
-use gascii_plugin_api::{CanvasRenderer, PanelOutcome, Plugin, PluginHost, PluginToolCapabilities};
+use gascii_plugin_api::{CanvasRenderer, PanelOutcome, Plugin, PluginDescriptor, PluginHost, PluginShortcut};
 
 use crate::decorator::OnionRenderer;
 use crate::shared::SharedState;
@@ -21,6 +21,21 @@ impl AnimPlugin {
         Self { state: SharedState::new(), thumbnails: ThumbnailCache::new() }
     }
 }
+
+/// Constructs the one real, per-app `AnimPlugin` instance — the `PluginDescriptor.make` fn
+/// pointer. A named fn, not a closure, so `DESCRIPTOR` stays a plain `const`.
+pub fn make() -> Box<dyn Plugin> {
+    Box::new(AnimPlugin::new())
+}
+
+/// This crate's whole registration story, harvested by the host's `const PLUGINS` table without
+/// ever constructing a throwaway instance.
+pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
+    name: "gascii-anim",
+    make,
+    tools: AnimPlugin::tool_capabilities,
+    shortcuts: AnimPlugin::shortcuts,
+};
 
 /// The next `(space_hold_active, space_hold_saw_primary_press)` state, plus whether this frame
 /// should toggle playback — `AnimPlugin::tick`'s pure decision core, unit-testable without a live
@@ -68,11 +83,20 @@ pub(crate) fn resolve_space_hold(
     }
 }
 
+// This plugin contributes no `Tool` — frame switching/playback are plugin-drawn UI and
+// `tick`-driven input, never a canvas gesture — so `tool_capabilities` is left at its default
+// (`Vec::new()`), with no override here.
 impl Plugin for AnimPlugin {
-    /// This plugin contributes no `Tool` — frame switching/playback are plugin-drawn UI and
-    /// `tick`-driven input, never a canvas gesture.
-    fn register_tools(&self) -> Vec<PluginToolCapabilities> {
-        Vec::new()
+    /// The five `tick`-driven shortcuts below, in the same order `tick` checks them. `Space` is
+    /// declared as a hold, matching its `key_down`-driven mechanism rather than a one-shot press.
+    fn shortcuts() -> Vec<PluginShortcut> {
+        vec![
+            PluginShortcut { name: "Play / Pause", label: "Space (hold)", keys: &[egui::Key::Space] },
+            PluginShortcut { name: "Toggle Onion Skin", label: "O", keys: &[egui::Key::O] },
+            PluginShortcut { name: "Previous Frame", label: ",", keys: &[egui::Key::Comma] },
+            PluginShortcut { name: "Next Frame", label: ".", keys: &[egui::Key::Period] },
+            PluginShortcut { name: "Duplicate Frame", label: "Shift+D", keys: &[egui::Key::D] },
+        ]
     }
 
     /// A true no-op — claims zero screen space — while `frame_count() <= 1`, so a single-frame
@@ -84,10 +108,11 @@ impl Plugin for AnimPlugin {
         if doc.frame_count() <= 1 {
             return PanelOutcome::default();
         }
+        let top_edit_id = host.top_edit_id();
         if kiosk {
-            crate::kiosk::show(ui, doc, &self.state, &mut self.thumbnails)
+            crate::kiosk::show(ui, doc, &self.state, &mut self.thumbnails, top_edit_id)
         } else {
-            crate::timeline::show(ui, doc, &self.state, &mut self.thumbnails)
+            crate::timeline::show(ui, doc, &self.state, &mut self.thumbnails, top_edit_id)
         }
     }
 
@@ -97,7 +122,7 @@ impl Plugin for AnimPlugin {
     /// ignores `focused` entirely (an animation preview must not freeze just because a text field
     /// somewhere has focus). `,`/`.`/`Shift+D` are the two shortcuts that need to reach the
     /// document — everything else here only ever mutates this plugin's own `SharedState`.
-    fn tick(&mut self, ui: &mut Ui, focused: bool, host: &dyn PluginHost) -> PanelOutcome {
+    fn tick(&mut self, ui: &mut Ui, focused: bool, resumed_after_suppression: bool, host: &dyn PluginHost) -> PanelOutcome {
         let mut outcome = PanelOutcome::default();
         // OS-level window-focus loss (`i.viewport().focused`) is a different axis from the
         // `focused` parameter above (widget focus / session suppression) — checked unconditionally,
@@ -110,7 +135,12 @@ impl Plugin for AnimPlugin {
         let os_focused = ui.input(|i| i.viewport().focused).unwrap_or(true);
         {
             let mut s = self.state.borrow_mut();
-            if s.was_focused && !os_focused {
+            if (s.was_focused && !os_focused) || resumed_after_suppression {
+                // A modal dialog opened and closed spanning a Space hold is the same shape of
+                // problem as an OS focus loss mid-hold (see the paragraph above): whatever edge
+                // crossed while `tick` wasn't being called at all is unobservable here, so the hold
+                // must be reset rather than resumed — otherwise a stale `space_hold_active` reads
+                // the modal's own close as "Space was just released" and fires a spurious toggle.
                 s.space_hold_active = false;
                 s.space_hold_saw_primary_press = false;
             }
@@ -236,11 +266,23 @@ mod tests {
         fn document(&self) -> &Document {
             &self.0
         }
+        fn top_edit_id(&self) -> Option<u64> {
+            None
+        }
     }
 
     #[test]
-    fn register_tools_is_empty() {
-        assert!(AnimPlugin::new().register_tools().is_empty());
+    fn tool_capabilities_is_empty() {
+        assert!(AnimPlugin::tool_capabilities().is_empty());
+    }
+
+    /// `shortcuts()` must declare exactly the five keys `tick`'s own dispatch checks, in the same
+    /// order — the pairing that keeps the declaration from going stale.
+    #[test]
+    fn shortcuts_declares_every_key_tick_actually_dispatches() {
+        let rows = AnimPlugin::shortcuts();
+        let keys: Vec<egui::Key> = rows.iter().flat_map(|r| r.keys.iter().copied()).collect();
+        assert_eq!(keys, vec![egui::Key::Space, egui::Key::O, egui::Key::Comma, egui::Key::Period, egui::Key::D]);
     }
 
     #[test]
@@ -260,7 +302,7 @@ mod tests {
         let mut p = AnimPlugin::new();
         let host = FakeHost(Document::default_document());
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| { p.tick(ui, false, &host); });
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| { p.tick(ui, false, false, &host); });
         assert!(!p.state.borrow().playing);
         assert_eq!(p.state.borrow().playback_frame, 0);
     }
@@ -278,7 +320,7 @@ mod tests {
         let host = FakeHost(doc);
         let ctx = egui::Context::default();
         let raw = egui::RawInput { predicted_dt: 1.0, ..Default::default() };
-        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, true, &host); });
+        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, true, false, &host); });
         // A whole second at 100ms/frame default duration must have advanced the playback frame at
         // least once, proving `focused: true` did not suppress the tick.
         assert!(p.state.borrow().elapsed_ms > 0.0 || p.state.borrow().playback_frame > 0);
@@ -308,7 +350,7 @@ mod tests {
         let ctx = egui::Context::default();
         // 150ms — safely past the 100ms default duration, with an unambiguous 50ms remainder.
         let raw = egui::RawInput { predicted_dt: 0.15, ..Default::default() };
-        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, &host); });
+        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, false, &host); });
         assert_eq!(p.state.borrow().playback_frame, 1, "150ms of dt at a 100ms duration must advance exactly one frame, not skip ahead within a single tick");
         assert!((p.state.borrow().elapsed_ms - 50.0).abs() < 1.0, "the 50ms remainder must carry over, not reset to zero");
     }
@@ -321,7 +363,7 @@ mod tests {
         let host = FakeHost(doc);
         let ctx = egui::Context::default();
         let raw = egui::RawInput { predicted_dt: 0.05, ..Default::default() }; // 50ms < 100ms
-        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, &host); });
+        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, false, &host); });
         assert_eq!(p.state.borrow().playback_frame, 0);
         assert!((p.state.borrow().elapsed_ms - 50.0).abs() < 1.0);
     }
@@ -336,7 +378,7 @@ mod tests {
         let host = FakeHost(doc);
         let ctx = egui::Context::default();
         let raw = egui::RawInput { predicted_dt: 0.15, ..Default::default() };
-        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, &host); });
+        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, false, &host); });
         assert_eq!(p.state.borrow().playback_frame, 0, "looping playback must wrap back to frame 0 past the last frame");
         assert!(p.state.borrow().playing, "looping must not stop playback");
     }
@@ -351,7 +393,7 @@ mod tests {
         let host = FakeHost(doc);
         let ctx = egui::Context::default();
         let raw = egui::RawInput { predicted_dt: 0.15, ..Default::default() };
-        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, &host); });
+        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, false, &host); });
         assert!(!p.state.borrow().playing, "non-looping playback must stop at the last frame");
         assert_eq!(p.state.borrow().playback_frame, 1, "stopping must leave playback_frame on the last frame, not reset it");
     }
@@ -371,7 +413,7 @@ mod tests {
         let ctx = egui::Context::default();
         // Zero dt isolates the clamp from the separate advance-on-elapsed-duration logic.
         let raw = egui::RawInput { predicted_dt: 0.0, ..Default::default() };
-        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, &host); });
+        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, false, &host); });
         assert_eq!(p.state.borrow().playback_frame, 2, "a stale out-of-range playback_frame must clamp to frame_count() - 1");
     }
 
@@ -467,12 +509,12 @@ mod tests {
 
         let mut raw_down = egui::RawInput::default();
         raw_down.events.push(space_key_event(true));
-        let _ = ctx.run_ui(raw_down, |ui| { p.tick(ui, false, &host); });
+        let _ = ctx.run_ui(raw_down, |ui| { p.tick(ui, false, false, &host); });
         assert!(!p.state.borrow().playing, "playback must not toggle while Space is still held");
 
         let mut raw_up = egui::RawInput::default();
         raw_up.events.push(space_key_event(false));
-        let _ = ctx.run_ui(raw_up, |ui| { p.tick(ui, false, &host); });
+        let _ = ctx.run_ui(raw_up, |ui| { p.tick(ui, false, false, &host); });
         assert!(p.state.borrow().playing, "releasing a plain Space tap must toggle playback on");
     }
 
@@ -487,15 +529,15 @@ mod tests {
 
         let mut raw_down = egui::RawInput::default();
         raw_down.events.push(space_key_event(true));
-        let _ = ctx.run_ui(raw_down, |ui| { p.tick(ui, false, &host); });
+        let _ = ctx.run_ui(raw_down, |ui| { p.tick(ui, false, false, &host); });
 
         let mut raw_press = egui::RawInput::default();
         raw_press.events.push(pointer_button_event(true));
-        let _ = ctx.run_ui(raw_press, |ui| { p.tick(ui, false, &host); });
+        let _ = ctx.run_ui(raw_press, |ui| { p.tick(ui, false, false, &host); });
 
         let mut raw_up = egui::RawInput::default();
         raw_up.events.push(space_key_event(false));
-        let _ = ctx.run_ui(raw_up, |ui| { p.tick(ui, false, &host); });
+        let _ = ctx.run_ui(raw_up, |ui| { p.tick(ui, false, false, &host); });
         assert!(!p.state.borrow().playing, "a primary press mid-hold must suppress the release-time toggle");
     }
 
@@ -510,10 +552,10 @@ mod tests {
 
         let mut raw_down = egui::RawInput::default();
         raw_down.events.push(space_key_event(true));
-        let _ = ctx.run_ui(raw_down, |ui| { p.tick(ui, true, &host); });
+        let _ = ctx.run_ui(raw_down, |ui| { p.tick(ui, true, false, &host); });
         let mut raw_up = egui::RawInput::default();
         raw_up.events.push(space_key_event(false));
-        let _ = ctx.run_ui(raw_up, |ui| { p.tick(ui, true, &host); });
+        let _ = ctx.run_ui(raw_up, |ui| { p.tick(ui, true, false, &host); });
 
         assert!(!p.state.borrow().playing, "Space must be suppressed while focused");
     }
@@ -542,17 +584,49 @@ mod tests {
         let mut raw_down = egui::RawInput::default();
         raw_down.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().focused = Some(true);
         raw_down.events.push(space_key_event(true));
-        let _ = ctx.run_ui(raw_down, |ui| { p.tick(ui, false, &host); });
+        let _ = ctx.run_ui(raw_down, |ui| { p.tick(ui, false, false, &host); });
         assert!(p.state.borrow().space_hold_active, "sanity: the hold is active");
 
         // Frame 2: the window loses OS focus, delivered the same way the real integration does.
         let mut raw_unfocus = egui::RawInput::default();
         raw_unfocus.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().focused = Some(false);
         raw_unfocus.events.push(egui::Event::WindowFocused(false));
-        let _ = ctx.run_ui(raw_unfocus, |ui| { p.tick(ui, false, &host); });
+        let _ = ctx.run_ui(raw_unfocus, |ui| { p.tick(ui, false, false, &host); });
 
         assert!(!p.state.borrow().space_hold_active, "the focus-loss edge must reset the hold");
         assert!(!p.state.borrow().playing, "the reset itself must never toggle playback");
+    }
+
+    /// The host-latch counterpart to the focus-loss test above: a Space hold spanning a modal
+    /// dialog's open/close window must reset exactly the same way, and must NOT fire the release
+    /// toggle it would have if the hold state had simply been carried through untouched (this test
+    /// deliberately still sends the `Space` release event on the resumed tick — proving the reset
+    /// happened, not merely that the release event was suppressed some other way).
+    #[test]
+    fn resumed_after_suppression_resets_a_space_hold_so_the_modals_close_does_not_fire_a_spurious_toggle() {
+        let doc = doc_with_frames(2);
+        let mut p = AnimPlugin::new();
+        let host = FakeHost(doc);
+        let ctx = egui::Context::default();
+
+        // Frame 1: Space pressed — a hold begins, ordinary tick.
+        let mut raw_down = egui::RawInput::default();
+        raw_down.events.push(space_key_event(true));
+        let _ = ctx.run_ui(raw_down, |ui| { p.tick(ui, false, false, &host); });
+        assert!(p.state.borrow().space_hold_active, "sanity: the hold is active");
+
+        // Frames 2..N (a modal is open): `handle_keys`/`tick` are skipped entirely by the host —
+        // simulated here simply by not calling `tick` at all for those frames.
+
+        // The first tick after the modal closes: the host delivers `resumed_after_suppression`.
+        // The same Space-release event a plain tap would resolve as "release, toggle" arrives here
+        // too, proving the *reset* is what suppresses the toggle, not merely a missing event.
+        let mut raw_resume = egui::RawInput::default();
+        raw_resume.events.push(space_key_event(false));
+        let _ = ctx.run_ui(raw_resume, |ui| { p.tick(ui, false, true, &host); });
+
+        assert!(!p.state.borrow().space_hold_active, "resuming after suppression must reset the hold");
+        assert!(!p.state.borrow().playing, "the reset must win over the release event — no spurious toggle");
     }
 
     /// `O` flips `onion_enabled`, gated the same way as Space.
@@ -570,7 +644,7 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         });
-        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, &host); });
+        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, false, &host); });
 
         assert!(p.state.borrow().onion_enabled, "O must toggle onion_enabled on");
     }
@@ -590,7 +664,7 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         });
-        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, true, &host); });
+        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, true, false, &host); });
 
         assert!(!p.state.borrow().onion_enabled, "O must be suppressed while focused");
     }
@@ -613,7 +687,7 @@ mod tests {
         let mut raw = egui::RawInput::default();
         raw.events.push(no_modifier_key_event(egui::Key::Comma));
         let mut outcome = None;
-        let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, false, &host)));
+        let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, false, false, &host)));
         assert_eq!(outcome.unwrap().set_active_frame, Some(0));
     }
 
@@ -626,7 +700,7 @@ mod tests {
         let mut raw = egui::RawInput::default();
         raw.events.push(no_modifier_key_event(egui::Key::Comma));
         let mut outcome = None;
-        let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, false, &host)));
+        let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, false, false, &host)));
         assert_eq!(outcome.unwrap().set_active_frame, None, "there is no frame before 0");
     }
 
@@ -639,7 +713,7 @@ mod tests {
         let mut raw = egui::RawInput::default();
         raw.events.push(no_modifier_key_event(egui::Key::Period));
         let mut outcome = None;
-        let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, false, &host)));
+        let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, false, false, &host)));
         assert_eq!(outcome.unwrap().set_active_frame, Some(1));
     }
 
@@ -656,7 +730,7 @@ mod tests {
         let mut raw = egui::RawInput::default();
         raw.events.push(no_modifier_key_event(egui::Key::Period));
         let mut outcome = None;
-        let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, false, &host)));
+        let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, false, false, &host)));
         assert_eq!(outcome.unwrap().set_active_frame, None, "there is no frame past the last one");
     }
 
@@ -670,7 +744,7 @@ mod tests {
         let mut raw = egui::RawInput { modifiers: egui::Modifiers::SHIFT, ..Default::default() };
         raw.events.push(shift_d_event());
         let mut outcome = None;
-        let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, false, &host)));
+        let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, false, false, &host)));
         let outcome = outcome.unwrap();
         assert_eq!(outcome.edits.len(), 1);
         match (&outcome.edits[0], &expected) {
@@ -699,7 +773,7 @@ mod tests {
         let mut raw = egui::RawInput { modifiers: egui::Modifiers::SHIFT, ..Default::default() };
         raw.events.push(shift_d_event());
         let mut outcome = None;
-        let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, false, &host)));
+        let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, false, false, &host)));
         let outcome = outcome.unwrap();
         assert!(outcome.edits.is_empty(), "a rejected duplicate must not also carry a partial edit");
         assert_eq!(outcome.error, Some(format!("duplicate frame: exceeds the {} maximum", Document::MAX_FRAMES)));
@@ -716,7 +790,7 @@ mod tests {
         raw.events.push(no_modifier_key_event(egui::Key::Comma));
         raw.events.push(shift_d_event());
         let mut outcome = None;
-        let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, true, &host)));
+        let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, true, false, &host)));
         let outcome = outcome.unwrap();
         assert_eq!(outcome.set_active_frame, None, "',' must be suppressed while focused");
         assert!(outcome.edits.is_empty(), "Shift+D must be suppressed while focused");

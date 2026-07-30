@@ -1,7 +1,9 @@
-//! Multi-frame raster export: animated GIF and a PNG spritesheet. Both stream through
-//! `png_export::rasterize_frame_rgba8` one frame at a time — a GIF encode never holds more than
-//! one frame's own RGBA8 buffer resident, and a spritesheet blits each frame's buffer into the
-//! tiled canvas as it's produced rather than collecting them all first.
+//! Multi-frame raster export: animated GIF and a PNG spritesheet. Both build one
+//! `png_export::RasterAssets` up front (`build_raster_assets`) and stream through
+//! `png_export::rasterize_frame_rgba8_with_assets` one frame at a time — a GIF encode never holds
+//! more than one frame's own RGBA8 buffer resident, a spritesheet blits each frame's buffer into
+//! the tiled canvas as it's produced rather than collecting them all first, and neither re-parses
+//! the font or re-resizes the background image on every frame.
 
 use std::time::Duration;
 
@@ -9,7 +11,7 @@ use gascii_core::{validate_gif_dimensions, validate_png_dimensions, validate_spr
 use image::codecs::gif::{GifEncoder, Repeat};
 use image::{Delay, Frame};
 
-use crate::png_export::{rasterize_frame_rgba8, PngExportAppError};
+use crate::png_export::{build_raster_assets, rasterize_frame_rgba8_with_assets, PngExportAppError};
 
 /// Rounds a millisecond duration to the nearest 10ms, floored at 10ms (never 0) — matches GIF's
 /// own on-disk delay unit (centiseconds) and the timeline UI's existing 10ms step floor
@@ -36,6 +38,8 @@ pub fn export_gif(
 ) -> Result<Vec<u8>, PngExportAppError> {
     let (px_w, px_h) =
         validate_gif_dimensions(doc.width, doc.height, cell_px, doc.frame_count()).map_err(PngExportAppError::Dimensions)?;
+    // Built once for the whole export, not per frame — see `RasterAssets`'s own doc comment.
+    let assets = build_raster_assets(doc, cell_px, bg_image)?;
     let mut bytes = Vec::new();
     {
         let mut encoder = GifEncoder::new(&mut bytes);
@@ -43,7 +47,7 @@ pub fn export_gif(
             encoder.set_repeat(Repeat::Infinite).map_err(|e| PngExportAppError::Encode(e.to_string()))?;
         }
         for i in 0..doc.frame_count() {
-            let (_, _, pixels) = rasterize_frame_rgba8(doc, i, cell_px, opaque_bg, bg_image)?;
+            let (_, _, pixels) = rasterize_frame_rgba8_with_assets(doc, i, cell_px, opaque_bg, &assets)?;
             let img = image::RgbaImage::from_raw(px_w, px_h, pixels)
                 .expect("rasterize_frame_rgba8 returns a buffer sized exactly px_w * px_h * 4");
             let dur_ms = doc.resolved_frame_duration_ms(i).expect("i is always in 0..doc.frame_count()");
@@ -72,9 +76,11 @@ pub fn export_spritesheet(
         validate_png_dimensions(doc.width, doc.height, cell_px).map_err(PngExportAppError::Dimensions)?;
     let (sheet_w, sheet_h) =
         validate_spritesheet_dimensions(frame_px_w, frame_px_h, cols, rows).map_err(PngExportAppError::Dimensions)?;
+    // Built once for the whole export, not per frame — see `RasterAssets`'s own doc comment.
+    let assets = build_raster_assets(doc, cell_px, bg_image)?;
     let mut sheet = image::RgbaImage::new(sheet_w, sheet_h);
     for i in 0..n {
-        let (_, _, pixels) = rasterize_frame_rgba8(doc, i, cell_px, opaque_bg, bg_image)?;
+        let (_, _, pixels) = rasterize_frame_rgba8_with_assets(doc, i, cell_px, opaque_bg, &assets)?;
         let tile = image::RgbaImage::from_raw(frame_px_w, frame_px_h, pixels)
             .expect("rasterize_frame_rgba8 returns a buffer sized exactly frame_px_w * frame_px_h * 4");
         let (col, row) = (i as u32 % cols, i as u32 / cols);
@@ -291,6 +297,57 @@ mod tests {
         let once_bytes = export_gif(&once, 4, None, None).unwrap();
         let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(once_bytes)).unwrap();
         assert!(matches!(decoder.loop_count(), LoopCount::Infinite));
+    }
+
+    /// A transparent (`opaque_bg: None`) multi-frame GIF of a shape that moves between frames must
+    /// not smear: a cell opaque in one frame and blank (fully transparent) in the next must decode
+    /// as genuinely transparent at that position in the later frame, not still show the earlier
+    /// frame's opaque color underneath. `image`'s own `GifEncoder::encode_gif` hardcodes every
+    /// written frame's disposal method to `gif::DisposalMethod::Background` (confirmed against the
+    /// vendored `image-0.25.10` source) — this test pins that behavior at the decode level, the way
+    /// `loop_playback_true_writes_the_netscape_loop_extension_and_false_omits_it` pins the raw-byte
+    /// NETSCAPE loop flag, so a future `image` upgrade that silently switched disposal methods (and
+    /// reintroduced smear) would fail this test rather than only show up as a visual bug.
+    #[test]
+    fn a_transparent_multi_frame_gif_of_a_moving_shape_does_not_smear_between_frames() {
+        let opaque = Rgba(220, 30, 30, 255);
+        let mut doc = Document::new(2, 2);
+        let mut history = History::new();
+        let edit = add_frame(&doc, 1, DocFrame::blank(2, 2)).unwrap();
+        history.apply(&mut doc, edit);
+
+        // Frame 0: the shape sits at (0, 0), opaque. Everywhere else (including frame 1's (0, 0))
+        // stays `Cell::BLANK` — fully transparent.
+        doc.set_active_frame(0);
+        doc.set_cell(0, 0, 0, Cell { ch: '#', fg: opaque, bg: opaque });
+        // Frame 1: the shape moved to (1, 1); (0, 0) is untouched, still blank/transparent.
+        doc.set_active_frame(1);
+        doc.set_cell(0, 1, 1, Cell { ch: '#', fg: opaque, bg: opaque });
+        doc.set_active_frame(0);
+
+        let bytes = export_gif(&doc, 4, None, None).unwrap();
+        let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).unwrap();
+        let frames = decoder.into_frames().collect_frames().unwrap();
+        assert_eq!(frames.len(), 2);
+
+        // Cell (0, 0)'s pixel block is (0,0)-(3,3) at cell_px 4; sample its center.
+        let frame1_at_old_position = frames[1].buffer().get_pixel(1, 1);
+        assert_eq!(
+            frame1_at_old_position.0[3], 0,
+            "frame 1 must decode as transparent where the shape used to be in frame 0 -- a non-zero \
+             alpha here is exactly the smear this test guards against"
+        );
+
+        // Sanity: the shape itself, in its new position, must actually be opaque in frame 1 -- a
+        // trivially-passing test (e.g. everything decoding transparent) would not catch a real bug.
+        // Cell (1, 1)'s pixel block is (4,4)-(7,7).
+        let frame1_at_new_position = frames[1].buffer().get_pixel(5, 5);
+        assert!(frame1_at_new_position.0[3] > 0, "sanity: the shape's new position must actually be opaque");
+
+        // And frame 0's own shape must still be present at (0, 0) -- confirms the source content
+        // itself round-tripped, not just that transparency happens to be the default everywhere.
+        let frame0_at_position = frames[0].buffer().get_pixel(1, 1);
+        assert!(frame0_at_position.0[3] > 0, "sanity: frame 0's own shape must be opaque at (0, 0)");
     }
 
     /// GIF's palette is capped at 256 colors per frame; a document using more than that many

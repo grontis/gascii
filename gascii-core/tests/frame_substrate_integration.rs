@@ -4,10 +4,10 @@
 //! round trip is byte-identical to the in-memory state that produced it.
 
 use gascii_core::{
-    add_frame, clear_document, composite_frame, load_str, reorder_frame, resize_document, save_string,
-    set_frame_duration, AxisAnchor, BrushShape, Cell, CellEdit, DensityMode, Document, Edit, Fixed, Frame,
-    FrameOpError, History, Layer, Pencil, PlaneMask, ResizeAnchor, ResizeError, Rgba, Tool, ToolCtx, ToolEvent,
-    ToolResponse,
+    add_frame, clear_document, composite_frame, duplicate_frame, load_str, reorder_frame, resize_document,
+    save_string, set_frame_duration, AxisAnchor, BrushShape, Cell, CellEdit, DensityMode, Document, Edit, Fixed,
+    Frame, FrameOpError, History, Layer, Pencil, PlaneMask, ResizeAnchor, ResizeError, Rgba, Tool, ToolCtx,
+    ToolEvent, ToolResponse,
 };
 
 fn cell(ch: char, fg: Rgba, bg: Rgba) -> Cell {
@@ -211,6 +211,69 @@ fn a_frame_reorder_landing_mid_stroke_must_be_resynced_or_a_masked_off_plane_com
         "the masked-off bg plane must preserve frame 1's post-reorder content (color_p), not the \
          stroke's stale pre-reorder pin (color_q) — proves resync recomposed, not just re-pinned"
     );
+}
+
+/// `duplicate_frame`'s clone must carry the source's `duration_override` (not reset it), and a
+/// `SetFrameDuration` applied at an index that only exists *after* an interleaved `reorder_frame`
+/// must undo back to the exact prior state at every step, in strictly-LIFO order — the same
+/// argument `drawing_via_pencil_on_two_frames_then_reordering_...` makes for cell content, applied
+/// here to `duration_override` and a duplicated frame instead.
+#[test]
+fn duplicate_frame_carries_duration_override_and_a_set_frame_duration_survives_an_interleaved_reorder_and_undo() {
+    let mut doc = Document::new(3, 3);
+    let mut history = History::new();
+    let mut forward = vec![doc.clone()]; // depth 0
+
+    // A second frame, so there's something to duplicate and reorder.
+    let e1 = add_frame(&doc, 1, Frame::blank(3, 3)).unwrap();
+    history.apply(&mut doc, e1);
+    forward.push(doc.clone()); // depth 1
+
+    // Frame 1 gets its own duration override.
+    let e2 = set_frame_duration(&doc, 1, Some(50)).unwrap().unwrap();
+    history.apply(&mut doc, e2);
+    forward.push(doc.clone()); // depth 2
+    assert_eq!(doc.frame(1).unwrap().duration_override, Some(50));
+
+    // Duplicate frame 1: the clone (landing at index 2) must carry the override forward, not reset
+    // it to the document default.
+    let e3 = duplicate_frame(&doc, 1).unwrap();
+    history.apply(&mut doc, e3);
+    forward.push(doc.clone()); // depth 3
+    assert_eq!(doc.frame_count(), 3);
+    assert_eq!(doc.frame(2).unwrap().duration_override, Some(50), "duplicate_frame must carry duration_override into the clone");
+
+    // Reorder: move the duplicate (index 2) to the front. Frame indices addressing everything else
+    // shift underneath whatever a *later* SetFrameDuration targets.
+    let e4 = reorder_frame(&doc, 2, 0).unwrap().unwrap();
+    history.apply(&mut doc, e4);
+    forward.push(doc.clone()); // depth 4
+    assert_eq!(doc.frame(0).unwrap().duration_override, Some(50), "the duplicate's override followed it to index 0");
+
+    // A SetFrameDuration on the now-relocated duplicate, addressed by its *post-reorder* index —
+    // exactly the positional-addressing argument `edit.rs`'s module doc makes, now exercised with
+    // duration overrides instead of cells.
+    let e5 = set_frame_duration(&doc, 0, Some(999)).unwrap().unwrap();
+    history.apply(&mut doc, e5);
+    forward.push(doc.clone()); // depth 5
+    assert_eq!(doc.frame(0).unwrap().duration_override, Some(999));
+
+    assert_eq!(forward.len(), 6);
+
+    // Undo the full stack back to empty, comparing the entire Document at each depth.
+    for depth in (0..forward.len() - 1).rev() {
+        assert!(history.undo(&mut doc), "undo must succeed at depth {depth}");
+        assert_eq!(doc, forward[depth], "undo landing at depth {depth} must match the forward snapshot exactly");
+    }
+    assert!(!history.can_undo());
+    assert_eq!(doc, Document::new(3, 3));
+
+    // Redo forward, comparing against the same snapshots in the opposite direction.
+    for (depth, snapshot) in forward.iter().enumerate().skip(1) {
+        assert!(history.redo(&mut doc), "redo must succeed at depth {depth}");
+        assert_eq!(&doc, snapshot, "redo landing at depth {depth} must match the forward snapshot exactly");
+    }
+    assert!(!history.can_redo());
 }
 
 // --- persistence round trips across the version boundary ---

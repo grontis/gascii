@@ -25,6 +25,15 @@ fn default_background() -> Rgba {
     Rgba(0, 0, 0, 255)
 }
 
+/// Clamps an untrusted file-sourced duration (the document default or a per-frame override) into
+/// `[10, Document::MAX_FRAME_DURATION_MS]` — 10ms mirrors `gascii-anim::timeline::step_duration`'s
+/// own floor, so the whole animation system agrees on one canonical minimum. Never rejects the
+/// file; an absurd value is quietly made sane instead (see `Document::MAX_FRAME_DURATION_MS`'s doc
+/// comment).
+fn clamp_frame_duration_ms(ms: u32) -> u32 {
+    ms.clamp(10, Document::MAX_FRAME_DURATION_MS)
+}
+
 /// Reads just `version` up front, tolerating (ignoring) every other field — the same
 /// no-`deny_unknown_fields` leniency the full envelope structs already rely on — so `load_str`
 /// can decide which envelope shape to parse the rest of the document as.
@@ -295,18 +304,20 @@ fn load_v2(s: &str) -> Result<Document, LoadError> {
     let mut doc = Document::new(envelope.width, envelope.height);
     doc.frames.clear();
     for (fi, file_frame) in envelope.frames.iter().enumerate() {
-        doc.frames.push(Frame::blank(envelope.width, envelope.height));
-        doc.frames[fi].layers.clear();
+        // Pushed empty rather than via `Frame::blank(w, h)` (a full w*h `Layer::blank` allocation
+        // this loop would immediately discard) — every layer this frame actually needs is pushed
+        // and decoded into below, so the blank-then-clear round trip has nothing to buy here.
+        doc.frames.push(Frame { layers: Vec::with_capacity(file_frame.layers.len()), duration_override: None });
         for file_layer in &file_frame.layers {
             let idx = doc.frames[fi].layers.len();
             doc.frames[fi].layers.push(Layer::blank(envelope.width, envelope.height));
             decode_layer_into(&mut doc, fi, idx, file_layer)?;
         }
-        doc.frames[fi].duration_override = file_frame.duration_override;
+        doc.frames[fi].duration_override = file_frame.duration_override.map(clamp_frame_duration_ms);
     }
     doc.active_frame = 0;
     doc.background = envelope.background;
-    doc.frame_duration_ms = envelope.frame_duration_ms;
+    doc.frame_duration_ms = clamp_frame_duration_ms(envelope.frame_duration_ms);
     doc.loop_playback = envelope.loop_playback;
     Ok(doc)
 }
@@ -528,6 +539,31 @@ mod tests {
         assert!(!back.loop_playback);
         assert_eq!(back.resolved_frame_duration_ms(0), Some(250), "frame 0 has no override, falls back to the document default");
         assert_eq!(back.resolved_frame_duration_ms(1), Some(50), "frame 1's override round-trips");
+    }
+
+    /// `load_v2` clamps rather than rejects an absurd file-sourced duration — both the document
+    /// default and a per-frame override — into `[10, Document::MAX_FRAME_DURATION_MS]`. Built by
+    /// hand-constructing the v2 envelope directly (not through `Document`'s own API, which has no
+    /// way to produce an out-of-range value) so this pins the loader's own defensive clamp, not
+    /// anything upstream.
+    #[test]
+    fn absurd_file_sourced_durations_are_clamped_not_rejected_at_v2_load() {
+        let frame_over = FileFrame { layers: vec![encode_layer_at(&Document::new(2, 2), 0, 0)], duration_override: Some(u32::MAX) };
+        let frame_under = FileFrame { layers: vec![encode_layer_at(&Document::new(2, 2), 0, 0)], duration_override: Some(0) };
+        let envelope = FileEnvelopeV2 {
+            version: CURRENT_VERSION,
+            width: 2,
+            height: 2,
+            background: default_background(),
+            frame_duration_ms: u32::MAX,
+            loop_playback: true,
+            frames: vec![frame_over, frame_under],
+        };
+        let json = serde_json::to_string(&envelope).unwrap();
+        let doc = load_str(&json).unwrap();
+        assert_eq!(doc.frame_duration_ms, Document::MAX_FRAME_DURATION_MS, "the document default must clamp to the max, not overflow or panic");
+        assert_eq!(doc.frame(0).unwrap().duration_override, Some(Document::MAX_FRAME_DURATION_MS));
+        assert_eq!(doc.frame(1).unwrap().duration_override, Some(10), "a zero override must clamp up to the 10ms floor, never stay 0");
     }
 
     #[test]

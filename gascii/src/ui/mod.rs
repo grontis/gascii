@@ -7,6 +7,7 @@
 pub mod dialog;
 pub mod icons;
 pub mod kiosk;
+pub mod menu;
 pub mod sidebar;
 pub mod status_bar;
 pub mod theme;

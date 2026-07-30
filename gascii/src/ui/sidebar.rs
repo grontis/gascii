@@ -56,8 +56,8 @@ const SIDEBAR_GEOM: OptionsGeom = OptionsGeom {
     stepper_h: widgets::STEPPER_H,
     shape_indent: 0.0,
     item_spacing_y: Some(6.0),
-    wrap_brush_mode: false,
-    brush_slider_h: 20.0,
+    inline_controls: false,
+    slider_h: 20.0,
 };
 
 pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
@@ -137,7 +137,7 @@ pub(crate) fn tool_grid(ui: &mut Ui, app: &mut GasciiApp, tools: &[ToolDef], col
             l: app.slot(Binding::L).kind == def.kind,
             r: app.slot(Binding::R).kind == def.kind,
         };
-        let resp = widgets::tool_cell(&mut child, def.kind, bound, cell)
+        let resp = widgets::tool_cell(&mut child, def.icon, def.name, bound, cell)
             .on_hover_text(format!("{} ({})  —  {}", def.name, def.key.name(), def.tip));
         // Click binds L, right-click binds R — the only place R is set by pointer.
         if resp.clicked() {
@@ -246,7 +246,7 @@ pub(crate) fn binding_options_geom(ui: &mut Ui, app: &mut GasciiApp, geom: Optio
             if !shown.contains(&i) {
                 ui.add_space(2.0);
                 let (stylus_detected, bound) = crate::app::host_context(app);
-                let host = crate::app::host_facts(&app.doc, stylus_detected, bound);
+                let host = crate::app::host_facts(&app.doc, stylus_detected, bound, app.history.top_edit_id());
                 app.plugins[i].options_ui(tool_def(kind).name, ui, geom, &host);
                 shown.push(i);
             }
@@ -511,6 +511,7 @@ fn write_toggles(ui: &mut Ui, app: &mut GasciiApp) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::BRUSH_KIND;
     use gascii_core::{Buildup, DensityMode};
 
     /// `swatch_cols` is the pure math behind the sidebar's resizable-width reflow (`WS6a`'s own
@@ -569,7 +570,7 @@ mod tests {
     #[test]
     fn options_block_fits_the_sidebars_minimum_content_width() {
         let mut app = crate::app::GasciiApp::headless();
-        app.bind(Binding::L, ToolKind::Brush);
+        app.bind(Binding::L, BRUSH_KIND);
         app.bind(Binding::R, ToolKind::Line);
 
         let ctx = egui::Context::default();
@@ -760,8 +761,8 @@ mod tests {
     #[test]
     fn kiosk_and_sidebar_geometries_render_the_same_underlying_stamp_and_brush_state() {
         let mut app = crate::app::GasciiApp::headless();
-        app.bind(Binding::L, ToolKind::Brush);
-        let slot = sized_slot(ToolKind::Brush).expect("Brush is sized");
+        app.bind(Binding::L, BRUSH_KIND);
+        let slot = sized_slot(BRUSH_KIND).expect("Brush is sized");
         app.slots[Binding::L.ix()].stamps[slot].size = 6;
         app.slots[Binding::L.ix()].stamps[slot].shape = BrushShape::Circle;
         app.brush_plugin_mut().set_active_ramp(1);
@@ -773,8 +774,8 @@ mod tests {
             stepper_h: 36.0,
             shape_indent: 18.0,
             item_spacing_y: None,
-            wrap_brush_mode: true,
-            brush_slider_h: 24.0,
+            inline_controls: true,
+            slider_h: 24.0,
         };
 
         let ctx = egui::Context::default();
@@ -806,7 +807,7 @@ mod tests {
     fn binding_options_geom_renders_and_preserves_brush_state_when_brush_is_bound_only_to_r() {
         let mut app = crate::app::GasciiApp::headless();
         app.bind(Binding::L, ToolKind::Pencil);
-        app.bind(Binding::R, ToolKind::Brush);
+        app.bind(Binding::R, BRUSH_KIND);
         app.brush_plugin_mut().set_active_ramp(1);
 
         let ctx = egui::Context::default();

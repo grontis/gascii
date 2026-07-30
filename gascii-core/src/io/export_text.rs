@@ -3,35 +3,50 @@
 use super::{composite, composite_frame};
 use crate::model::{Cell, Document};
 
-/// Flattens a composited sheet to a newline-joined string, trimming each row's trailing whitespace
-/// by composited glyph (a colored-but-space cell at a line's end still trims — plain text has
-/// nowhere to put the color anyway). Shared by `export_text` and `export_text_frames`.
-fn flatten_trimmed(cells: &[Vec<Cell>]) -> String {
+/// Flattens a composited sheet to a newline-joined string, by composited glyph. `trim` controls
+/// whether each row's trailing whitespace is cut (a colored-but-space cell at a line's end still
+/// trims — plain text has nowhere to put the color anyway) or left padded to `doc.width`. Shared by
+/// `export_text` and every `export_text_frames_with_trim` frame body.
+fn flatten(cells: &[Vec<Cell>], trim: bool) -> String {
     cells
         .iter()
-        .map(|row| row.iter().map(|c| c.ch).collect::<String>().trim_end().to_owned())
+        .map(|row| {
+            let line: String = row.iter().map(|c| c.ch).collect();
+            if trim { line.trim_end().to_owned() } else { line }
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
 /// Composites `doc` and flattens it to a newline-joined string, trailing whitespace trimmed per row.
 pub fn export_text(doc: &Document) -> String {
-    flatten_trimmed(&composite(doc))
+    flatten(&composite(doc), true)
 }
 
-/// Multi-frame generalization of `export_text`: every frame's own composited, trimmed text, in
-/// document order, each preceded by a `--- frame N (Dms) ---` header (1-based index matching the
-/// timeline UI's own "N/total" display; `D` is the frame's `resolved_frame_duration_ms`), frames
-/// separated by a blank line.
-pub fn export_text_frames(doc: &Document) -> String {
+/// The `--- frame N (Dms) ---` header shared by every frame body: `index` is 0-based (matching the
+/// timeline UI's own "N/total" display once shown 1-based), `duration_ms` the frame's
+/// `resolved_frame_duration_ms`.
+pub fn frame_header(index: usize, duration_ms: u32) -> String {
+    format!("--- frame {} ({duration_ms}ms) ---", index + 1)
+}
+
+/// Multi-frame generalization of `export_text`: every frame's own composited text, in document
+/// order, each preceded by [`frame_header`], frames separated by a blank line. `trim` is threaded
+/// straight through to [`flatten`] for each frame's body.
+pub fn export_text_frames_with_trim(doc: &Document, trim: bool) -> String {
     (0..doc.frame_count())
         .map(|i| {
-            let body = flatten_trimmed(&composite_frame(doc, i).expect("i is always in 0..frame_count()"));
+            let body = flatten(&composite_frame(doc, i).expect("i is always in 0..frame_count()"), trim);
             let dur = doc.resolved_frame_duration_ms(i).expect("i is always in 0..frame_count()");
-            format!("--- frame {} ({dur}ms) ---\n{body}", i + 1)
+            format!("{}\n{body}", frame_header(i, dur))
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// [`export_text_frames_with_trim`] with trailing whitespace trimmed per row, matching `export_text`.
+pub fn export_text_frames(doc: &Document) -> String {
+    export_text_frames_with_trim(doc, true)
 }
 
 #[cfg(test)]

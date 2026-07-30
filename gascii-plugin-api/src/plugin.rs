@@ -1,15 +1,34 @@
 use egui::Ui;
-use gascii_core::DensityMode;
 
-use crate::{CanvasRenderer, OptionsGeom, PanelOutcome, PluginHost, PluginToolCapabilities};
+use crate::{CanvasRenderer, OptionsGeom, PanelOutcome, PluginHost, PluginShortcut, PluginToolCapabilities, ToolCtxPatch};
 
-/// The host-facing contract every plugin implements. Every method but `register_tools` defaults to
-/// a true no-op, so a plugin that only contributes tools needs to override nothing else.
+/// The host-facing contract every plugin implements. Every method has a true-no-op default except
+/// `as_any_mut` (which cannot: a `Self: Sized` bound would make it uncallable on `Box<dyn Plugin>`)
+/// — a plugin that only contributes tools (or only draws a panel, or only wants a `tick`) overrides
+/// nothing else.
 pub trait Plugin: 'static {
     /// The tools this plugin contributes, described but not yet identified — the host merges each
     /// bundle into its own tool registry row (assigning tool identity and, for sized tools, the
-    /// stamp-slot index).
-    fn register_tools(&self) -> Vec<PluginToolCapabilities>;
+    /// stamp-slot index). An associated function, not a method: the host's `PluginDescriptor.tools`
+    /// calls this directly, so no instance is ever constructed purely to read a description off it.
+    /// `where Self: Sized` excludes it from the vtable, the same reasoning `as_any_mut`'s own doc
+    /// comment already relies on for object safety.
+    fn tool_capabilities() -> Vec<PluginToolCapabilities>
+    where
+        Self: Sized,
+    {
+        Vec::new()
+    }
+
+    /// The `tick`-driven shortcuts this plugin declares — feeds the `?` overlay's PLUGINS section,
+    /// the app's key-claim set, and the startup collision check. Same associated-function shape as
+    /// `tool_capabilities`, for the same reason.
+    fn shortcuts() -> Vec<PluginShortcut>
+    where
+        Self: Sized,
+    {
+        Vec::new()
+    }
 
     /// Custom per-tool options-panel content beyond the host's generic size/shape rows, rendered at
     /// most once per frame per owning plugin even if both bindings hold the same tool.
@@ -29,12 +48,16 @@ pub trait Plugin: 'static {
     /// shortcuts only ever mutate their own state (or none at all) needs no override here beyond the
     /// default, which returns `PanelOutcome::default()` — a true no-op.
     ///
-    /// Known gap: a shortcut consumed here (a digit key, a frame-navigation key, a duplicate-frame
-    /// chord) has no structured way to register its own label with the host, so it cannot appear in
-    /// the host's own `?` keyboard-shortcuts overlay — that overlay only lists `register_tools`'
-    /// tool letters and the host's own built-in chords. A `tick`-driven shortcut's discoverability
-    /// is entirely up to whatever UI the plugin's own `panel`/`options_ui` chooses to show for it.
-    fn tick(&mut self, _ui: &mut Ui, _focused: bool, _host: &dyn PluginHost) -> PanelOutcome {
+    /// `resumed_after_suppression`: `true` on the first `tick` call after one or more frames were
+    /// skipped because a modal dialog was open (`tick` only runs while `!modal_open()`) — the host
+    /// latches this the moment it skips a frame and delivers it once, here, the next time it
+    /// actually calls `tick` again. A plugin holding cross-frame key-hold state (a press-and-hold
+    /// gesture spanning several ticks) must treat this exactly like an OS focus-loss interruption:
+    /// the hold's `pressed`/`released` edges never crossed this plugin's own `tick` while suppressed
+    /// (egui's own input state is a per-viewport global the modal's own event loop also consumed
+    /// from), so any state built up before the suppression started is stale and must be reset, not
+    /// resumed. A plugin with no such state ignores this safely.
+    fn tick(&mut self, _ui: &mut Ui, _focused: bool, _resumed_after_suppression: bool, _host: &dyn PluginHost) -> PanelOutcome {
         PanelOutcome::default()
     }
 
@@ -61,9 +84,12 @@ pub trait Plugin: 'static {
         inner
     }
 
-    /// Extra `ToolCtx` fields (density mode, ramp) for a plugin-owned tool that reads them —
-    /// consulted only when the merged tool row's `wants_extra_ctx` is set.
-    fn extra_tool_ctx(&self, _tool_name: &str) -> Option<(DensityMode, Vec<char>)> {
+    /// A named, defaultable patch over `ToolCtx`'s extra fields (density mode, ramp) for a
+    /// plugin-owned tool that reads them — consulted only when the merged tool row's
+    /// `wants_ctx_patch` is set. `canvas::tool_ctx` applies whichever fields are `Some` over the
+    /// context's own defaults; `None` (the whole return value, or either field) leaves the
+    /// corresponding default untouched.
+    fn tool_ctx_patch(&self, _tool_name: &str) -> Option<ToolCtxPatch> {
         None
     }
 
@@ -92,9 +118,6 @@ mod tests {
 
     struct NullPlugin;
     impl Plugin for NullPlugin {
-        fn register_tools(&self) -> Vec<PluginToolCapabilities> {
-            Vec::new()
-        }
         fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
             self
         }
@@ -110,6 +133,9 @@ mod tests {
         }
         fn document(&self) -> &Document {
             &self.0
+        }
+        fn top_edit_id(&self) -> Option<u64> {
+            None
         }
     }
 
@@ -132,7 +158,7 @@ mod tests {
     }
 
     fn geom() -> OptionsGeom {
-        OptionsGeom { stepper_h: 1.0, shape_indent: 0.0, item_spacing_y: None, wrap_brush_mode: false, brush_slider_h: 1.0 }
+        OptionsGeom { stepper_h: 1.0, shape_indent: 0.0, item_spacing_y: None, inline_controls: false, slider_h: 1.0 }
     }
 
     /// Every default method must be callable without panicking and must produce exactly the
@@ -145,7 +171,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             p.options_ui("anything", ui, geom(), &host);
-            let tick_outcome = p.tick(ui, false, &host);
+            let tick_outcome = p.tick(ui, false, false, &host);
             assert!(tick_outcome.edits.is_empty(), "default tick must request no edits");
             assert!(tick_outcome.set_active_frame.is_none(), "default tick must not request a frame switch");
             let outcome = p.panel(ui, false, &host);
@@ -153,8 +179,9 @@ mod tests {
             assert!(outcome.set_active_frame.is_none(), "default panel must not request a frame switch");
         });
 
-        assert!(p.register_tools().is_empty());
-        assert!(p.extra_tool_ctx("anything").is_none());
+        assert!(NullPlugin::tool_capabilities().is_empty());
+        assert!(NullPlugin::shortcuts().is_empty());
+        assert!(p.tool_ctx_patch("anything").is_none());
         assert!(!p.pressure_override_enabled("anything"));
 
         let inner: Box<dyn CanvasRenderer> = Box::new(MarkerRenderer);

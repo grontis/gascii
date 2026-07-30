@@ -10,4 +10,11 @@ pub trait PluginHost {
     /// frame timing. Still narrow: no path to mutate the document through this trait (see
     /// `PanelOutcome` for how a plugin requests a mutation instead) or to reach any other app state.
     fn document(&self) -> &gascii_core::Document;
+
+    /// The host's undo stack identity for whatever edit currently sits on top (`History::
+    /// top_edit_id`'s exact value; `None` for a fresh document with nothing applied yet). Exists so
+    /// a panel-side cache can tell "has the document changed since I last built this" in O(1),
+    /// without re-deriving or re-hashing the document's own content every frame — see
+    /// `gascii-anim`'s `ThumbnailCache` for the motivating consumer.
+    fn top_edit_id(&self) -> Option<u64>;
 }

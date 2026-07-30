@@ -13,7 +13,6 @@ use eframe::egui::{
 };
 
 use super::theme::{self, Tokens};
-use crate::app::ToolKind;
 use crate::fonts;
 
 /// Toolbox cell height; icons are 17px inside it.
@@ -241,7 +240,7 @@ pub struct Bound {
 ///
 /// The cell inverts for L only. R is shown as a badge alone, because inversion is what marks "the
 /// tool you are drawing with", and every keyboard shortcut and every glyph action targets L.
-pub fn tool_cell(ui: &mut Ui, kind: ToolKind, bound: Bound, size: Vec2) -> Response {
+pub fn tool_cell(ui: &mut Ui, icon: &[gascii_plugin_api::IconPath], name: &str, bound: Bound, size: Vec2) -> Response {
     let t = tokens(ui);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter().clone();
@@ -260,7 +259,8 @@ pub fn tool_cell(ui: &mut Ui, kind: ToolKind, bound: Bound, size: Vec2) -> Respo
     };
 
     let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(ICON));
-    super::icons::paint(&painter, kind, icon_rect, fg);
+    let fallback_letter = name.chars().next().unwrap_or('?');
+    super::icons::paint(&painter, icon, icon_rect, fg, fallback_letter);
 
     let badge = |text: &str, color: Color32| {
         painter.text(

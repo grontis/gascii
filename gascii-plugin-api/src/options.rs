@@ -9,9 +9,10 @@ pub struct OptionsGeom {
     /// Overrides the per-binding row group's vertical item spacing; `None` inherits whatever the
     /// caller's `Ui` already has set.
     pub item_spacing_y: Option<f32>,
-    /// Whether a Fixed/Buildup-style segmented control shares one `ui.horizontal` with its slider
-    /// and percent label (kiosk), or stands on its own line above them (the normal sidebar).
-    pub wrap_brush_mode: bool,
-    /// A Fixed-mode intensity slider's height.
-    pub brush_slider_h: f32,
+    /// Whether a segmented mode control (Brush's Fixed/Buildup) shares one `ui.horizontal` with its
+    /// companion slider and percent label (kiosk), or stands on its own line above them (the
+    /// normal sidebar). Chrome-generic despite the name of the one control that currently uses it.
+    pub inline_controls: bool,
+    /// A full-width slider control's height.
+    pub slider_h: f32,
 }

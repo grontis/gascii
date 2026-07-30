@@ -16,4 +16,4 @@ mod thumbnail;
 mod timeline;
 mod widgets;
 
-pub use plugin::AnimPlugin;
+pub use plugin::{make, AnimPlugin, DESCRIPTOR};

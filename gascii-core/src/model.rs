@@ -177,6 +177,13 @@ impl Document {
         Self::MAX_WIDTH as usize * Self::MAX_HEIGHT as usize * Self::MAX_LAYERS;
     /// 10fps; a plain, documented starting default for a freshly created document.
     pub const DEFAULT_FRAME_DURATION_MS: u32 = 100;
+    /// Sane upper bound on any per-frame playback duration (an hour), covering both
+    /// `frame_duration_ms` (the document default) and a `Frame::duration_override` — a `.gascii`
+    /// file is untrusted input, and an unbounded value here is one of the few numeric fields the
+    /// format lets through with no structural cap of its own. Clamped, never rejected, at v2 load
+    /// (see `io/gascii_json.rs::load_v2`) — a stray huge value is a nuisance to fix by hand, not
+    /// a reason to refuse the whole file.
+    pub const MAX_FRAME_DURATION_MS: u32 = 3_600_000;
 
     /// `pub(crate)`: also used as the v2 format envelope's serde default (`io/gascii_json.rs`),
     /// not just `Document`'s own struct default.

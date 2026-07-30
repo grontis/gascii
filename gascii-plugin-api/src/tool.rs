@@ -1,3 +1,5 @@
+use crate::IconPath;
+
 /// What a plugin contributes for one tool row: display facts plus the capability booleans the
 /// host merges into its own tool registry. Tool *identity* and persistence-critical indexing stay
 /// host-assigned — a bundle only says "I'm sized" via `sized`, never which literal stamp slot it
@@ -7,6 +9,10 @@ pub struct PluginToolCapabilities {
     pub key: egui::Key,
     pub tip: &'static str,
     pub make: fn() -> Box<dyn gascii_core::Tool>,
+    /// This tool's own icon, authored in a 16x16 viewBox (see `IconPath`). An empty slice falls
+    /// back to the tool name's first letter, painted centered in its cell — never a panic, never a
+    /// blank cell.
+    pub icon: &'static [IconPath],
     /// Whether this tool has a size/shape footprint; the host assigns the actual stamp-slot index.
     pub sized: bool,
     /// Whether this tool can hold a cross-frame session (uncommitted work outliving one stroke).
@@ -21,7 +27,7 @@ pub struct PluginToolCapabilities {
     pub kiosk_visible: bool,
     /// Whether a stylus-pressure stroke should override this tool's stamp size.
     pub pressure_sizeable: bool,
-    /// Whether `tool_ctx` should ask the owning plugin for extra context (`Plugin::extra_tool_ctx`)
-    /// while this tool is bound.
-    pub wants_extra_ctx: bool,
+    /// Whether `tool_ctx` should ask the owning plugin for a `ToolCtxPatch`
+    /// (`Plugin::tool_ctx_patch`) while this tool is bound.
+    pub wants_ctx_patch: bool,
 }
