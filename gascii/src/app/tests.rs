@@ -198,6 +198,32 @@
         assert!(err.contains(dupe.name), "error must name the duplicated tool: {err}");
     }
 
+    /// Two plugins persisting under one id would make stored enabled-state resolve against
+    /// whichever descriptor `position()` finds first — the other plugin silently inherits prefs
+    /// that were never its own. `validate_unique_plugin_ids` must reject this at registry
+    /// construction, like its tool-name and key-claim siblings.
+    #[test]
+    fn validate_unique_plugin_ids_rejects_a_duplicate_id() {
+        let mut dupe = gascii_anim::DESCRIPTOR;
+        dupe.id = gascii_density_brush::DESCRIPTOR.id;
+        let err = validate_unique_plugin_ids(&[gascii_density_brush::DESCRIPTOR, dupe])
+            .expect_err("a duplicate plugin id must be an error");
+        assert!(err.contains(dupe.id), "error must name the duplicated id: {err}");
+        validate_unique_plugin_ids(PLUGINS).expect("the real descriptor table has unique ids");
+    }
+
+    /// The Plugin Manager renders id/name/description/version verbatim, and prefs key off `id` —
+    /// an empty string in any registered descriptor is a registration mistake this pins against.
+    #[test]
+    fn every_registered_descriptor_carries_non_empty_metadata() {
+        for d in PLUGINS {
+            assert!(!d.id.is_empty(), "descriptor {:?} has an empty id", d.name);
+            assert!(!d.name.is_empty(), "descriptor {:?} has an empty name", d.id);
+            assert!(!d.description.is_empty(), "descriptor {:?} has an empty description", d.id);
+            assert!(!d.version.is_empty(), "descriptor {:?} has an empty version", d.id);
+        }
+    }
+
     /// `merge_plugin_row`'s `plugin_slot` must carry through whatever index it is given, not a
     /// hardcoded value — every downstream consumer (`tool_ctx`'s ctx-patch injection, the
     /// pressure-override gate, `binding_options_geom`'s dedup) trusts `plugin_slot` to resolve back
@@ -952,7 +978,7 @@
             Box::new(TaggingPlugin { tag: "b", log: log.clone() }),
             Box::new(TaggingPlugin { tag: "c", log: log.clone() }),
         ];
-        let _ = build_renderer(&plugins);
+        let _ = build_renderer(plugins.iter().map(|p| p.as_ref()));
         assert_eq!(*log.borrow(), vec!["a", "b", "c"], "fold order must match plugin-list order");
     }
 
@@ -963,7 +989,7 @@
     fn a_real_app_with_the_builtin_plugin_list_has_an_identity_renderer() {
         let app = GasciiApp::headless();
 
-        let mut renderer = build_renderer(&app.plugins);
+        let mut renderer = build_renderer(app.plugins.iter().map(|p| p.as_ref()));
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             let painter = ui.painter().clone();
@@ -980,6 +1006,256 @@
                 None,
             );
         });
+    }
+
+    /// Disabling the plugin that owns a bound tool must snap that binding to Pencil — the
+    /// structural half of "a disabled plugin's tool is never bound" — while leaving the name-keyed
+    /// stamp settings untouched, so the size survives the round trip. Re-enable must NOT
+    /// auto-rebind: the user gets their tool back by picking it, with its stamp intact.
+    #[test]
+    fn disabling_the_plugin_owning_a_bound_tool_rebinds_to_pencil_and_preserves_its_stamp() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, BRUSH_KIND);
+        let slot = sized_slot(BRUSH_KIND).expect("Brush is sized");
+        app.slots[Binding::L.ix()].stamps[slot].size = 7;
+        let i = tool_def(BRUSH_KIND).plugin_slot.expect("Brush is plugin-sourced");
+
+        app.set_plugin_enabled(i, false);
+        assert_eq!(app.slot(Binding::L).kind, ToolKind::Pencil, "L must fall back to Pencil at disable time");
+        assert_eq!(app.slots[Binding::L.ix()].stamps[slot].size, 7, "the stamp array is per-binding, not per-bound-tool — disable must not touch it");
+
+        app.set_plugin_enabled(i, true);
+        assert_eq!(app.slot(Binding::L).kind, ToolKind::Pencil, "re-enable must not auto-rebind");
+
+        app.bind(Binding::L, BRUSH_KIND);
+        assert_eq!(app.slot(Binding::L).kind, BRUSH_KIND);
+        assert_eq!(app.slots[Binding::L.ix()].stamps[slot].size, 7, "rebinding after the cycle must see the same stamp size");
+    }
+
+    /// The other half of the invariant: `set_tool`'s enabled guard. While the owning plugin is
+    /// disabled, a bind request for its tool must be a silent no-op — otherwise `tool_ctx_patch`,
+    /// the pressure gate, and `options_ui` (all ungated by design) would run against a disabled
+    /// plugin.
+    #[test]
+    fn a_disabled_plugins_tool_cannot_be_bound() {
+        let mut app = GasciiApp::headless();
+        let i = tool_def(BRUSH_KIND).plugin_slot.expect("Brush is plugin-sourced");
+        app.set_plugin_enabled(i, false);
+
+        app.bind(Binding::L, BRUSH_KIND);
+        assert_eq!(app.slot(Binding::L).kind, ToolKind::Pencil, "binding a disabled plugin's tool must be refused");
+
+        app.set_plugin_enabled(i, true);
+        app.bind(Binding::L, BRUSH_KIND);
+        assert_eq!(app.slot(Binding::L).kind, BRUSH_KIND, "the same bind must succeed once re-enabled");
+    }
+
+    /// A test-only plugin logging the `resumed_after_suppression` flag of every `tick` it
+    /// receives — one log entry per delivered tick, so both "was I called at all" and "what reset
+    /// signal did I see" fall out of the same list.
+    struct TickRecorderDouble {
+        log: std::rc::Rc<std::cell::RefCell<Vec<bool>>>,
+    }
+    impl Plugin for TickRecorderDouble {
+        fn tick(
+            &mut self,
+            _ui: &mut egui::Ui,
+            _focused: bool,
+            resumed_after_suppression: bool,
+            _host: &dyn gascii_plugin_api::PluginHost,
+        ) -> gascii_plugin_api::PanelOutcome {
+            self.log.borrow_mut().push(resumed_after_suppression);
+            gascii_plugin_api::PanelOutcome::default()
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    /// `Plugin::tick`'s documented contract at the toggle boundary: a disabled plugin's tick is
+    /// skipped outright (its clock freezes), and the FIRST tick after re-enable — and only that
+    /// one — sees `resumed_after_suppression`, so cross-frame hold state (gascii-anim's Space
+    /// hold) can reset exactly as it does after a modal closes.
+    #[test]
+    fn a_disabled_plugins_tick_is_skipped_and_its_first_tick_after_reenable_sees_the_resume_flag() {
+        let mut app = GasciiApp::headless();
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let i = app.push_plugin_double(Box::new(TickRecorderDouble { log: log.clone() }));
+        let run_frame = |app: &mut GasciiApp| {
+            let ctx = egui::Context::default();
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.handle_keys(ui));
+        };
+
+        run_frame(&mut app);
+        assert_eq!(*log.borrow(), vec![false], "an ordinary enabled tick carries no resume flag");
+
+        app.set_plugin_enabled(i, false);
+        run_frame(&mut app);
+        assert_eq!(*log.borrow(), vec![false], "a disabled plugin must not be ticked at all");
+
+        app.set_plugin_enabled(i, true);
+        run_frame(&mut app);
+        assert_eq!(*log.borrow(), vec![false, true], "the first tick after re-enable must see resumed_after_suppression");
+
+        run_frame(&mut app);
+        assert_eq!(*log.borrow(), vec![false, true, false], "the latch is one-shot — the second tick is ordinary again");
+    }
+
+    /// Disabling a plugin must reclaim its panel's screen space the same frame: `run_plugin_panels`
+    /// skips it, so the egui panel is simply never declared (immediate mode) and the central rect
+    /// grows back to the no-plugin baseline exactly.
+    #[test]
+    fn disabling_a_plugin_removes_its_panel_from_the_layout() {
+        let mut app = GasciiApp::headless();
+        let i = app.push_plugin_double(Box::new(BottomPanelDouble));
+
+        let central_rect = |app: &mut GasciiApp| {
+            let ctx = egui::Context::default();
+            let mut rect = None;
+            let _ = ctx.run_ui(raw_input_with_screen(1000.0, 800.0), |ui| {
+                app.run_plugin_panels(ui, false);
+                let resp = egui::CentralPanel::default().show(ui, |_ui| {});
+                rect = Some(resp.response.rect);
+            });
+            rect.unwrap()
+        };
+
+        let enabled_rect = central_rect(&mut app);
+        app.set_plugin_enabled(i, false);
+        let disabled_rect = central_rect(&mut app);
+
+        let mut baseline_app = GasciiApp::headless(); // never had the double
+        let baseline_rect = central_rect(&mut baseline_app);
+
+        assert!(enabled_rect.height() < baseline_rect.height(), "sanity: the enabled double's bottom panel must claim space");
+        assert_eq!(disabled_rect, baseline_rect, "disabling must reclaim the panel's space down to the exact baseline rect");
+    }
+
+    /// The real registered gascii-anim plugin, not a double: its timeline claims space once a
+    /// second frame exists, and disabling the plugin must remove the timeline even then — the
+    /// frames stay in the document, but nothing draws a panel for them.
+    #[test]
+    fn disabling_the_anim_plugin_removes_the_timeline_even_with_multiple_frames() {
+        let mut app = GasciiApp::headless();
+        let edit = gascii_core::add_frame(&app.doc, 1, gascii_core::Frame::blank(app.doc.width, app.doc.height)).unwrap();
+        app.apply_edit(edit, None);
+        assert_eq!(app.doc.frame_count(), 2);
+        let anim = PLUGINS.iter().position(|d| d.id == gascii_anim::DESCRIPTOR.id).expect("gascii-anim is registered");
+        app.set_plugin_enabled(anim, false);
+
+        let ctx = egui::Context::default();
+        let mut with_disabled_anim = None;
+        let _ = ctx.run_ui(raw_input_with_screen(1000.0, 800.0), |ui| {
+            app.run_plugin_panels(ui, false);
+            let resp = egui::CentralPanel::default().show(ui, |_ui| {});
+            with_disabled_anim = Some(resp.response.rect);
+        });
+
+        let ctx2 = egui::Context::default();
+        let mut bare_baseline = None;
+        let _ = ctx2.run_ui(raw_input_with_screen(1000.0, 800.0), |ui| {
+            let resp = egui::CentralPanel::default().show(ui, |_ui| {});
+            bare_baseline = Some(resp.response.rect);
+        });
+
+        assert_eq!(
+            with_disabled_anim.unwrap(),
+            bare_baseline.unwrap(),
+            "with anim disabled, a two-frame document must lay out as if no panel loop ran at all"
+        );
+    }
+
+    /// Every effective toggle rebuilds the renderer from the enabled plugins only — a disabled
+    /// plugin's `wrap_renderer` must not run, so its canvas decorator (anim's onion skin) drops
+    /// out of the chain immediately and comes back on re-enable.
+    #[test]
+    fn toggling_a_plugin_rebuilds_the_renderer_excluding_disabled_wrappers() {
+        let mut app = GasciiApp::headless();
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let i = app.push_plugin_double(Box::new(TaggingPlugin { tag: "double", log: log.clone() }));
+        let brush = tool_def(BRUSH_KIND).plugin_slot.expect("Brush is plugin-sourced");
+
+        app.set_plugin_enabled(brush, false);
+        assert_eq!(*log.borrow(), vec!["double"], "a rebuild triggered by toggling ANOTHER plugin must still wrap the enabled double");
+
+        log.borrow_mut().clear();
+        app.set_plugin_enabled(i, false);
+        assert!(log.borrow().is_empty(), "the rebuild after disabling the double must not call its wrap_renderer");
+
+        app.set_plugin_enabled(i, true);
+        assert_eq!(*log.borrow(), vec!["double"], "re-enabling must fold the double back into the renderer chain");
+    }
+
+    /// Disable keeps the live plugin instance — it gates hook calls, it does not drop the box — so
+    /// unpersisted plugin state (the ramp choice here) survives a disable/enable cycle.
+    #[test]
+    fn plugin_state_survives_a_disable_enable_cycle() {
+        let mut app = GasciiApp::headless();
+        app.brush_plugin_mut().set_active_ramp(1);
+        let i = tool_def(BRUSH_KIND).plugin_slot.expect("Brush is plugin-sourced");
+
+        app.set_plugin_enabled(i, false);
+        app.set_plugin_enabled(i, true);
+
+        assert_eq!(app.brush_plugin_mut().active_ramp(), 1, "the live instance must be retained across the toggle, state and all");
+    }
+
+    /// A disabled tool's shortcut letter must be left unconsumed — the enabled check runs before
+    /// the consuming predicate in `handle_keys`'s dispatch, the same leave-unconsumed shape
+    /// Text-in-kiosk uses — so the key stays available to whatever else might claim it.
+    #[test]
+    fn the_tool_letter_of_a_disabled_plugins_tool_is_left_unconsumed() {
+        let mut app = GasciiApp::headless();
+        let i = tool_def(BRUSH_KIND).plugin_slot.expect("Brush is plugin-sourced");
+        app.set_plugin_enabled(i, false);
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::B,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut key_still_there = false;
+        let _ = ctx.run_ui(raw, |ui| {
+            app.handle_keys(ui);
+            key_still_there = ui.input_mut(|inp| inp.consume_key(egui::Modifiers::NONE, egui::Key::B));
+        });
+
+        assert!(key_still_there, "handle_keys must not consume a disabled tool's shortcut key");
+        assert_eq!(app.slot(Binding::L).kind, ToolKind::Pencil, "and must not rebind L off its default");
+    }
+
+    /// The Plugin Manager must count as a modal like every other dialog: `modal_open()` is what
+    /// suppresses ticks and gates canvas input while it's up, and the same latch is what delivers
+    /// `resumed_after_suppression` when it closes — the toggle-time safety argument rests on this.
+    #[test]
+    fn opening_the_plugins_dialog_counts_as_a_modal() {
+        let mut app = GasciiApp::headless();
+        assert!(!app.modal_open());
+        app.open_plugins_dialog();
+        assert!(app.modal_open(), "the Plugins dialog must register with modal_open()");
+    }
+
+    /// `anim_plugin_enabled` (the Add Frame menu gate) must track exactly the gascii-anim toggle —
+    /// not any other plugin's.
+    #[test]
+    fn anim_plugin_enabled_follows_the_anim_toggle_and_ignores_other_plugins() {
+        let mut app = GasciiApp::headless();
+        assert!(app.anim_plugin_enabled());
+
+        let brush = tool_def(BRUSH_KIND).plugin_slot.expect("Brush is plugin-sourced");
+        app.set_plugin_enabled(brush, false);
+        assert!(app.anim_plugin_enabled(), "another plugin's toggle must not affect the Add Frame gate");
+
+        let anim = PLUGINS.iter().position(|d| d.id == gascii_anim::DESCRIPTOR.id).expect("gascii-anim is registered");
+        app.set_plugin_enabled(anim, false);
+        assert!(!app.anim_plugin_enabled(), "disabling gascii-anim must gray the Add Frame gate");
+
+        app.set_plugin_enabled(anim, true);
+        assert!(app.anim_plugin_enabled());
     }
 
     /// Every kind must be constructible, including Eyedropper — which is not really a tool and is

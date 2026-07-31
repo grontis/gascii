@@ -107,6 +107,19 @@ fn tool_shortcut_fires_and_consumes_its_key(def: &ToolDef, i: &mut egui::InputSt
     tool_shortcut_reachable(def.kind, is_fullscreen) && i.consume_key(egui::Modifiers::NONE, def.key)
 }
 
+/// One plugin's per-app runtime state — `plugins`' enabled/resume sidecar, indexed identically.
+/// A separate parallel `Vec` rather than a wrapper around the instance so `ToolDef.plugin_slot`
+/// keeps indexing `plugins` directly, and a bare test double pushed onto `plugins` alone stays
+/// legal (it reads as enabled — see `plugin_enabled`).
+pub(crate) struct PluginRuntime {
+    pub(crate) enabled: bool,
+    /// Latched at re-enable, consumed by the plugin's first tick after — delivered as
+    /// `resumed_after_suppression`, the same stale-hold-state reset the modal-suppression latch
+    /// delivers globally. Without it, a prefs- or test-driven toggle would skip the reset the
+    /// `Plugin::tick` contract promises.
+    pub(crate) resume_pending: bool,
+}
+
 pub struct GasciiApp {
     pub(crate) doc: Document,
     pub(crate) viewport: Viewport,
@@ -116,6 +129,9 @@ pub struct GasciiApp {
     /// `build_tools` never constructs a plugin instance at all; it reads descriptions straight off
     /// `PLUGINS` via `(d.tools)()`. A `ToolDef.plugin_slot` indexes into this same slice.
     pub(crate) plugins: Vec<Box<dyn Plugin>>,
+    /// One entry per `PLUGINS` descriptor, same order — see `PluginRuntime`. Production apps never
+    /// grow it past `PLUGINS.len()`; `push_plugin_double` extends both vecs together for tests.
+    pub(crate) plugin_runtime: Vec<PluginRuntime>,
     pub(crate) pending_fit: bool,
     /// Deferred `+`/`-` zoom request (sign = direction, 0 = none) from the keyboard chords, the
     /// View menu, or the status bar — none of which have the canvas geometry an anchored zoom
@@ -299,16 +315,17 @@ pub(crate) enum PendingConfirm {
     NewDocument,
 }
 
-/// Which of the New/Resize/Export/Help dialogs is showing, tagging `GasciiApp::open_dialog`.
-/// Replaces four independent `_open: bool` flags with one field — `modal_open()` no longer has to
-/// enumerate them by hand, and opening a dialog structurally replaces whatever was open before
-/// rather than leaving a stale flag set alongside it.
+/// Which of the New/Resize/Export/Help/Plugins dialogs is showing, tagging
+/// `GasciiApp::open_dialog`. Replaces independent `_open: bool` flags with one field —
+/// `modal_open()` no longer has to enumerate them by hand, and opening a dialog structurally
+/// replaces whatever was open before rather than leaving a stale flag set alongside it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum OpenDialog {
     New,
     Resize,
     Export,
     Help,
+    Plugins,
 }
 
 impl GasciiApp {
@@ -356,7 +373,9 @@ impl GasciiApp {
         // Same slice `build_tools` reads descriptions from — see `PLUGINS`'s own doc comment for
         // why the two can no longer iterate it differently.
         let plugins: Vec<Box<dyn Plugin>> = PLUGINS.iter().map(|d| (d.make)()).collect();
-        let renderer = build_renderer(&plugins);
+        let plugin_runtime: Vec<PluginRuntime> =
+            PLUGINS.iter().map(|_| PluginRuntime { enabled: true, resume_pending: false }).collect();
+        let renderer = build_renderer(plugins.iter().map(|p| p.as_ref()));
         let doc = Document::default_document();
         // Mirrors `saved_marker`'s own "start clean" contract, read from the fresh `doc` itself
         // rather than hardcoded, so this stays correct if `Document::default_document`'s starting
@@ -369,6 +388,7 @@ impl GasciiApp {
             hovered_cell: None,
             renderer,
             plugins,
+            plugin_runtime,
             // Fit on the first frame: a document pinned to the top-left corner of the desk is not
             // "the star", and the viewport's default pan of zero puts it there.
             pending_fit: true,
@@ -446,6 +466,93 @@ impl GasciiApp {
         &self.slots[b.ix()]
     }
 
+    /// Whether the plugin at `i` is enabled. Out-of-range — a test double pushed onto `plugins`
+    /// alone — reads as enabled: a double has no descriptor row and nothing to toggle.
+    pub(crate) fn plugin_enabled(&self, i: usize) -> bool {
+        self.plugin_runtime.get(i).is_none_or(|r| r.enabled)
+    }
+
+    /// The one enabled-filter every tool-row consumer goes through: a built-in row is always
+    /// enabled, a plugin row follows its plugin's toggle. Filtering anywhere else would let two
+    /// consumers drift on what "available" means.
+    pub(crate) fn tool_enabled(&self, kind: ToolKind) -> bool {
+        tool_def(kind).plugin_slot.is_none_or(|i| self.plugin_enabled(i))
+    }
+
+    /// The registry minus disabled plugins' rows — what the toolbox and kiosk grids draw. Owned:
+    /// `ToolDef` is `Copy` and both grids need `&mut GasciiApp` alongside the list.
+    pub(crate) fn active_tools(&self) -> Vec<ToolDef> {
+        tools().iter().copied().filter(|d| self.tool_enabled(d.kind)).collect()
+    }
+
+    /// Whether gascii-anim is enabled — gates the Edit menu's "Add Frame" item: a second frame
+    /// with no timeline to manage it would be stranded. Resolved by descriptor id, not a hardcoded
+    /// index, and reads as enabled were the plugin ever not registered at all (Add Frame is
+    /// host-owned; only the *management* UI is the plugin's).
+    pub(crate) fn anim_plugin_enabled(&self) -> bool {
+        PLUGINS
+            .iter()
+            .position(|d| d.id == gascii_anim::DESCRIPTOR.id)
+            .is_none_or(|i| self.plugin_enabled(i))
+    }
+
+    /// Toggles the plugin at `i`, effective immediately. Disabling rebinds any binding holding one
+    /// of its tools to Pencil — together with `set_tool`'s own enabled guard this makes "a disabled
+    /// plugin's tool is never bound" structural, which is why `tool_ctx_patch`, the pressure gate,
+    /// and the sidebar's `options_ui` block need no gating of their own. The live instance is kept,
+    /// not dropped: unpersisted plugin state (a ramp choice, a playback position) survives the
+    /// toggle, and `resume_pending` hands the plugin its tick-contract reset at re-enable instead.
+    ///
+    /// The fallback rebind rides on `bind`, whose stroke guard could in principle swallow it — but
+    /// toggling only happens inside the Plugins modal, and `canvas.rs` gates all raw pointer input
+    /// on `modal_open()`, so no stroke can be live here.
+    pub(crate) fn set_plugin_enabled(&mut self, i: usize, enabled: bool) {
+        let Some(rt) = self.plugin_runtime.get(i) else {
+            return;
+        };
+        if rt.enabled == enabled {
+            return;
+        }
+        if enabled {
+            self.plugin_runtime[i].enabled = true;
+            self.plugin_runtime[i].resume_pending = true;
+        } else {
+            for b in Binding::ALL {
+                if tool_def(self.slot(b).kind).plugin_slot == Some(i) {
+                    self.bind(b, ToolKind::Pencil);
+                }
+            }
+            self.plugin_runtime[i].enabled = false;
+        }
+        self.rebuild_renderer();
+    }
+
+    /// Rebuilds the canvas renderer from the enabled plugins only — `build_renderer`'s fold is a
+    /// pure function of the list it's given, so this is the whole cost of a toggle. `runtime` and
+    /// `self.plugins` are disjoint field borrows; routing the filter through `plugin_enabled`
+    /// instead would borrow all of `self` inside the closure and conflict with `iter()`'s own.
+    fn rebuild_renderer(&mut self) {
+        let runtime = &self.plugin_runtime;
+        let renderer = build_renderer(
+            self.plugins
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| runtime.get(*i).is_none_or(|r| r.enabled))
+                .map(|(_, p)| p.as_ref()),
+        );
+        self.renderer = renderer;
+    }
+
+    /// Test-only: pushes a plugin double with a matching runtime entry, so a test can toggle it by
+    /// the returned index. A bare push onto `plugins` alone stays legal — it reads as always
+    /// enabled, untoggleable.
+    #[cfg(test)]
+    pub(crate) fn push_plugin_double(&mut self, p: Box<dyn Plugin>) -> usize {
+        self.plugins.push(p);
+        self.plugin_runtime.push(PluginRuntime { enabled: true, resume_pending: false });
+        self.plugins.len() - 1
+    }
+
     /// Test-only downcast into the live `BrushPlugin` instance, for tests that need to drive or
     /// inspect its own state (ramp/mode/pressure) directly rather than only through the `Plugin`
     /// trait's narrow surface — e.g. confirming it survives being rendered through two different
@@ -466,7 +573,10 @@ impl GasciiApp {
     /// silently discard the pending, uncommitted burst or float — and only this slot's claim on the
     /// keyboard is released, so rebinding L must not silently mute a live session on R.
     fn set_tool(&mut self, b: Binding, kind: ToolKind) {
-        if self.stroke_in_progress() {
+        // A disabled plugin's tool is unbindable from every path (toolbox click, shortcut, prefs
+        // replay) — the other half, alongside `set_plugin_enabled`'s fallback rebind, of the
+        // invariant that a disabled plugin's tool is never bound.
+        if self.stroke_in_progress() || !self.tool_enabled(kind) {
             return;
         }
         self.end_session(b);
@@ -660,9 +770,14 @@ impl GasciiApp {
         // way to set R. Text is excluded from the lookup while fullscreen — see
         // `tool_shortcut_reachable` — so its key event is left unconsumed rather than silently
         // rebinding L to a tool that kiosk's own sidebar has no cell for.
+        // The enabled check runs before the consuming predicate, so a disabled tool's key event is
+        // left untouched — the same leave-unconsumed shape Text-in-kiosk uses.
         if !focused {
             let picked = ui.input_mut(|i| {
-                tools().iter().find(|def| tool_shortcut_fires_and_consumes_its_key(def, i, is_fullscreen)).map(|def| def.kind)
+                tools()
+                    .iter()
+                    .find(|def| self.tool_enabled(def.kind) && tool_shortcut_fires_and_consumes_its_key(def, i, is_fullscreen))
+                    .map(|def| def.kind)
             });
             if let Some(kind) = picked {
                 self.set_tool(Binding::L, kind);
@@ -752,11 +867,22 @@ impl GasciiApp {
         // `&host` (borrowing `self.doc`) while it runs, so every plugin's outcome is collected here
         // and applied afterward via the same `drain_panel_outcomes` helper, once `host`'s borrow of
         // `self.doc` has ended (NLL) and `&mut self` is free again.
+        // Disabled plugins are skipped outright — their clocks freeze and their shortcut dispatch
+        // (which lives inside `tick`) goes silent with them. `runtime` and `self.plugins` are
+        // disjoint field borrows, same shape as `rebuild_renderer`.
         let (stylus_detected, bound) = host_context(self);
         let host = host_facts(&self.doc, stylus_detected, bound, self.history.top_edit_id());
         let mut tick_outcomes = Vec::with_capacity(self.plugins.len());
-        for p in self.plugins.iter_mut() {
-            tick_outcomes.push(p.tick(ui, focused, resumed_after_suppression, &host));
+        let runtime = &mut self.plugin_runtime;
+        for (i, p) in self.plugins.iter_mut().enumerate() {
+            if runtime.get(i).is_some_and(|r| !r.enabled) {
+                continue;
+            }
+            // `mem::take` consumes the one-shot re-enable latch: read it and reset it to false in
+            // a single move, so the reset signal fires on exactly one tick.
+            let resumed = resumed_after_suppression
+                || runtime.get_mut(i).map(|r| std::mem::take(&mut r.resume_pending)).unwrap_or(false);
+            tick_outcomes.push(p.tick(ui, focused, resumed, &host));
         }
         self.drain_panel_outcomes(tick_outcomes);
         // `[`/`]` adjust the stamp of whichever binding was last used — a gesture on either button
@@ -839,6 +965,12 @@ impl GasciiApp {
         // if this fresh dialog already failed.
         self.last_error = None;
         self.open_dialog = Some(OpenDialog::Resize);
+    }
+
+    /// View ▸ "Plugins…"'s body — the menu's one mediator method, mirroring `open_resize_dialog`'s
+    /// shape. No flush needed: the manager reads and toggles plugin state only, never the document.
+    pub(crate) fn open_plugins_dialog(&mut self) {
+        self.open_dialog = Some(OpenDialog::Plugins);
     }
 
     /// The window title: `GASCII — <file>`, with a bullet while there are unsaved changes. The
@@ -985,6 +1117,7 @@ impl eframe::App for GasciiApp {
         self.export_dialog(&ctx);
         self.confirm_dialog(&ctx);
         self.help_overlay(&ctx);
+        self.plugins_dialog(&ctx);
 
         // Last, on the foreground layer: with the OS frame gone, nothing else draws the window's
         // own outline. Skipped while fullscreen — there is no window edge to outline, and kiosk's

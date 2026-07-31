@@ -31,7 +31,10 @@ pub fn make() -> Box<dyn Plugin> {
 /// This crate's whole registration story, harvested by the host's `const PLUGINS` table without
 /// ever constructing a throwaway instance.
 pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
-    name: "gascii-anim",
+    id: "gascii-anim",
+    name: "Animation",
+    description: "Frame-based animation: a timeline panel, playback, and an onion-skin canvas overlay.",
+    version: env!("CARGO_PKG_VERSION"),
     make,
     tools: AnimPlugin::tool_capabilities,
     shortcuts: AnimPlugin::shortcuts,

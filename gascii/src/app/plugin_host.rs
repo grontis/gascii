@@ -67,7 +67,13 @@ impl GasciiApp {
         let (stylus_detected, bound) = host_context(self);
         let host = host_facts(&self.doc, stylus_detected, bound, self.history.top_edit_id());
         let mut outcomes = Vec::with_capacity(self.plugins.len());
-        for p in self.plugins.iter_mut() {
+        // A disabled plugin's panel is simply never declared — immediate mode reclaims its space
+        // the same frame. `runtime` borrows only `self.plugin_runtime`, disjoint from `plugins`.
+        let runtime = &self.plugin_runtime;
+        for (i, p) in self.plugins.iter_mut().enumerate() {
+            if runtime.get(i).is_some_and(|r| !r.enabled) {
+                continue;
+            }
             outcomes.push(p.panel(ui, kiosk, &host));
         }
         self.drain_panel_outcomes(outcomes);

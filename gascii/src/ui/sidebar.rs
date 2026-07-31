@@ -4,7 +4,7 @@ use eframe::egui::{self, Sense, Stroke, Ui, Vec2};
 
 use super::widgets::{self, Bound};
 use super::theme;
-use crate::app::{sized_slot, tool_def, tools, Binding, GasciiApp, ToolDef, ToolKind};
+use crate::app::{sized_slot, tool_def, Binding, GasciiApp, ToolDef, ToolKind};
 use crate::fonts;
 use gascii_core::{BrushShape, MAX_TOOL_SIZE};
 use gascii_plugin_api::OptionsGeom;
@@ -146,6 +146,13 @@ pub(crate) fn tool_grid(ui: &mut Ui, app: &mut GasciiApp, tools: &[ToolDef], col
             rebind = Some((Binding::R, def.kind));
         }
     }
+    // A partial last row leaves unused positions; repainted in the panel colour so they read as
+    // empty sockets in the block rather than ghost cells left in the gap colour.
+    for i in tools.len()..rows * cols {
+        let (col, row) = (i % cols, i / cols);
+        let min = grid_rect.min + Vec2::new(col as f32 * (cell_w + 1.0), row as f32 * (cell.y + 1.0));
+        ui.painter().rect_filled(egui::Rect::from_min_size(min, cell), 0.0, t.bg_panel);
+    }
     ui.painter().rect_stroke(
         grid_rect,
         0.0,
@@ -160,7 +167,10 @@ pub(crate) fn tool_grid(ui: &mut Ui, app: &mut GasciiApp, tools: &[ToolDef], col
 /// MacPaint-style 3-column grid: cells butt together and the 1px gaps are the grid's own border
 /// showing through, so the whole block reads as one object rather than nine buttons.
 fn toolbox(ui: &mut Ui, app: &mut GasciiApp) {
-    tool_grid(ui, app, tools(), TOOL_COLS, widgets::TOOL_CELL);
+    // Collected before the call: `tool_grid` needs `&mut app` alongside the list, so the filtered
+    // rows can't stay borrowed from `app`.
+    let active = app.active_tools();
+    tool_grid(ui, app, &active, TOOL_COLS, widgets::TOOL_CELL);
 }
 
 /// Per-binding tool options at the normal sidebar's own geometry (`SIDEBAR_GEOM`) — see

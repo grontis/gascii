@@ -116,7 +116,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
             if ui.button("Resize Canvas…").clicked() {
                 app.open_resize_dialog();
             }
-            if ui.button("Add Frame").clicked() {
+            // Grayed while gascii-anim is disabled: a second frame with no timeline panel to
+            // manage it would be stranded. Export of existing multi-frame documents is unaffected
+            // — frames are a document property, not the plugin's.
+            if ui.add_enabled(app.anim_plugin_enabled(), egui::Button::new("Add Frame")).clicked() {
                 app.add_frame_via_menu();
             }
         });
@@ -146,6 +149,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
                     ui.ctx().set_theme(pref);
                 }
             });
+            ui.separator();
+            if ui.button("Plugins…").clicked() {
+                app.open_plugins_dialog();
+            }
             ui.separator();
             // Kiosk chrome shows no menu bar at all, so the "Exit…" label is unreachable in
             // practice while fullscreen — implemented anyway for symmetry/defensiveness and

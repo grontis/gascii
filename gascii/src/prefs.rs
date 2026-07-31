@@ -1,5 +1,5 @@
 //! Cross-restart preferences: theme, per-binding tool + stamps, RECENT glyphs, recent files,
-//! export settings, the grid toggle. Everything here is app-side — no serde derive lives on any
+//! export settings, the grid toggle, plugin enabled state. Everything here is app-side — no serde derive lives on any
 //! `gascii-core` type, so a future core enum change can never poison a stored prefs blob (an
 //! unrecognized value just falls back to its default, never an error).
 //!
@@ -12,7 +12,7 @@ use eframe::egui;
 use gascii_core::BrushShape;
 use serde::{Deserialize, Serialize};
 
-use crate::app::{tool_def, tools, Binding, ExportFormat, ExportSettings, GasciiApp, ToolKind};
+use crate::app::{tool_def, tools, Binding, ExportFormat, ExportSettings, GasciiApp, ToolKind, PLUGINS};
 
 const KEY: &str = "gascii_prefs";
 
@@ -30,6 +30,11 @@ pub(crate) struct Prefs {
     recent_files: Vec<PathBuf>,
     export: ExportPrefs,
     show_grid: bool,
+    /// One entry per registered plugin, keyed by descriptor `id`. Absent in a blob written before
+    /// plugins were toggleable — `#[serde(default)]` reads that as an empty list, which
+    /// `apply_to` leaves as "all enabled", the pre-toggle behavior.
+    #[serde(default)]
+    plugins: Vec<PluginPref>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -52,6 +57,15 @@ struct StampPref {
     tool: String,
     size: u16,
     shape: u8,
+}
+
+/// Keyed by `PluginDescriptor::id` — the stable identity, never the display name — following the
+/// same unknown-skipped-silently discipline as `stamps_by_name`: an id this build doesn't register
+/// (a removed plugin, a future version's) is ignored, every other entry still applies.
+#[derive(Serialize, Deserialize, Clone)]
+struct PluginPref {
+    id: String,
+    enabled: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -182,6 +196,11 @@ impl Prefs {
                 trim: app.export.trim,
             },
             show_grid: app.show_grid,
+            plugins: PLUGINS
+                .iter()
+                .enumerate()
+                .map(|(i, d)| PluginPref { id: d.id.to_owned(), enabled: app.plugin_enabled(i) })
+                .collect(),
         }
     }
 
@@ -222,6 +241,15 @@ impl Prefs {
                 for (&name, &(size, shape_byte)) in LEGACY_STAMP_ORDER.iter().zip(slot_prefs.stamps.iter()) {
                     apply_one(app, name, size, shape_byte);
                 }
+            }
+        }
+
+        // After the slot loop, so a stored binding to a now-disabled plugin's tool converges to
+        // Pencil either way: bound first then disabled, `set_plugin_enabled`'s fallback rebind
+        // snaps it; were the order ever flipped, `set_tool`'s enabled guard would refuse the bind.
+        for pref in &self.plugins {
+            if let Some(i) = PLUGINS.iter().position(|d| d.id == pref.id) {
+                app.set_plugin_enabled(i, pref.enabled);
             }
         }
 
@@ -366,6 +394,99 @@ mod tests {
 
         assert_eq!(restored.slot(Binding::L).kind, BRUSH_KIND, "L must resolve back through the plugin-backed row");
         assert_eq!(restored.slot(Binding::R).kind, BRUSH_KIND, "R must resolve back through the plugin-backed row too");
+    }
+
+    /// Plugin enabled state must survive the save/load round trip per plugin: the disabled one
+    /// comes back disabled, the untouched one stays enabled.
+    #[test]
+    fn plugin_enabled_state_round_trips_through_json() {
+        let mut app = GasciiApp::headless();
+        let brush = tool_def(BRUSH_KIND).plugin_slot.unwrap();
+        app.set_plugin_enabled(brush, false);
+
+        let json = serde_json::to_string(&Prefs::from_app(&app)).unwrap();
+        let back: Prefs = serde_json::from_str(&json).unwrap();
+        let mut restored = GasciiApp::headless();
+        back.apply_to(&mut restored);
+
+        assert!(!restored.plugin_enabled(brush), "the disabled plugin must come back disabled");
+        let anim = PLUGINS.iter().position(|d| d.id != PLUGINS[brush].id).unwrap();
+        assert!(restored.plugin_enabled(anim), "the untouched plugin must stay enabled");
+    }
+
+    /// A stored plugin id this build doesn't register (a removed plugin, a future version's) must
+    /// be skipped silently, leaving every known entry applied — the same discipline as
+    /// `stamps_by_name`.
+    #[test]
+    fn a_stored_pref_for_an_unknown_plugin_id_is_skipped_without_disturbing_the_known_ones() {
+        let mut app = GasciiApp::headless();
+        let brush = tool_def(BRUSH_KIND).plugin_slot.unwrap();
+        let mut prefs = Prefs::from_app(&app);
+        prefs.plugins.push(PluginPref { id: "not-a-registered-plugin".to_owned(), enabled: false });
+        if let Some(entry) = prefs.plugins.iter_mut().find(|p| p.id == PLUGINS[brush].id) {
+            entry.enabled = false;
+        }
+
+        prefs.apply_to(&mut app);
+        assert!(!app.plugin_enabled(brush), "the known entry must still apply around the unknown one");
+    }
+
+    /// A blob written before plugins were toggleable has no `plugins` field at all —
+    /// `#[serde(default)]` must read it as empty and leave every plugin enabled, the pre-toggle
+    /// behavior, rather than failing the whole parse.
+    #[test]
+    fn a_prefs_blob_missing_the_plugins_field_leaves_every_plugin_enabled() {
+        let json = serde_json::json!({
+            "theme": "dark",
+            "slots": [
+                { "kind": "Pencil", "stamps": [[1, 0], [1, 0], [1, 0], [1, 0]] },
+                { "kind": "Eraser", "stamps": [[1, 0], [1, 0], [1, 0], [1, 0]] }
+            ],
+            "recent_glyphs": "",
+            "recent_files": [],
+            "export": { "format": "text", "scale": 1, "transparent": false, "trim": false },
+            "show_grid": false
+        })
+        .to_string();
+
+        let prefs: Prefs = serde_json::from_str(&json).expect("a blob missing the plugins field must still parse");
+        let mut app = GasciiApp::headless();
+        prefs.apply_to(&mut app);
+
+        for (i, d) in PLUGINS.iter().enumerate() {
+            assert!(app.plugin_enabled(i), "plugin {} must stay enabled when the blob predates toggling", d.id);
+        }
+        assert_eq!(app.theme_pref, egui::ThemePreference::Dark, "every other field must still load");
+    }
+
+    /// A blob storing BOTH "Brush is bound to L" and "the brush plugin is disabled" must load
+    /// without error and converge to Pencil on L: the bind lands first in `apply_to`'s order, then
+    /// `set_plugin_enabled`'s fallback rebind snaps it — the same invariant the live toggle keeps.
+    #[test]
+    fn a_stored_binding_to_a_disabled_plugins_tool_falls_back_to_pencil() {
+        let json = serde_json::json!({
+            "theme": "system",
+            "slots": [
+                { "kind": "Brush", "stamps": [[1, 0], [1, 0], [1, 0], [1, 0]] },
+                { "kind": "Eraser", "stamps": [[1, 0], [1, 0], [1, 0], [1, 0]] }
+            ],
+            "recent_glyphs": "",
+            "recent_files": [],
+            "export": { "format": "text", "scale": 1, "transparent": false, "trim": false },
+            "show_grid": false,
+            "plugins": [
+                { "id": gascii_density_brush::DESCRIPTOR.id, "enabled": false }
+            ]
+        })
+        .to_string();
+
+        let prefs: Prefs = serde_json::from_str(&json).unwrap();
+        let mut app = GasciiApp::headless();
+        prefs.apply_to(&mut app);
+
+        assert_eq!(app.slot(Binding::L).kind, ToolKind::Pencil, "the stored Brush binding must converge to Pencil");
+        let brush = tool_def(BRUSH_KIND).plugin_slot.unwrap();
+        assert!(!app.plugin_enabled(brush), "and the plugin must still come out disabled");
     }
 
     #[test]

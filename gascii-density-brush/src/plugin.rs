@@ -19,7 +19,10 @@ pub fn make() -> Box<dyn Plugin> {
 /// This crate's whole registration story, harvested by the host's `const PLUGINS` table without
 /// ever constructing a throwaway instance.
 pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
-    name: "gascii-density-brush",
+    id: "gascii-density-brush",
+    name: "Density Brush",
+    description: "A sized brush that paints through a density ramp — digit keys pick the intensity, with optional stylus-pressure sizing.",
+    version: env!("CARGO_PKG_VERSION"),
     make,
     tools: BrushPlugin::tool_capabilities,
     shortcuts: BrushPlugin::shortcuts,

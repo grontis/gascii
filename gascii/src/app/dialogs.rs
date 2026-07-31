@@ -1,6 +1,6 @@
-//! The New/Resize/Export/Confirm modal dialogs and the `?` keyboard-shortcuts overlay, plus each
-//! dialog's own scratch-state types and the Export pipeline (`run_export`/`run_export_dialog`) that
-//! backs the Export dialog's "Export…" button.
+//! The New/Resize/Export/Confirm/Plugins modal dialogs and the `?` keyboard-shortcuts overlay,
+//! plus each dialog's own scratch-state types and the Export pipeline
+//! (`run_export`/`run_export_dialog`) that backs the Export dialog's "Export…" button.
 
 use eframe::egui;
 use gascii_core::{
@@ -211,6 +211,9 @@ impl GasciiApp {
                     egui::RichText::new("TOOLS").font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary),
                 );
                 for def in tools() {
+                    if !self.tool_enabled(def.kind) {
+                        continue;
+                    }
                     help_overlay_row(ui, &t, def.key.name(), def.name);
                 }
                 ui.add_space(10.0);
@@ -220,16 +223,73 @@ impl GasciiApp {
                 for (name, label) in chords::chord_rows() {
                     help_overlay_row(ui, &t, label, name);
                 }
-                ui.add_space(10.0);
-                ui.label(
-                    egui::RichText::new("PLUGINS").font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary),
-                );
-                for descriptor in PLUGINS {
-                    for shortcut in (descriptor.shortcuts)() {
-                        help_overlay_row(ui, &t, shortcut.label, shortcut.name);
+                // A disabled plugin's shortcuts don't fire (its tick is skipped), so they don't
+                // show; with every plugin disabled the whole section disappears, header included.
+                if (0..PLUGINS.len()).any(|i| self.plugin_enabled(i)) {
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new("PLUGINS").font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary),
+                    );
+                    for (i, descriptor) in PLUGINS.iter().enumerate() {
+                        if !self.plugin_enabled(i) {
+                            continue;
+                        }
+                        for shortcut in (descriptor.shortcuts)() {
+                            help_overlay_row(ui, &t, shortcut.label, shortcut.name);
+                        }
                     }
                 }
             });
+        });
+        if resp.dismissed {
+            self.open_dialog = None;
+        }
+    }
+
+    /// The Plugin Manager (View ▸ Plugins…): one row per registered plugin — enable checkbox,
+    /// display name, version, description, and the derived tool/shortcut counts. Toggles take
+    /// effect immediately (`set_plugin_enabled` handles rebinding and the renderer rebuild); the
+    /// state persists via prefs. Read-only otherwise, so like the `?` overlay it needs no
+    /// Cancel/Confirm row — Escape/backdrop/close-box dismissal comes with `dialog::modal`.
+    pub(super) fn plugins_dialog(&mut self, ctx: &egui::Context) {
+        if self.open_dialog != Some(OpenDialog::Plugins) {
+            return;
+        }
+        let t = crate::ui::theme::current(ctx);
+        let resp = dialog::modal(ctx, "plugins", "Plugins", |ui| {
+            for (i, d) in PLUGINS.iter().enumerate() {
+                if i > 0 {
+                    ui.add_space(12.0);
+                }
+                let mut enabled = self.plugin_enabled(i);
+                let title = format!("{}  v{}", d.name, d.version);
+                if ui
+                    .checkbox(
+                        &mut enabled,
+                        egui::RichText::new(title).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_text),
+                    )
+                    .changed()
+                {
+                    self.set_plugin_enabled(i, enabled);
+                }
+                ui.label(
+                    egui::RichText::new(d.description)
+                        .font(fonts::mono_id(fonts::size::LABEL))
+                        .color(t.fg_secondary),
+                );
+                let tool_count = (d.tools)().len();
+                let shortcut_count = (d.shortcuts)().len();
+                let plural = |n: usize| if n == 1 { "" } else { "s" };
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{tool_count} tool{}, {shortcut_count} shortcut{}",
+                        plural(tool_count),
+                        plural(shortcut_count)
+                    ))
+                    .font(fonts::mono_id(fonts::size::LABEL))
+                    .color(t.fg_secondary),
+                );
+            }
         });
         if resp.dismissed {
             self.open_dialog = None;

@@ -368,6 +368,9 @@ pub(super) fn build_tools() -> Vec<ToolDef> {
         }
     }
     assign_stamp_slots(&mut rows);
+    if let Err(dup) = validate_unique_plugin_ids(PLUGINS) {
+        panic!("{dup}");
+    }
     if let Err(dup) = validate_unique_tool_names(&rows) {
         panic!("{dup}");
     }
@@ -399,6 +402,19 @@ pub(super) fn validate_unique_tool_names(rows: &[ToolDef]) -> Result<(), String>
     for d in rows {
         if !seen.insert(d.name) {
             return Err(format!("duplicate tool name {:?} — two rows registered the same name", d.name));
+        }
+    }
+    Ok(())
+}
+
+/// Two plugins persisting under the same `id` would make prefs resolution ambiguous — the first
+/// `position()` match wins and the second plugin's stored enabled state silently applies to the
+/// wrong one. Caught here, at registry-construction time, rather than silently.
+pub(super) fn validate_unique_plugin_ids(descriptors: &[gascii_plugin_api::PluginDescriptor]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for d in descriptors {
+        if !seen.insert(d.id) {
+            return Err(format!("duplicate plugin id {:?} — two descriptors registered the same id", d.id));
         }
     }
     Ok(())
@@ -472,14 +488,15 @@ pub(super) fn validate_key_claims(claims: &[KeyClaim]) -> Result<(), String> {
 /// `plugin_slot` is the index into this same slice, so "every consumer iterates in the same order"
 /// is now structurally guaranteed rather than a convention two separately-written functions have to
 /// uphold by hand — there is no second, independently-iterated list left to drift from this one.
-pub(super) const PLUGINS: &[gascii_plugin_api::PluginDescriptor] =
+pub(crate) const PLUGINS: &[gascii_plugin_api::PluginDescriptor] =
     &[gascii_density_brush::DESCRIPTOR, gascii_anim::DESCRIPTOR];
 
 /// Folds every plugin's `wrap_renderer` over the host's own `NaiveRenderer`, innermost (the host's)
-/// first, in `plugins` order. A pure function of the plugin list — takes `&[Box<dyn Plugin>]`
-/// rather than `&GasciiApp` so it's testable against a synthetic plugin list with no live app.
-pub(crate) fn build_renderer(plugins: &[Box<dyn Plugin>]) -> Box<dyn CanvasRenderer> {
-    plugins.iter().fold(Box::new(NaiveRenderer) as Box<dyn CanvasRenderer>, |r, p| p.wrap_renderer(r))
+/// first, in iteration order. A pure function of the plugins it's given — an iterator rather than
+/// `&GasciiApp`, so `rebuild_renderer`'s enabled filter composes in without allocating and tests
+/// can feed a synthetic list with no live app.
+pub(crate) fn build_renderer<'a>(plugins: impl Iterator<Item = &'a dyn Plugin>) -> Box<dyn CanvasRenderer> {
+    plugins.fold(Box::new(NaiveRenderer) as Box<dyn CanvasRenderer>, |r, p| p.wrap_renderer(r))
 }
 
 /// Merges one plugin-contributed capability bundle into a full `ToolDef` row. Identity is now the

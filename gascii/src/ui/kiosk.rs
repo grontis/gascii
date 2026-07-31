@@ -128,8 +128,8 @@ pub fn top_bar(ui: &mut Ui, app: &mut GasciiApp, ctx: &egui::Context) {
 /// highlight simply shows no cell selected in that case, never panics or paints a phantom badge
 /// (pinned by `kiosk_sidebars_tool_list_excludes_text` and
 /// `tool_grid_renders_without_panicking_when_a_binding_holds_a_tool_absent_from_its_list`).
-fn kiosk_tools() -> Vec<crate::app::ToolDef> {
-    tools().iter().copied().filter(|d| d.kiosk_visible).collect()
+fn kiosk_tools(app: &GasciiApp) -> Vec<crate::app::ToolDef> {
+    tools().iter().copied().filter(|d| d.kiosk_visible && app.tool_enabled(d.kind)).collect()
 }
 
 /// The sidebar: a 4×2 tool grid (Text excluded), both bindings' tool options, the glyph palette
@@ -144,7 +144,8 @@ pub fn sidebar(ui: &mut Ui, app: &mut GasciiApp) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.spacing_mut().item_spacing = Vec2::new(10.0, 12.0);
         let top = ui.cursor().min.y;
-        tool_grid(ui, app, &kiosk_tools(), TOOL_COLS, TOOL_CELL_H * k);
+        let ktools = kiosk_tools(app);
+        tool_grid(ui, app, &ktools, TOOL_COLS, TOOL_CELL_H * k);
         rule(ui, t.border_soft);
         binding_options(ui, app, k);
         rule(ui, t.border_soft);
@@ -272,7 +273,8 @@ mod tests {
     /// never include it, and must otherwise stay in sync with the tool registry.
     #[test]
     fn kiosk_sidebars_tool_list_excludes_text() {
-        let tools = kiosk_tools();
+        let app = crate::app::GasciiApp::headless();
+        let tools = kiosk_tools(&app);
         assert_eq!(tools.len(), crate::app::tools().len() - 1, "every registry entry except Text");
         assert!(!tools.iter().any(|d| d.kind == ToolKind::Text), "Text must not appear in the kiosk grid");
     }
@@ -288,14 +290,15 @@ mod tests {
         let ctx = egui::Context::default();
         fonts::install_fonts(&ctx);
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            tool_grid(ui, &mut app, &kiosk_tools(), TOOL_COLS, TOOL_CELL_H);
+            let ktools = kiosk_tools(&app);
+            tool_grid(ui, &mut app, &ktools, TOOL_COLS, TOOL_CELL_H);
         });
 
         // Structural guarantee, not just "it didn't panic": `tool_grid`'s highlight is an equality
         // check against each listed tool's kind, so a kind absent from the list (Text) can never
         // match — no cell shows a phantom L/R badge for it.
         assert!(
-            kiosk_tools().iter().all(|d| d.kind != app.slot(Binding::L).kind),
+            kiosk_tools(&app).iter().all(|d| d.kind != app.slot(Binding::L).kind),
             "sanity: L's Text binding has no equal in the kiosk grid's tool list"
         );
     }
