@@ -1,0 +1,20 @@
+[package]
+name = "gascii-stylus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# Both pinned to the versions winit 0.30 already builds, so this crate adds no new compiled code:
+# winit for `EventLoopBuilderExtWindows` (eframe doesn't re-export it), windows-sys for the
+# official MSG layout and WM_POINTER constants — hand-transcribing those is exactly the kind of
+# error this crate must not risk. `default-features = false` so nothing eframe didn't enable.
+[target.'cfg(windows)'.dependencies]
+winit = { version = "0.30", default-features = false }
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+# The workspace's one unsafe boundary: reading the raw MSG pointer winit's message hook hands
+# over can't be expressed safely. Every other crate keeps `unsafe_code = "forbid"` via the
+# workspace lints; this one restates the clippy config and leaves `unsafe_code` at its default
+# so the hook's single two-field `unsafe` read can exist.
+[lints.clippy]
+all = { level = "warn", priority = -1 }

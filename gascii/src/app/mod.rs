@@ -239,6 +239,11 @@ pub struct GasciiApp {
     /// happens to gate the Pressure toggle's visibility in Brush's options block, exposed to
     /// plugins read-only via `PluginHost::stylus_detected`.
     pub(crate) stylus_detected: bool,
+    /// True from a barrel-button press until its matching release. `gascii_stylus::barrel_down`
+    /// only reads true while the button is physically held, and Windows clears it before the
+    /// release event reaches egui — so `raw_input_hook` latches at press time to keep both halves
+    /// of the pair routed to the secondary button.
+    pub(crate) barrel_stroke: bool,
     /// Accumulated multiplicative pinch-zoom delta since the last discrete zoom step fired.
     /// `multi_touch()`'s `zoom_delta` is a per-frame ratio (1.0 = no change), not a cumulative
     /// gesture magnitude, so this multiplies frame deltas together until they cross a threshold —
@@ -419,6 +424,7 @@ impl GasciiApp {
             show_grid: false,
             open_dialog: None,
             stylus_detected: false,
+            barrel_stroke: false,
             pinch_zoom_accum: 1.0,
             resize_w: Document::DEFAULT_WIDTH,
             resize_h: Document::DEFAULT_HEIGHT,
@@ -988,6 +994,29 @@ impl GasciiApp {
 }
 
 impl eframe::App for GasciiApp {
+    /// Reroutes stylus barrel-button clicks to the secondary pointer button. Pen contacts arrive
+    /// as touches, which egui-winit emulates as *primary* presses regardless of pen buttons; the
+    /// message hook in `gascii-stylus` tracks the real barrel state, and rewriting here — before
+    /// egui parses the frame's input — makes the tap an ordinary right click everywhere downstream.
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        for event in &mut raw_input.events {
+            if let egui::Event::PointerButton { button, pressed, .. } = event {
+                if *button != egui::PointerButton::Primary {
+                    continue;
+                }
+                if *pressed {
+                    self.barrel_stroke = gascii_stylus::barrel_down();
+                }
+                if self.barrel_stroke {
+                    *button = egui::PointerButton::Secondary;
+                    if !*pressed {
+                        self.barrel_stroke = false;
+                    }
+                }
+            }
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if self.first_frame {
             #[cfg(debug_assertions)]

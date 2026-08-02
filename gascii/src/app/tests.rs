@@ -4477,3 +4477,46 @@
         assert_eq!(app.active_frame, 1, "a focused widget must suppress ','");
         assert_eq!(app.doc.frame_count(), before_frame_count, "a focused widget must suppress Shift+D");
     }
+
+    /// The Windows message hook mirrors the pen barrel button into `gascii_stylus::barrel_down`,
+    /// and `raw_input_hook` must reroute the emulated primary press AND its matching release to
+    /// Secondary. The release arrives after the OS has already dropped the barrel bit
+    /// (`WM_POINTERUP` carries no button flags), so only the per-stroke latch keeps the pair
+    /// consistent — and it must clear afterward so the next plain click is primary again.
+    #[test]
+    fn barrel_button_press_and_release_both_reroute_to_secondary_then_the_latch_clears() {
+        let mut app = GasciiApp::headless();
+        let ctx = egui::Context::default();
+        let pointer = |pressed| egui::Event::PointerButton {
+            pos: egui::pos2(10.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+
+        gascii_stylus::set_barrel_down(true);
+        let mut raw = egui::RawInput::default();
+        raw.events.push(pointer(true));
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        assert!(
+            matches!(raw.events[0], egui::Event::PointerButton { button: egui::PointerButton::Secondary, pressed: true, .. }),
+            "a press with the barrel held must become a secondary press"
+        );
+
+        gascii_stylus::set_barrel_down(false);
+        let mut raw = egui::RawInput::default();
+        raw.events.push(pointer(false));
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        assert!(
+            matches!(raw.events[0], egui::Event::PointerButton { button: egui::PointerButton::Secondary, pressed: false, .. }),
+            "the matching release must stay secondary even though the barrel bit is already gone"
+        );
+
+        let mut raw = egui::RawInput::default();
+        raw.events.push(pointer(true));
+        eframe::App::raw_input_hook(&mut app, &ctx, &mut raw);
+        assert!(
+            matches!(raw.events[0], egui::Event::PointerButton { button: egui::PointerButton::Primary, pressed: true, .. }),
+            "a plain press after the stroke must be primary — the latch must not stick"
+        );
+    }

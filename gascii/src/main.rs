@@ -25,6 +25,9 @@ fn main() -> eframe::Result {
             .with_decorations(false)
             .with_resizable(true)
             .with_title("GASCII"),
+        // The stylus barrel button exists only in raw WM_POINTER messages — winit's pen-to-touch
+        // translation drops it, so a hook watches the message pump itself (see `gascii-stylus`).
+        event_loop_builder: Some(Box::new(gascii_stylus::install)),
         ..Default::default()
     };
     eframe::run_native(

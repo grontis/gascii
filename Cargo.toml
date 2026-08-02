@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["gascii-core", "gascii", "gascii-plugin-api", "gascii-density-brush", "gascii-anim"]
+members = ["gascii-core", "gascii", "gascii-plugin-api", "gascii-density-brush", "gascii-anim", "gascii-stylus"]
 
 [workspace.package]
 version = "0.1.0"

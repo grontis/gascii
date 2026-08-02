@@ -9,6 +9,7 @@ gascii-core = { path = "../gascii-core" }
 gascii-plugin-api = { path = "../gascii-plugin-api" }
 gascii-density-brush = { path = "../gascii-density-brush" }
 gascii-anim = { path = "../gascii-anim" }
+gascii-stylus = { path = "../gascii-stylus" }
 eframe = { workspace = true }
 rfd = { workspace = true }
 fontdue = { workspace = true }

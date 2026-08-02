@@ -1249,6 +1249,7 @@ dependencies = [
  "gascii-core",
  "gascii-density-brush",
  "gascii-plugin-api",
+ "gascii-stylus",
  "image",
  "rfd",
  "serde",
@@ -1289,6 +1290,14 @@ version = "0.1.0"
 dependencies = [
  "egui",
  "gascii-core",
+]
+
+[[package]]
+name = "gascii-stylus"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.52.0",
+ "winit",
 ]
 
 [[package]]
