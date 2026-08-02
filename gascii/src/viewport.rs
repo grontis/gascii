@@ -8,12 +8,16 @@ pub struct Viewport {
     pub zoom_step: usize,  // index into ZOOM_SCALES
     pub pan: Vec2,         // screen-space pixel offset of cell (0,0)
     pub base_font_px: f32, // unscaled glyph px (e.g. 16.0)
-    /// `(zoom_step, pixels_per_point.to_bits(), cell_size)` from the last measurement, so
+    /// A continuous scale from `fit_to_window`, overriding the preset ladder until the next
+    /// manual zoom snaps back onto it. Fit is the one operation whose ideal scale is almost
+    /// never a preset — snapping it down a whole step can waste a third of the window.
+    fit_scale: Option<f32>,
+    /// `(scale().to_bits(), pixels_per_point.to_bits(), cell_size)` from the last measurement, so
     /// steady-state frames skip the font query. DPI is part of the key because nothing in
     /// `row_height`'s contract promises DPI-independence, even though epaint 0.35 happens to
-    /// compute it that way. Bit-equality is safe: `pixels_per_point` is a copied config value,
-    /// not one accumulating float error.
-    cached_cell: Option<(usize, u32, Vec2)>,
+    /// compute it that way. Bit-equality is safe: both keys are copied config values, not ones
+    /// accumulating float error.
+    cached_cell: Option<(u32, u32, Vec2)>,
 }
 
 impl Default for Viewport {
@@ -22,6 +26,7 @@ impl Default for Viewport {
             zoom_step: 1, // ZOOM_SCALES[1] == 1.0
             pan: Vec2::ZERO,
             base_font_px: 16.0,
+            fit_scale: None,
             cached_cell: None,
         }
     }
@@ -33,7 +38,7 @@ impl Viewport {
             self.zoom_step < ZOOM_SCALES.len(),
             "zoom_step out of range for ZOOM_SCALES"
         );
-        ZOOM_SCALES[self.zoom_step]
+        self.fit_scale.unwrap_or(ZOOM_SCALES[self.zoom_step])
     }
 
     pub fn font_px(&self) -> f32 {
@@ -44,14 +49,15 @@ impl Viewport {
     /// Re-queries egui's font metrics only when the zoom step or DPI scale factor changed.
     pub fn cell_size(&mut self, ctx: &egui::Context) -> Vec2 {
         let ppp_bits = ctx.pixels_per_point().to_bits();
-        if let Some((step, bits, cell)) = self.cached_cell {
-            if step == self.zoom_step && bits == ppp_bits {
+        let scale_bits = self.scale().to_bits();
+        if let Some((s_bits, bits, cell)) = self.cached_cell {
+            if s_bits == scale_bits && bits == ppp_bits {
                 return cell;
             }
         }
         let fid = crate::fonts::canvas_font_id(self.font_px());
         let cell = ctx.fonts_mut(|f| Vec2::new(f.glyph_width(&fid, 'M'), f.row_height(&fid)));
-        self.cached_cell = Some((self.zoom_step, ppp_bits, cell));
+        self.cached_cell = Some((scale_bits, ppp_bits, cell));
         cell
     }
 
@@ -155,12 +161,24 @@ impl Viewport {
         let before = self.screen_to_cell_f(cursor, cell, origin);
         let old_scale = self.scale();
 
-        let new_step = self.zoom_step as i32 + dir.signum();
-        let clamped = new_step.clamp(0, ZOOM_SCALES.len() as i32 - 1) as usize;
-        if clamped == self.zoom_step {
+        // A continuous fit scale sits between rungs of the preset ladder; a manual step snaps to
+        // the nearest preset strictly in the step's direction. The tolerance absorbs the fit's
+        // float error, so a fit that landed on a preset behaves as that preset.
+        const SNAP: f32 = 1e-3;
+        let new_step = match (self.fit_scale, dir.signum()) {
+            (Some(fit), 1) => ZOOM_SCALES
+                .iter()
+                .position(|&s| s > fit + SNAP)
+                .unwrap_or(ZOOM_SCALES.len() - 1),
+            (Some(fit), -1) => ZOOM_SCALES.iter().rposition(|&s| s < fit - SNAP).unwrap_or(0),
+            (None, d) => (self.zoom_step as i32 + d).clamp(0, ZOOM_SCALES.len() as i32 - 1) as usize,
+            _ => return,
+        };
+        let left_fit = self.fit_scale.take().is_some();
+        if new_step == self.zoom_step && !left_fit {
             return;
         }
-        self.zoom_step = clamped;
+        self.zoom_step = new_step;
 
         let ratio = self.scale() / old_scale;
         let new_cell = cell * ratio;
@@ -183,8 +201,15 @@ impl Viewport {
         self.pan = p - desired;
     }
 
-    /// Pick the largest zoom step whose full doc extent fits `available` inset by `margin` on every
-    /// side, then center via `pan`.
+    /// Fit the full doc extent to `available` inset by `margin` on every side, then center via
+    /// `pan`.
+    ///
+    /// The scale is *continuous* — clamped to the preset ladder's ends but otherwise free —
+    /// because the largest preset that fits can waste a third of the window on a wide document.
+    /// Cell metrics aren't exactly linear in font px (hinting), so the guess from the base
+    /// metrics gets one measured correction, then a shave loop as a backstop; the correction aims
+    /// 0.5% under the room so float residue can never push the card out of bounds. A later
+    /// manual zoom snaps off the fitted scale onto the ladder (see `zoom_at`).
     ///
     /// `margin` is applied to the fit test but NOT to the centering: the document is centered in the
     /// whole canvas area, and the margin only guarantees the desk keeps showing around it rather
@@ -201,26 +226,37 @@ impl Viewport {
             (available.x - margin * 2.0).max(1.0),
             (available.y - margin * 2.0).max(1.0),
         );
-        let mut best_step = 0usize;
-        let mut cells = [Vec2::ZERO; ZOOM_SCALES.len()];
-        for (step, &scale) in ZOOM_SCALES.iter().enumerate() {
-            let font_px = self.base_font_px * scale;
-            let fid = crate::fonts::canvas_font_id(font_px);
-            let cell = ctx.fonts_mut(|f| Vec2::new(f.glyph_width(&fid, 'M'), f.row_height(&fid)));
-            cells[step] = cell;
-            let w = doc_extent.width as f32 * cell.x;
-            let h = doc_extent.height as f32 * cell.y;
-            if w <= room.x && h <= room.y {
-                best_step = step;
-            }
-        }
-        self.zoom_step = best_step;
-        // Reuse the winning step's already-measured cell instead of a second (redundant) query.
-        let cell = cells[best_step];
-        self.cached_cell = Some((best_step, ctx.pixels_per_point().to_bits(), cell));
+        let (w, h) = (doc_extent.width.max(1) as f32, doc_extent.height.max(1) as f32);
+        let (min_scale, max_scale) = (ZOOM_SCALES[0], ZOOM_SCALES[ZOOM_SCALES.len() - 1]);
 
-        let doc_w = doc_extent.width as f32 * cell.x;
-        let doc_h = doc_extent.height as f32 * cell.y;
+        let measure = |scale: f32| {
+            let fid = crate::fonts::canvas_font_id(self.base_font_px * scale);
+            ctx.fonts_mut(|f| Vec2::new(f.glyph_width(&fid, 'M'), f.row_height(&fid)))
+        };
+        let refit = |cell: Vec2, at: f32| {
+            ((room.x / (w * cell.x)).min(room.y / (h * cell.y)) * at * 0.995)
+                .clamp(min_scale, max_scale)
+        };
+
+        let mut scale = refit(measure(1.0), 1.0);
+        scale = refit(measure(scale), scale);
+        let mut cell = measure(scale);
+        for _ in 0..8 {
+            if (w * cell.x <= room.x && h * cell.y <= room.y) || scale <= min_scale {
+                break;
+            }
+            scale = (scale * 0.99).max(min_scale);
+            cell = measure(scale);
+        }
+
+        self.fit_scale = Some(scale);
+        // The ladder position a later manual step zooms from: the largest preset not above the
+        // fit, so `-` always shrinks and `+` always grows from what's on screen.
+        self.zoom_step = ZOOM_SCALES.iter().rposition(|&z| z <= scale + 1e-3).unwrap_or(0);
+        self.cached_cell = Some((self.scale().to_bits(), ctx.pixels_per_point().to_bits(), cell));
+
+        let doc_w = w * cell.x;
+        let doc_h = h * cell.y;
         self.pan = Vec2::new((available.x - doc_w) / 2.0, (available.y - doc_h) / 2.0);
     }
 }
@@ -447,7 +483,7 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(
             vp.cached_cell,
-            Some((vp.zoom_step, ctx.pixels_per_point().to_bits(), first))
+            Some((vp.scale().to_bits(), ctx.pixels_per_point().to_bits(), first))
         );
     }
 
@@ -460,7 +496,7 @@ mod tests {
         let ctx = headless_ctx_with_canvas_font();
         let mut vp = Viewport::default();
         let _ = vp.cell_size(&ctx);
-        let (step_before, ppp_bits_before, _) =
+        let (scale_before, ppp_bits_before, _) =
             vp.cached_cell.expect("cache populated after first call");
 
         let new_ppp = ctx.pixels_per_point() * 2.0;
@@ -471,10 +507,10 @@ mod tests {
         assert_ne!(new_ppp.to_bits(), ppp_bits_before, "sanity: ppp actually changed");
 
         let _ = vp.cell_size(&ctx);
-        let (step_after, ppp_bits_after, _) =
+        let (scale_after, ppp_bits_after, _) =
             vp.cached_cell.expect("cache populated after second call");
 
-        assert_eq!(step_after, step_before, "zoom_step is unchanged in this scenario");
+        assert_eq!(scale_after, scale_before, "the scale is unchanged in this scenario");
         assert_eq!(
             ppp_bits_after,
             new_ppp.to_bits(),
@@ -642,6 +678,64 @@ mod tests {
         let mut tight = Viewport::default();
         tight.fit_to_window(available, 0.0, doc_extent, &ctx);
         assert!(vp.zoom_step <= tight.zoom_step, "the margin must never pick a LARGER step");
+    }
+
+    /// The reason fit is continuous: a window 1.3× the doc's size at 100% must fit near 130%,
+    /// not drop to the largest preset that fits (100%) and waste a third of the screen. This is
+    /// the kiosk auto-fit's contract for non-default doc sizes like 120×40.
+    #[test]
+    fn fit_to_window_fills_the_window_beyond_the_preset_ladder() {
+        let ctx = headless_ctx_with_canvas_font();
+        let mut vp = Viewport::default();
+        let doc_extent = DocExtent { width: 120, height: 40 };
+
+        let cell_at_100 = vp.cell_size(&ctx);
+        let available = Vec2::new(
+            doc_extent.width as f32 * cell_at_100.x * 1.3,
+            doc_extent.height as f32 * cell_at_100.y * 1.3,
+        );
+        vp.fit_to_window(available, 0.0, doc_extent, &ctx);
+
+        assert!(vp.scale() > 1.0 + 0.1, "fit stayed on the preset ladder: {}", vp.scale());
+
+        let cell = vp.cell_size(&ctx);
+        let doc_w = doc_extent.width as f32 * cell.x;
+        let doc_h = doc_extent.height as f32 * cell.y;
+        assert!(
+            doc_w <= available.x + 0.5 && doc_h <= available.y + 0.5,
+            "fitted doc overflows: ({doc_w},{doc_h}) in {available:?}"
+        );
+        let fill = (doc_w / available.x).max(doc_h / available.y);
+        assert!(fill >= 0.95, "fit wastes window space: fill={fill:.3}");
+    }
+
+    /// A fitted (continuous) scale must hand control back to the preset ladder on the first
+    /// manual step: `+` goes to the nearest preset above the fit, `-` to the nearest below.
+    #[test]
+    fn manual_zoom_from_a_fitted_scale_snaps_to_the_preset_ladder() {
+        let ctx = headless_ctx_with_canvas_font();
+        let mut vp = Viewport::default();
+        let doc_extent = DocExtent { width: 80, height: 25 };
+
+        let cell_at_100 = vp.cell_size(&ctx);
+        let available = Vec2::new(
+            doc_extent.width as f32 * cell_at_100.x * 1.3,
+            doc_extent.height as f32 * cell_at_100.y * 1.3,
+        );
+
+        vp.fit_to_window(available, 0.0, doc_extent, &ctx);
+        let fitted = vp.scale();
+        assert!(fitted > 1.0 && fitted < 1.5, "test setup: fit should land between presets, got {fitted}");
+        assert_eq!(vp.zoom_step, 1, "the ladder position under the fit is 100%");
+
+        let cell = vp.cell_size(&ctx);
+        vp.zoom_at(Pos2::new(50.0, 50.0), 1, cell, origin());
+        assert_eq!(vp.scale(), 1.5, "stepping up from the fit snaps to the next preset above");
+
+        vp.fit_to_window(available, 0.0, doc_extent, &ctx);
+        let cell = vp.cell_size(&ctx);
+        vp.zoom_at(Pos2::new(50.0, 50.0), -1, cell, origin());
+        assert_eq!(vp.scale(), 1.0, "stepping down from the fit snaps to the next preset below");
     }
 
     #[test]

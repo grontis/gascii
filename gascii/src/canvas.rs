@@ -420,9 +420,12 @@ pub(crate) fn begin_gesture(app: &mut GasciiApp, b: Binding, x: u16, y: u16, alt
 /// grip cannot win any other way.
 pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool) {
     let ctx = ui.ctx().clone();
-    let (response, painter, origin, cell, doc_extent) =
+    let (response, painter, origin, cell, doc_extent, scroll_bars) =
         handle_canvas_input(ui, app, &ctx, pointer_on_resize_grip);
-    paint_canvas(ui, app, &ctx, &response, &painter, origin, cell, doc_extent, pointer_on_resize_grip);
+    paint_canvas(
+        ui, app, &ctx, &response, &painter, origin, cell, doc_extent, pointer_on_resize_grip,
+        scroll_bars,
+    );
 }
 
 /// The input-precedence pipeline for one frame: fit/refit policy, zoom (wheel/pinch/deferred
@@ -435,7 +438,7 @@ fn handle_canvas_input(
     app: &mut GasciiApp,
     ctx: &egui::Context,
     pointer_on_resize_grip: bool,
-) -> (egui::Response, Painter, Pos2, Vec2, DocExtent) {
+) -> (egui::Response, Painter, Pos2, Vec2, DocExtent, crate::scrollbar::Bars) {
     let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
     if app.pending_fit {
         app.pending_fit = false;
@@ -467,6 +470,9 @@ fn handle_canvas_input(
     let origin = response.rect.min;
     let mut cell = app.viewport.cell_size(ctx);
     let doc_extent = app.doc.extent();
+    // Stays default (idle, no pointer claim) while a modal is open — the bars then paint frozen
+    // like the rest of the canvas.
+    let mut scroll_bars = crate::scrollbar::Bars::default();
 
     // This function polls raw pointer/keyboard state (`ui.input(|i| i.pointer...)`) rather than
     // using egui's occlusion system, so no modal's backdrop blocks canvas interaction on its own —
@@ -476,11 +482,12 @@ fn handle_canvas_input(
     if !app.modal_open() {
         // Precedence 1: zoom. Allowed any time, including mid-stroke — pending cells are
         // cell-addressed and stay valid; the cursor-anchored zoom keeps the pointer's cell fixed.
-        let (scroll_y, ctrl) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers.ctrl));
-        if ctrl && scroll_y != 0.0 {
+        let (scroll, ctrl) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers.ctrl));
+        let multi_touch = ui.input(|i| i.multi_touch());
+        if ctrl && scroll.y != 0.0 {
             if let Some(cursor) = response.hover_pos() {
                 app.viewport
-                    .zoom_at(cursor, scroll_y.signum() as i32, cell, origin);
+                    .zoom_at(cursor, scroll.y.signum() as i32, cell, origin);
             }
         }
 
@@ -490,7 +497,7 @@ fn handle_canvas_input(
         // neutral, one discrete zoom step fires against the cell size's own six-step scale and the
         // accumulator resets. Also pans by the gesture's own translation, so the fingers can
         // recentre the view while pinching.
-        if let Some(multi) = ui.input(|i| i.multi_touch()) {
+        if let Some(multi) = multi_touch {
             app.viewport.pan += multi.translation_delta;
             app.pinch_zoom_accum *= multi.zoom_delta;
             const PINCH_THRESHOLD: f32 = 0.15;
@@ -528,6 +535,14 @@ fn handle_canvas_input(
         if response.dragged_by(egui::PointerButton::Middle) {
             app.viewport.pan += response.drag_delta();
         }
+        // Unmodified wheel/touchpad scroll pans too — both axes, so a touchpad's two-finger
+        // scroll moves the view freely and Shift+wheel (which egui delivers as a horizontal
+        // delta) strafes. Gated on hover so a scroll aimed at the sidebar's own scroll areas
+        // never also drags the canvas, and on no active multi-touch so a touchscreen pinch's
+        // translation isn't applied twice.
+        if !ctrl && multi_touch.is_none() && scroll != Vec2::ZERO && response.hovered() {
+            app.viewport.pan += scroll;
+        }
         let space = ui.input(|i| i.key_down(egui::Key::Space));
         // Alt held at press time: a temporary eyedropper, regardless of the bound kind — see
         // `begin_gesture`'s own doc comment.
@@ -537,8 +552,16 @@ fn handle_canvas_input(
         let shift_held = ui.input(|i| i.modifiers.shift);
 
         cell = app.viewport.cell_size(ctx);
+
+        // Precedence 2b: the desk-edge scrollbars. Registered here — after zoom has settled this
+        // frame's cell size, before press routing — so a thumb drag pans before the document
+        // paints and a press on a bar is claimed before the stroke branch can see it.
+        let doc_size = Vec2::new(doc_extent.width as f32 * cell.x, doc_extent.height as f32 * cell.y);
+        scroll_bars = crate::scrollbar::interact(ui, &mut app.viewport, response.rect, doc_size);
+
         app.hovered_cell = response
             .hover_pos()
+            .filter(|_| !scroll_bars.pointer_on_bar)
             .and_then(|p| app.viewport.screen_to_cell(p, cell, origin, doc_extent));
 
         // Precedence 3: stroke vs space-pan, resolved from raw pointer edges (not
@@ -572,7 +595,11 @@ fn handle_canvas_input(
         // mode (primary pans, secondary is inert, neither draws), and only one gesture may own the
         // canvas at a time. Two simultaneous strokes would interleave two `apply_edit` calls and pin
         // each slot's `before` values against the other's uncommitted writes.
-        if app.stroke_owner.is_none() && !app.space_pan_active && !pointer_on_resize_grip {
+        if app.stroke_owner.is_none()
+            && !app.space_pan_active
+            && !pointer_on_resize_grip
+            && !scroll_bars.pointer_on_bar
+        {
             if primary_pressed && space {
                 app.space_pan_active = true;
             } else if !space {
@@ -699,7 +726,7 @@ fn handle_canvas_input(
         app.was_focused = focused;
     }
 
-    (response, painter, origin, cell, doc_extent)
+    (response, painter, origin, cell, doc_extent, scroll_bars)
 }
 
 /// The keyboard-owner event dispatch (Text/Selection, mutually exclusive by construction) plus
@@ -830,6 +857,7 @@ fn paint_canvas(
     cell: Vec2,
     doc_extent: DocExtent,
     pointer_on_resize_grip: bool,
+    scroll_bars: crate::scrollbar::Bars,
 ) {
     let visible = app.viewport.visible_cell_rect(painter.clip_rect(), cell, origin, doc_extent);
 
@@ -963,11 +991,20 @@ fn paint_canvas(
 
     painter.rect_stroke(doc_rect, 0.0, Stroke::new(1.0, t.window_edge), StrokeKind::Outside);
 
+    // The scrollbars sit above everything the canvas paints: they are chrome, not document, and
+    // must stay reachable over any document content or overlay.
+    crate::scrollbar::paint(ui, &app.viewport, response.rect, doc_rect.size(), scroll_bars);
+
     // The tool-icon cursor: replaces the OS cursor over the canvas for every stamp-shaped tool.
     // Text/Selection keep stock cursors (their gestures aren't stamp-shaped); space-pan gets the
     // grab hand. Must not paint while a modal is open — a painted cursor would advertise
-    // interactivity the modal gate has already shut off.
-    if !app.modal_open() && !pointer_on_resize_grip && response.contains_pointer() {
+    // interactivity the modal gate has already shut off. Nor over a scrollbar — the bar owns the
+    // pointer there, and a stamp outline would promise a stroke the press gate refuses.
+    if !app.modal_open()
+        && !pointer_on_resize_grip
+        && !scroll_bars.pointer_on_bar
+        && response.contains_pointer()
+    {
         let space_held = ui.input(|i| i.key_down(egui::Key::Space));
         if space_held || app.space_pan_active {
             ctx.set_cursor_icon(if app.space_pan_active {
@@ -1237,10 +1274,11 @@ mod tests {
     fn the_real_plugin_composed_renderer_paints_the_same_shapes_as_a_bare_naive_renderer() {
         let mut app = GasciiApp::headless();
         let seeded_bg = Rgba(10, 20, 30, 255);
-        // Well inside the fit-computed visible range for a 300x300 screen against the default
-        // 80x25 document (not (0,0)/(1,1) — the fit centers the doc and clips a couple of columns
-        // off the left edge, which a smaller/edge-adjacent coordinate would silently fall outside).
-        app.doc.set_cell(0, 10, 10, gascii_core::Cell { ch: 'X', fg: Rgba::WHITE, bg: seeded_bg });
+        // The doc's center cell: the fit centers the doc in the 300x300 screen and clips the
+        // edges (the default doc overflows at the minimum zoom), so an edge-adjacent coordinate
+        // would silently fall outside the visible range — the center never does.
+        let (cx, cy) = (app.doc.width / 2, app.doc.height / 2);
+        app.doc.set_cell(0, cx, cy, gascii_core::Cell { ch: 'X', fg: Rgba::WHITE, bg: seeded_bg });
 
         let ctx = headless_ctx();
         let via_plugins = ctx.run_ui(raw_input_with_screen(300.0, 300.0, false), |ui| show(ui, &mut app, false));

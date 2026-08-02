@@ -7,6 +7,7 @@ mod fonts;
 mod image_bg;
 mod png_export;
 mod prefs;
+mod scrollbar;
 mod ui;
 mod viewport;
 

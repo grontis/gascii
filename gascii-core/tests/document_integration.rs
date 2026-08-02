@@ -112,7 +112,7 @@ fn out_of_bounds_layer_index_degrades_gracefully_not_panics() {
 #[test]
 fn default_document_and_new_1x1_document_are_both_well_formed() {
     let default_doc = Document::default_document();
-    assert_eq!(default_doc.extent(), DocExtent { width: 80, height: 25 });
+    assert_eq!(default_doc.extent(), DocExtent { width: 120, height: 40 });
     assert_eq!(default_doc.layers().len(), 1);
 
     let mut tiny = Document::new(1, 1);

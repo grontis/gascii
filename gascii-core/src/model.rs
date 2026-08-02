@@ -151,8 +151,8 @@ pub struct Document {
     pub(crate) active_frame: usize,
 }
 impl Document {
-    pub const DEFAULT_WIDTH: u16 = 80;
-    pub const DEFAULT_HEIGHT: u16 = 25;
+    pub const DEFAULT_WIDTH: u16 = 120;
+    pub const DEFAULT_HEIGHT: u16 = 40;
     /// Sane upper bound on canvas extent, matching the size the app is designed to remain usable
     /// at. Shared by every caller that must validate an untrusted width/height *before*
     /// allocating anything sized by it (currently: the `.gascii` loader) — a single definition so
@@ -206,7 +206,7 @@ impl Document {
             active_frame: 0,
         }
     }
-    /// Default new document: 80×25.
+    /// Default new document: 120×40.
     pub fn default_document() -> Self {
         Self::new(Self::DEFAULT_WIDTH, Self::DEFAULT_HEIGHT)
     }
@@ -428,21 +428,21 @@ mod tests {
     }
 
     #[test]
-    fn default_document_is_80x25_blank() {
+    fn default_document_is_120x40_blank() {
         let doc = Document::default_document();
-        assert_eq!(doc.width, 80);
-        assert_eq!(doc.height, 25);
+        assert_eq!(doc.width, 120);
+        assert_eq!(doc.height, 40);
         assert_eq!(doc.layers().len(), 1);
-        assert_eq!(doc.layers()[0].cells().len(), 2000);
+        assert_eq!(doc.layers()[0].cells().len(), 4800);
         assert!(doc.layers()[0].cells().iter().all(Cell::is_blank));
     }
 
     #[test]
     fn in_bounds_edges() {
         let doc = Document::default_document();
-        assert!(doc.in_bounds(79, 24));
-        assert!(!doc.in_bounds(80, 24));
-        assert!(!doc.in_bounds(79, 25));
+        assert!(doc.in_bounds(119, 39));
+        assert!(!doc.in_bounds(120, 39));
+        assert!(!doc.in_bounds(119, 40));
     }
 
     #[test]
