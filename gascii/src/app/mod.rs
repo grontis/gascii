@@ -491,7 +491,7 @@ impl GasciiApp {
         tools().iter().copied().filter(|d| self.tool_enabled(d.kind)).collect()
     }
 
-    /// Whether gascii-anim is enabled — gates the Edit menu's "Add Frame" item: a second frame
+    /// Whether gascii-anim is enabled — gates the menu bar's Animation menu: a second frame
     /// with no timeline to manage it would be stranded. Resolved by descriptor id, not a hardcoded
     /// index, and reads as enabled were the plugin ever not registered at all (Add Frame is
     /// host-owned; only the *management* UI is the plugin's).

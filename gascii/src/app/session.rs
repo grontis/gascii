@@ -195,7 +195,7 @@ impl GasciiApp {
         }
     }
 
-    /// The Edit menu's "Add Frame" bootstrap: the one host-owned, non-plugin-routed frame-creation
+    /// The Animation menu's "Add Frame" bootstrap: the one host-owned, non-plugin-routed frame-creation
     /// path, since `gascii-anim` has no toolbox/menu presence of its own to
     /// host this affordance at the `frame_count() == 1` boundary. Calls `frame_ops::duplicate_frame`
     /// directly through `apply_edit` — the same shape every other menu-triggered structural edit in

@@ -894,7 +894,7 @@
         assert_eq!(app.last_error.as_deref(), Some("add frame: exceeds the 256 maximum"));
     }
 
-    /// The Edit menu's "Add Frame" bootstrap: duplicates the active frame and flushes any pending
+    /// The Animation menu's "Add Frame" bootstrap: duplicates the active frame and flushes any pending
     /// session first — mirrors "Resize Canvas…"'s own flush-before-structural-trigger discipline.
     #[test]
     fn add_frame_menu_item_duplicates_the_active_frame_and_flushes_first() {
@@ -1239,7 +1239,7 @@
         assert!(app.modal_open(), "the Plugins dialog must register with modal_open()");
     }
 
-    /// `anim_plugin_enabled` (the Add Frame menu gate) must track exactly the gascii-anim toggle —
+    /// `anim_plugin_enabled` (the Animation menu gate) must track exactly the gascii-anim toggle —
     /// not any other plugin's.
     #[test]
     fn anim_plugin_enabled_follows_the_anim_toggle_and_ignores_other_plugins() {
@@ -1248,11 +1248,11 @@
 
         let brush = tool_def(BRUSH_KIND).plugin_slot.expect("Brush is plugin-sourced");
         app.set_plugin_enabled(brush, false);
-        assert!(app.anim_plugin_enabled(), "another plugin's toggle must not affect the Add Frame gate");
+        assert!(app.anim_plugin_enabled(), "another plugin's toggle must not affect the Animation menu gate");
 
         let anim = PLUGINS.iter().position(|d| d.id == gascii_anim::DESCRIPTOR.id).expect("gascii-anim is registered");
         app.set_plugin_enabled(anim, false);
-        assert!(!app.anim_plugin_enabled(), "disabling gascii-anim must gray the Add Frame gate");
+        assert!(!app.anim_plugin_enabled(), "disabling gascii-anim must hide the Animation menu");
 
         app.set_plugin_enabled(anim, true);
         assert!(app.anim_plugin_enabled());

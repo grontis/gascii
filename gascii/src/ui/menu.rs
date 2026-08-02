@@ -1,5 +1,5 @@
-//! The windowed-chrome menu bar (File/Edit/View). Kiosk chrome has no menu bar at all — see
-//! `ui::kiosk`.
+//! The windowed-chrome menu bar (File/Edit/Animation/View). Kiosk chrome has no menu bar at all —
+//! see `ui::kiosk`.
 
 use eframe::egui;
 
@@ -116,13 +116,17 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
             if ui.button("Resize Canvas…").clicked() {
                 app.open_resize_dialog();
             }
-            // Grayed while gascii-anim is disabled: a second frame with no timeline panel to
-            // manage it would be stranded. Export of existing multi-frame documents is unaffected
-            // — frames are a document property, not the plugin's.
-            if ui.add_enabled(app.anim_plugin_enabled(), egui::Button::new("Add Frame")).clicked() {
-                app.add_frame_via_menu();
-            }
         });
+        // Hidden while gascii-anim is disabled: a second frame with no timeline panel to
+        // manage it would be stranded. Export of existing multi-frame documents is unaffected
+        // — frames are a document property, not the plugin's.
+        if app.anim_plugin_enabled() {
+            ui.menu_button("Animation", |ui| {
+                if ui.button("Add Frame").clicked() {
+                    app.add_frame_via_menu();
+                }
+            });
+        }
         ui.menu_button("View", |ui| {
             if ui.add(egui::Button::new("Zoom In").shortcut_text(chords::chord_label(ChordId::ZoomIn))).clicked() {
                 app.step_zoom(1);
