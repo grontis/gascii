@@ -86,13 +86,15 @@ impl GasciiApp {
     /// `origin` is the slot whose own `update` produced this edit — it has nothing to re-pin.
     /// `None` for app-level mutations (redo, resize).
     pub(crate) fn apply_edit(&mut self, edit: gascii_core::Edit, origin: Option<Binding>) {
-        // app -> doc: seeds doc's cursor before the edit applies — see `active_frame`'s field doc
-        // comment for the full round trip. A no-op today (`active_frame` never leaves `0`).
+        // app -> doc: seeds doc's cursors before the edit applies — see `active_frame`'s field doc
+        // comment for the full round trip; `active_layer` mirrors it exactly.
         self.doc.set_active_frame(self.active_frame);
+        self.doc.set_active_layer(self.active_layer);
         self.history.apply(&mut self.doc, edit);
-        // doc -> app: some Edit kinds shift doc's cursor as a side effect of applying, independent
-        // of the seed above — resync so this field never drifts from doc.active_frame().
+        // doc -> app: some Edit kinds shift doc's cursors as a side effect of applying, independent
+        // of the seed above — resync so neither field ever drifts from doc's own cursors.
         self.active_frame = self.doc.active_frame();
+        self.active_layer = self.doc.active_layer();
         self.resync_slots(origin);
     }
 
@@ -106,9 +108,9 @@ impl GasciiApp {
 
     /// Moves the editing cursor to `idx`, flushing first — joins the same "flush before a
     /// structural trigger" convention every other cursor-affecting action already follows (Ctrl+S,
-    /// Ctrl+Z, Resize, Clear, rebinding a tool). Not an `Edit` — mirrors `active_layer`'s plain-
-    /// session-state precedent; only `frame_ops`'s structural ops touch `History`. A no-op if `idx`
-    /// is out of range or already active.
+    /// Ctrl+Z, Resize, Clear, rebinding a tool). Not an `Edit` — only `frame_ops`'s structural ops
+    /// touch `History`; see `switch_active_layer` for the layer twin of this exact shape. A no-op
+    /// if `idx` is out of range or already active.
     pub(crate) fn switch_active_frame(&mut self, idx: usize) {
         if idx == self.active_frame {
             return;
@@ -116,6 +118,19 @@ impl GasciiApp {
         self.flush_all();
         if self.doc.set_active_frame(idx) {
             self.active_frame = idx;
+            self.resync_slots(None);
+        }
+    }
+
+    /// The layer twin of `switch_active_frame`: same flush-first, no-op-if-unchanged-or-out-of-
+    /// range contract, only `layer_ops`'s structural ops touch `History` here either.
+    pub(crate) fn switch_active_layer(&mut self, idx: usize) {
+        if idx == self.active_layer {
+            return;
+        }
+        self.flush_all();
+        if self.doc.set_active_layer(idx) {
+            self.active_layer = idx;
             self.resync_slots(None);
         }
     }
@@ -242,9 +257,10 @@ impl GasciiApp {
     pub(crate) fn request_undo(&mut self) {
         self.flush_all();
         if self.history.undo(&mut self.doc) {
-            // doc -> app: undo restores doc's active-frame cursor from the undone Edit's own
+            // doc -> app: undo restores doc's active cursors from the undone Edit's own
             // snapshot — see `active_frame`'s field doc comment.
             self.active_frame = self.doc.active_frame();
+            self.active_layer = self.doc.active_layer();
             self.resync_slots(None);
         }
     }
@@ -269,6 +285,7 @@ impl GasciiApp {
             self.history.redo(&mut self.doc);
             // doc -> app: same resync as `request_undo` — see `active_frame`'s field doc comment.
             self.active_frame = self.doc.active_frame();
+            self.active_layer = self.doc.active_layer();
             // A redo mutates `self.doc` behind BOTH slots' backs, so both re-pin — there is no
             // originating slot to exempt.
             self.resync_slots(None);
@@ -296,7 +313,7 @@ impl GasciiApp {
         let Some(rect) = self.slots[b.ix()].tool.selection_overlay().and_then(|v| v.marquee) else {
             return;
         };
-        let patch = CellPatch::from_region(&self.doc, rect, 0);
+        let patch = CellPatch::from_region(&self.doc, rect, self.active_layer);
         ctx.copy_text(patch.to_text());
         self.internal_clipboard = Some(patch);
     }
@@ -413,5 +430,10 @@ impl GasciiApp {
             self.slots[b.ix()].tool.update(ToolEvent::Cancel, &tctx, &self.doc);
         }
         self.keyboard_owner = None;
+        // The document about to replace `self.doc` always starts at frame/layer 0 (`Document::new`,
+        // `load_str`) — these cursors must follow, or the first stroke afterward is built against a
+        // stale, likely out-of-range index and silently no-ops.
+        self.active_frame = 0;
+        self.active_layer = 0;
     }
 }

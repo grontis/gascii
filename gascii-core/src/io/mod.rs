@@ -1,6 +1,8 @@
-//! Layer-general compositing and file I/O. `composite_frame()` is the single place that turns a
-//! frame's layers into one flattened sheet of `Cell`s; every exporter builds on it (via
-//! `composite`, the active-frame convenience wrapper) rather than re-walking layers itself.
+//! Layer-general compositing and file I/O. `composite_cell()` is the single choke point that turns
+//! one layer stack's worth of `Cell`s at a coordinate into one flattened `Cell`, honoring
+//! per-layer visibility; `composite_frame()` is the whole-sheet wrapper around it, and `composite()`
+//! is the active-frame convenience wrapper around that. Every exporter and every renderer builds on
+//! one of these three rather than re-walking layers itself.
 
 pub mod export_png;
 pub mod export_text;
@@ -18,19 +20,35 @@ pub fn composite(doc: &Document) -> Vec<Vec<Cell>> {
 /// for an out-of-bounds `frame`. The general entry point cross-frame consumers (onion-skinning,
 /// per-frame export) need; `composite` is the active-frame convenience wrapper most callers want.
 pub fn composite_frame(doc: &Document, frame: usize) -> Option<Vec<Vec<Cell>>> {
-    let layers = doc.frame_layers(frame)?;
+    doc.frame_layers(frame)?;
     let (w, h) = (doc.width as usize, doc.height as usize);
     let mut out = vec![vec![Cell::BLANK; w]; h];
-    for layer in 0..layers.len() {
-        for y in 0..doc.height {
-            for x in 0..doc.width {
-                let Some(&over) = doc.cell_at(frame, layer, x, y) else { continue };
-                let dst = &mut out[y as usize][x as usize];
-                *dst = alpha_over(*dst, over);
-            }
+    for y in 0..doc.height {
+        for x in 0..doc.width {
+            out[y as usize][x as usize] = composite_cell(doc, frame, x, y);
         }
     }
     Some(out)
+}
+
+/// Flattens a single cell at `(x, y)` across every visible layer of `frame`, bottom-to-top
+/// alpha-over compositing — `Cell::BLANK` for an out-of-bounds `frame`/coordinate. This is the one
+/// choke point every consumer of layered content composites through: `composite_frame` (and via it
+/// every exporter and thumbnail), the canvas's own default renderer, and the animation overlay all
+/// call this instead of reading a single literal layer, so hidden-layer exclusion and multi-layer
+/// content are handled in exactly one place, unconditionally — correct rendering never depends on
+/// any plugin being enabled.
+pub fn composite_cell(doc: &Document, frame: usize, x: u16, y: u16) -> Cell {
+    let Some(layers) = doc.frame_layers(frame) else { return Cell::BLANK };
+    let mut out = Cell::BLANK;
+    for layer in 0..layers.len() {
+        if !doc.layer_visible(layer) {
+            continue;
+        }
+        let Some(&over) = doc.cell_at(frame, layer, x, y) else { continue };
+        out = alpha_over(out, over);
+    }
+    out
 }
 
 fn alpha_over(under: Cell, over: Cell) -> Cell {
@@ -150,5 +168,48 @@ mod tests {
         let mut doc = Document::new(2, 2);
         doc.set_cell(0, 0, 0, cell('a', Rgba::WHITE, Rgba::TRANSPARENT));
         assert_eq!(composite(&doc), composite_frame(&doc, doc.active_frame()).unwrap());
+    }
+
+    #[test]
+    fn composite_cell_returns_blank_for_an_out_of_bounds_frame() {
+        let doc = Document::new(2, 2);
+        assert_eq!(composite_cell(&doc, 1, 0, 0), Cell::BLANK);
+    }
+
+    #[test]
+    fn composite_cell_skips_a_hidden_layers_content() {
+        let mut doc = Document::new(2, 2);
+        let mut history = crate::edit::History::new();
+        doc.set_cell(0, 0, 0, cell('b', Rgba::WHITE, Rgba(5, 5, 5, 255))); // bottom layer content
+
+        let add = crate::layer_ops::add_layer(&doc, 1).unwrap();
+        history.apply(&mut doc, add); // layer 1 becomes active
+        doc.set_cell(1, 0, 0, cell('t', Rgba::WHITE, Rgba(9, 9, 9, 255)));
+
+        // Sanity: with both layers visible, the top layer wins.
+        assert_eq!(composite_cell(&doc, 0, 0, 0).ch, 't');
+
+        let hide = crate::layer_ops::set_layer_visibility(&doc, 1, false).unwrap().unwrap();
+        history.apply(&mut doc, hide);
+        assert_eq!(
+            composite_cell(&doc, 0, 0, 0).ch,
+            'b',
+            "a hidden top layer must be excluded, exposing the bottom layer's content"
+        );
+    }
+
+    #[test]
+    fn composite_frame_excludes_a_hidden_layers_content_too() {
+        let mut doc = Document::new(2, 2);
+        let mut history = crate::edit::History::new();
+        doc.set_cell(0, 0, 0, cell('b', Rgba::WHITE, Rgba(5, 5, 5, 255)));
+        let add = crate::layer_ops::add_layer(&doc, 1).unwrap();
+        history.apply(&mut doc, add);
+        doc.set_cell(1, 0, 0, cell('t', Rgba::WHITE, Rgba(9, 9, 9, 255)));
+        let hide = crate::layer_ops::set_layer_visibility(&doc, 1, false).unwrap().unwrap();
+        history.apply(&mut doc, hide);
+
+        let out = composite_frame(&doc, 0).unwrap();
+        assert_eq!(out[0][0].ch, 'b', "composite_frame must exclude a hidden layer's content via composite_cell");
     }
 }

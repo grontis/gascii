@@ -28,8 +28,10 @@ fn shift_for_insert(active: usize, at: usize) -> usize {
 }
 
 /// How `active` shifts when the element at `removed` is taken out via `Vec::remove`, given the
-/// vec's `new_len` (post-removal).
-fn shift_for_remove(active: usize, removed: usize, new_len: usize) -> usize {
+/// vec's `new_len` (post-removal). `pub(crate)`: reused verbatim by `layer_ops::remove_layer` —
+/// removing a layer shifts an uninvolved active layer index by exactly the same rule as removing a
+/// frame shifts an uninvolved active frame index.
+pub(crate) fn shift_for_remove(active: usize, removed: usize, new_len: usize) -> usize {
     use std::cmp::Ordering;
     match active.cmp(&removed) {
         Ordering::Less => active,
@@ -39,8 +41,9 @@ fn shift_for_remove(active: usize, removed: usize, new_len: usize) -> usize {
 }
 
 /// How `active` shifts when the element at `from` is moved to `to` (a `Vec::remove` immediately
-/// followed by a `Vec::insert` at the new position, as `ReorderFrame` performs it).
-fn shift_for_move(active: usize, from: usize, to: usize) -> usize {
+/// followed by a `Vec::insert` at the new position, as `ReorderFrame` performs it). `pub(crate)`,
+/// same reuse rationale as `shift_for_remove` — `layer_ops::reorder_layer` reuses this verbatim.
+pub(crate) fn shift_for_move(active: usize, from: usize, to: usize) -> usize {
     if active == from {
         to
     } else if from < to && active > from && active <= to {
@@ -321,6 +324,37 @@ mod tests {
             result,
             Err(FrameOpError::TooManyLayers { found: Document::MAX_LAYERS + 1, max: Document::MAX_LAYERS })
         );
+    }
+
+    /// The joint budget's `existing_layers` sum must count every existing frame's *real* layer
+    /// count (built through legitimate `layer_ops::add_layer` calls, which add uniformly across
+    /// every frame), not assume one layer per frame — the assumption that held before layers
+    /// existed. Chosen so the correct sum (4 existing layers across 2 frames) trips the budget
+    /// against a modestly-sized inserted frame, while the old, wrong "count frames, not layers"
+    /// arithmetic would have let the identical call through.
+    #[test]
+    fn add_frame_over_the_total_cell_budget_accounts_for_existing_frames_own_multi_layer_counts() {
+        let mut doc = Document::new(Document::MAX_WIDTH, Document::MAX_HEIGHT);
+        let mut history = History::new();
+        let add_frame_edit = add_frame(&doc, 1, blank(Document::MAX_WIDTH, Document::MAX_HEIGHT)).unwrap();
+        history.apply(&mut doc, add_frame_edit);
+        // Adds one layer to EVERY frame at once (add_layer's uniform-across-frames contract): 2
+        // frames now carry 2 layers each, 4 real layers total.
+        let add_layer_edit = crate::layer_ops::add_layer(&doc, 1).unwrap();
+        history.apply(&mut doc, add_layer_edit);
+        assert_eq!(doc.frame_count(), 2);
+        assert_eq!(doc.layer_count(), 2);
+        let before = doc.clone();
+
+        // 253 extra layers: (4 existing + 253) * WH exceeds MAX_TOTAL_CELLS, but (2 "frame count" +
+        // 253) * WH would not — this only rejects if the sum counts real layers, not frames.
+        let extra = Frame {
+            layers: (0..253).map(|_| Layer::blank(Document::MAX_WIDTH, Document::MAX_HEIGHT)).collect(),
+            duration_override: None,
+        };
+        let result = add_frame(&doc, 1, extra);
+        assert!(matches!(result, Err(FrameOpError::TotalCellBudgetExceeded { .. })), "got {result:?}");
+        assert_eq!(doc, before, "a rejected add_frame must leave the document completely unmodified");
     }
 
     #[test]

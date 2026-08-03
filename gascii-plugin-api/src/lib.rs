@@ -38,7 +38,7 @@ pub use descriptor::PluginDescriptor;
 pub use host::PluginHost;
 pub use icon::IconPath;
 pub use options::OptionsGeom;
-pub use panel::PanelOutcome;
+pub use panel::{DocProperty, PanelOutcome};
 pub use plugin::Plugin;
 pub use renderer::{cell_rect_to_screen, CanvasRenderer, CellGrid};
 pub use shortcut::PluginShortcut;

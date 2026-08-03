@@ -489,7 +489,7 @@ pub(super) fn validate_key_claims(claims: &[KeyClaim]) -> Result<(), String> {
 /// is now structurally guaranteed rather than a convention two separately-written functions have to
 /// uphold by hand — there is no second, independently-iterated list left to drift from this one.
 pub(crate) const PLUGINS: &[gascii_plugin_api::PluginDescriptor] =
-    &[gascii_density_brush::DESCRIPTOR, gascii_anim::DESCRIPTOR];
+    &[gascii_density_brush::DESCRIPTOR, gascii_anim::DESCRIPTOR, gascii_layers::DESCRIPTOR];
 
 /// Folds every plugin's `wrap_renderer` over the host's own `NaiveRenderer`, innermost (the host's)
 /// first, in iteration order. A pure function of the plugins it's given — an iterator rather than

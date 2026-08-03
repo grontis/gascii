@@ -7,10 +7,10 @@
 //! Document-level `frame_duration_ms`/`loop_playback` (the animation's default fps/loop) are plain
 //! `pub`, non-`Edit`-tracked fields on `Document` (the same "set-and-forget" precedent `background`
 //! already follows) — unreachable through `PanelOutcome`'s edits-only mutation channel. Both are
-//! writable from this panel now: the Loop checkbox (via `PanelOutcome::set_loop_playback`) and the
-//! header's Default duration stepper (via `PanelOutcome::set_default_frame_duration`) — plain field
-//! writes the host applies outside `History`, exactly like `set_active_frame`. The active frame's
-//! own duration override is the one timing control that *is* an `Edit`, via
+//! writable from this panel now: the Loop checkbox (via `DocProperty::LoopPlayback`) and the
+//! header's Default duration stepper (via `DocProperty::DefaultFrameDuration`) — plain field
+//! writes the host applies outside `History`, exactly like `DocProperty::ActiveFrame`. The active
+//! frame's own duration override is the one timing control that *is* an `Edit`, via
 //! `frame_ops::set_frame_duration` — reachable normally, with a clear-override control next to it
 //! once a frame actually carries one.
 //!
@@ -27,7 +27,7 @@
 
 use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
 use gascii_core::{Document, Edit, FrameOpError};
-use gascii_plugin_api::PanelOutcome;
+use gascii_plugin_api::{DocProperty, PanelOutcome};
 
 use crate::shared::SharedState;
 use crate::theme;
@@ -64,7 +64,11 @@ pub(crate) fn duplicate_active(doc: &Document) -> Result<Edit, FrameOpError> {
 }
 
 fn add_blank_after_active(doc: &Document) -> Result<Edit, FrameOpError> {
-    gascii_core::add_frame(doc, doc.active_frame() + 1, gascii_core::Frame::blank(doc.width, doc.height))
+    gascii_core::add_frame(
+        doc,
+        doc.active_frame() + 1,
+        gascii_core::Frame::blank_with_layers(doc.width, doc.height, doc.layer_count()),
+    )
 }
 
 /// Maps a `frame_ops` failure to a specific, readable message — mirrors `GasciiApp::
@@ -122,8 +126,9 @@ fn clear_duration_override(doc: &Document) -> Option<Edit> {
 }
 
 /// Steps the document-level default duration (`Document.frame_duration_ms`) by `delta_ms`, clamped
-/// identically to `step_duration`. Not an `Edit` — reported through `PanelOutcome::
-/// set_default_frame_duration`, the same plain-field-write shape `set_loop_playback` already uses.
+/// identically to `step_duration`. Not an `Edit` — reported through `DocProperty::
+/// DefaultFrameDuration`, the same plain-field-write shape `DocProperty::LoopPlayback` already
+/// uses.
 fn step_default_duration(current: u32, delta_ms: i32) -> u32 {
     (current as i64 + delta_ms as i64).clamp(10, gascii_core::Document::MAX_FRAME_DURATION_MS as i64) as u32
 }
@@ -161,11 +166,11 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
             }
 
             // `Document.loop_playback` itself, not plugin-session state — a plain field write via
-            // `PanelOutcome::set_loop_playback`, applied outside `History` (see that field's doc
+            // `DocProperty::LoopPlayback`, applied outside `History` (see that variant's doc
             // comment), so the toggle survives exactly like every other document-level default.
             let mut loop_playback = doc.loop_playback;
             if widgets::checkbox(ui, &mut loop_playback, "Loop") {
-                outcome.set_loop_playback = Some(loop_playback);
+                outcome.properties.push(DocProperty::LoopPlayback(loop_playback));
             }
 
             ui.label(
@@ -231,11 +236,11 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
             ui.add_space(10.0);
             widgets::micro_label(ui, "DEFAULT");
             if widgets::button(ui, "-10ms", true, control_h).clicked() {
-                outcome.set_default_frame_duration = Some(step_default_duration(doc.frame_duration_ms, -10));
+                outcome.properties.push(DocProperty::DefaultFrameDuration(step_default_duration(doc.frame_duration_ms, -10)));
             }
             ui.label(egui::RichText::new(format!("{}ms", doc.frame_duration_ms)).font(widgets::mono_id(widgets::size::LABEL)).color(t.fg_secondary));
             if widgets::button(ui, "+10ms", true, control_h).clicked() {
-                outcome.set_default_frame_duration = Some(step_default_duration(doc.frame_duration_ms, 10));
+                outcome.properties.push(DocProperty::DefaultFrameDuration(step_default_duration(doc.frame_duration_ms, 10)));
             }
 
             ui.add_space(10.0);
@@ -285,7 +290,7 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
                     let (border, width) = if active { (t.border_strong, 2.0) } else { (t.border_soft, 1.0) };
                     ui.painter().rect_stroke(rect, 2.0, Stroke::new(width, border), StrokeKind::Inside);
                     if resp.clicked() && !active {
-                        outcome.set_active_frame = Some(i);
+                        outcome.properties.push(DocProperty::ActiveFrame(i));
                     }
                 }
             });
@@ -335,6 +340,25 @@ mod tests {
         let doc = doc_at_max_frames();
         let err = duplicate_active(&doc).unwrap_err();
         assert_eq!(err, FrameOpError::TooManyFrames { found: Document::MAX_FRAMES + 1, max: Document::MAX_FRAMES });
+    }
+
+    #[test]
+    fn add_blank_after_active_matches_the_documents_real_layer_count() {
+        let mut doc = doc_with_frames(1);
+        let mut history = History::new();
+        for _ in 0..2 {
+            let edit = gascii_core::add_layer(&doc, doc.layer_count()).unwrap();
+            history.apply(&mut doc, edit);
+        }
+        assert_eq!(doc.layer_count(), 3);
+
+        let edit = add_blank_after_active(&doc).unwrap();
+        let Edit::AddFrame { frame, .. } = edit else { panic!("expected AddFrame") };
+        assert_eq!(
+            frame.layers.len(),
+            doc.layer_count(),
+            "a new animation frame must carry every existing layer, not just the first"
+        );
     }
 
     /// Pinned literally so a future wording change is a deliberate edit — must agree with
@@ -440,9 +464,7 @@ mod tests {
         });
         let outcome = outcome.unwrap();
         assert!(outcome.edits.is_empty());
-        assert!(outcome.set_active_frame.is_none());
-        assert!(outcome.set_loop_playback.is_none());
-        assert!(outcome.set_default_frame_duration.is_none());
+        assert!(outcome.properties.is_empty());
         assert!(outcome.error.is_none());
     }
 
@@ -459,7 +481,10 @@ mod tests {
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             outcome = Some(body(ui, &doc, &state, &mut thumbs, Vec2::new(48.0, 30.0), 24.0, Some(1)));
         });
-        assert!(outcome.unwrap().set_loop_playback.is_none(), "a no-input render must not request a loop change");
+        assert!(
+            !outcome.unwrap().properties.iter().any(|p| matches!(p, DocProperty::LoopPlayback(_))),
+            "a no-input render must not request a loop change"
+        );
     }
 
     /// The Default duration stepper reads `Document.frame_duration_ms` as its display value and, on
@@ -475,7 +500,7 @@ mod tests {
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             outcome = Some(body(ui, &doc, &state, &mut thumbs, Vec2::new(48.0, 30.0), 24.0, Some(1)));
         });
-        assert!(outcome.unwrap().set_default_frame_duration.is_none());
+        assert!(!outcome.unwrap().properties.iter().any(|p| matches!(p, DocProperty::DefaultFrameDuration(_))));
     }
 
     #[test]

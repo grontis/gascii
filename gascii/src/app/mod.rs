@@ -154,13 +154,21 @@ pub struct GasciiApp {
     pub(crate) active_bg: Rgba,
     pub(crate) mask: PlaneMask,
     /// The layer every tool reads and writes: `tool_ctx`'s `ToolCtx.layer`, the eyedropper pick,
-    /// and `resync_slots`' resync target all source it from here. v1 documents have exactly one
-    /// layer, so this is always `0` with no UI to change it — the plumbing a future layers feature
-    /// would generalize, not the value.
+    /// and `resync_slots`' resync target all source it from here, mirroring `active_frame` exactly.
+    ///
+    /// Kept in sync with `doc.active_layer()` at every `History` choke point, in both directions:
+    /// `apply_edit` seeds `doc`'s cursor from this field before every `History::apply` (app -> doc,
+    /// since a caller-built `Edit` targets a specific layer that must already be `doc`'s active one
+    /// before it applies), then reads it back afterward (doc -> app), because `AddLayer`/
+    /// `RemoveLayer`/`ReorderLayer` shift `doc`'s cursor as a side effect of applying — independent
+    /// of whatever was just seeded. `request_undo`/`request_redo` mutate `doc` directly (bypassing
+    /// `apply_edit`) and restore `doc.active_layer()` from the `Edit`'s own baked-in snapshot, so
+    /// they resync this field the same way afterward. `doc.active_layer()` is the ground truth;
+    /// this field only ever leads at the one seed point in `apply_edit`, and follows everywhere
+    /// else — see `switch_active_layer` for the direct-selection path.
     pub(crate) active_layer: usize,
     /// The frame every tool reads and writes: `tool_ctx`'s `ToolCtx.frame` and `resync_slots`'
-    /// resync target both source it from here, mirroring `active_layer` exactly. Always `0` today,
-    /// with no UI to change it yet.
+    /// resync target both source it from here, mirroring `active_layer` exactly.
     ///
     /// Kept in sync with `doc.active_frame()` at every `History` choke point, in both directions:
     /// `apply_edit` seeds `doc`'s cursor from this field before every `History::apply` (app -> doc,
@@ -281,12 +289,12 @@ pub struct GasciiApp {
     /// against `self.history.top_edit_id()`; nothing else needs to know about this field.
     saved_marker: Option<u64>,
     /// `Document.loop_playback` at the same checkpoint `saved_marker` is captured at (save, load,
-    /// New). Loop is a plain, non-`Edit`-tracked field write (`PanelOutcome::set_loop_playback`),
-    /// so `saved_marker` alone — which only tracks `History`'s undo stack — can never notice it
+    /// New). Loop is a plain, non-`Edit`-tracked field write (`DocProperty::LoopPlayback`), so
+    /// `saved_marker` alone — which only tracks `History`'s undo stack — can never notice it
     /// changed; `is_dirty` compares both.
     saved_loop_playback: bool,
     /// `Document.frame_duration_ms` at the same checkpoint, for the identical reason
-    /// (`PanelOutcome::set_default_frame_duration`).
+    /// (`DocProperty::DefaultFrameDuration`).
     saved_frame_duration_ms: u32,
     /// Which unsaved-changes confirmation is pending, if any — closing the app, or replacing the
     /// document via File ▸ New…. `pub(crate)` because `canvas.rs`'s modality guard reads it

@@ -212,6 +212,16 @@
         validate_unique_plugin_ids(PLUGINS).expect("the real descriptor table has unique ids");
     }
 
+    /// The Plugin Manager (`dialogs.rs`) renders straight off `PLUGINS` — a plugin missing from
+    /// this list is invisible there regardless of how correctly its own crate is built.
+    #[test]
+    fn gascii_layers_is_registered_in_plugins() {
+        assert!(
+            PLUGINS.iter().any(|d| d.id == gascii_layers::DESCRIPTOR.id),
+            "gascii-layers must be registered so it appears in the Plugin Manager"
+        );
+    }
+
     /// The Plugin Manager renders id/name/description/version verbatim, and prefs key off `id` —
     /// an empty string in any registered descriptor is a registration mistake this pins against.
     #[test]
@@ -393,11 +403,16 @@
 
     /// `AnimPlugin`'s own single-frame gate, exercised through the real registered plugin list (not
     /// a double): a fresh document has exactly one frame, so its panel must claim zero space and
-    /// must not shrink the central panel at all.
+    /// must not shrink the central panel at all. `gascii-layers`' own panel has no such gate — it
+    /// has no host menu bootstrap for its first extra layer the way "Add Frame" does, so it must
+    /// always be visible — disabled here so this test isolates `AnimPlugin`'s gate specifically,
+    /// not the compound layout of every registered plugin.
     #[test]
     fn anim_panel_claims_no_space_while_frame_count_is_one() {
         let mut app = GasciiApp::headless();
         assert_eq!(app.doc.frame_count(), 1);
+        let layers = PLUGINS.iter().position(|d| d.id == gascii_layers::DESCRIPTOR.id).expect("gascii-layers is registered");
+        app.set_plugin_enabled(layers, false);
 
         let ctx = egui::Context::default();
         let mut central_rect = None;
@@ -488,7 +503,7 @@
         );
     }
 
-    /// `set_active_frame` in a returned `PanelOutcome` must flush pending sessions on BOTH bindings
+    /// `DocProperty::ActiveFrame` in a returned `PanelOutcome` must flush pending sessions on BOTH bindings
     /// before actually moving the cursor — a live Text burst must commit onto the frame it was
     /// typed on, not silently carry over to the new one.
     #[test]
@@ -507,7 +522,10 @@
         struct SwitchFrameDouble;
         impl Plugin for SwitchFrameDouble {
             fn panel(&mut self, _ui: &mut egui::Ui, _kiosk: bool, _host: &dyn gascii_plugin_api::PluginHost) -> gascii_plugin_api::PanelOutcome {
-                gascii_plugin_api::PanelOutcome { set_active_frame: Some(1), ..Default::default() }
+                gascii_plugin_api::PanelOutcome {
+                    properties: vec![gascii_plugin_api::DocProperty::ActiveFrame(1)],
+                    ..Default::default()
+                }
             }
             fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
                 self
@@ -527,7 +545,52 @@
         );
     }
 
-    /// `set_loop_playback` in a returned `PanelOutcome` must write `Document.loop_playback`
+    /// The layer twin of `plugin_panel_outcome_set_active_frame_flushes_pending_sessions_before_switching`:
+    /// `DocProperty::ActiveLayer` must flush pending sessions on BOTH bindings before actually moving
+    /// the cursor — a live Text burst must commit onto the layer it was typed on, not silently carry
+    /// over to the new one.
+    #[test]
+    fn plugin_panel_outcome_set_active_layer_flushes_pending_sessions_before_switching() {
+        let mut app = GasciiApp::headless();
+        let edit = gascii_core::add_layer(&app.doc, app.doc.layer_count()).unwrap();
+        app.apply_edit(edit, None);
+        assert_eq!(app.active_layer, 1, "sanity: adding a layer makes it the active one");
+        app.switch_active_layer(0); // back to layer 0, where the pending burst below is typed
+
+        // A pending Text burst on L, uncommitted, at (0,0) on layer 0.
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Char('a'), &tctx, &app.doc);
+        app.acquire_keyboard(Binding::L);
+
+        struct SwitchLayerDouble;
+        impl Plugin for SwitchLayerDouble {
+            fn panel(&mut self, _ui: &mut egui::Ui, _kiosk: bool, _host: &dyn gascii_plugin_api::PluginHost) -> gascii_plugin_api::PanelOutcome {
+                gascii_plugin_api::PanelOutcome {
+                    properties: vec![gascii_plugin_api::DocProperty::ActiveLayer(1)],
+                    ..Default::default()
+                }
+            }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+        app.plugins.push(Box::new(SwitchLayerDouble));
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.run_plugin_panels(ui, false));
+
+        assert_eq!(app.active_layer, 1, "set_active_layer must move the cursor");
+        assert_eq!(app.doc.active_layer(), 1);
+        assert_eq!(
+            app.doc.cell(0, 0, 0).unwrap().ch,
+            'a',
+            "a pending burst must be flushed onto the layer it was typed on before the switch, not dropped or carried over"
+        );
+    }
+
+    /// `DocProperty::LoopPlayback` in a returned `PanelOutcome` must write `Document.loop_playback`
     /// directly — a plain field write, not an `Edit`, so it must NOT create an undo entry.
     #[test]
     fn plugin_panel_outcome_set_loop_playback_writes_the_document_field_directly_without_history() {
@@ -538,7 +601,10 @@
         struct LoopToggleDouble;
         impl Plugin for LoopToggleDouble {
             fn panel(&mut self, _ui: &mut egui::Ui, _kiosk: bool, _host: &dyn gascii_plugin_api::PluginHost) -> gascii_plugin_api::PanelOutcome {
-                gascii_plugin_api::PanelOutcome { set_loop_playback: Some(false), ..Default::default() }
+                gascii_plugin_api::PanelOutcome {
+                    properties: vec![gascii_plugin_api::DocProperty::LoopPlayback(false)],
+                    ..Default::default()
+                }
             }
             fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
                 self
@@ -553,9 +619,9 @@
         assert_eq!(app.history.can_undo(), can_undo_before, "a plain field write must never create an undo entry");
     }
 
-    /// `set_default_frame_duration` in a returned `PanelOutcome` must write `Document.
+    /// `DocProperty::DefaultFrameDuration` in a returned `PanelOutcome` must write `Document.
     /// frame_duration_ms` directly — a plain field write, not an `Edit`, mirroring
-    /// `set_loop_playback`'s own contract exactly.
+    /// `DocProperty::LoopPlayback`'s own contract exactly.
     #[test]
     fn plugin_panel_outcome_set_default_frame_duration_writes_the_document_field_directly_without_history() {
         let mut app = GasciiApp::headless();
@@ -564,7 +630,10 @@
         struct DefaultDurationDouble;
         impl Plugin for DefaultDurationDouble {
             fn panel(&mut self, _ui: &mut egui::Ui, _kiosk: bool, _host: &dyn gascii_plugin_api::PluginHost) -> gascii_plugin_api::PanelOutcome {
-                gascii_plugin_api::PanelOutcome { set_default_frame_duration: Some(250), ..Default::default() }
+                gascii_plugin_api::PanelOutcome {
+                    properties: vec![gascii_plugin_api::DocProperty::DefaultFrameDuration(250)],
+                    ..Default::default()
+                }
             }
             fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
                 self
@@ -587,7 +656,10 @@
         let mut app = GasciiApp::headless();
         assert!(!app.is_dirty(), "sanity: a fresh headless app starts clean");
 
-        app.drain_panel_outcomes(vec![gascii_plugin_api::PanelOutcome { set_loop_playback: Some(false), ..Default::default() }]);
+        app.drain_panel_outcomes(vec![gascii_plugin_api::PanelOutcome {
+            properties: vec![gascii_plugin_api::DocProperty::LoopPlayback(false)],
+            ..Default::default()
+        }]);
 
         assert!(app.is_dirty(), "toggling Loop must mark the document dirty even with an untouched undo stack");
         assert!(!app.history.can_undo(), "sanity: still no undo entry — this must be caught by the snapshot comparison, not History");
@@ -598,7 +670,10 @@
         let mut app = GasciiApp::headless();
         assert!(!app.is_dirty());
 
-        app.drain_panel_outcomes(vec![gascii_plugin_api::PanelOutcome { set_default_frame_duration: Some(300), ..Default::default() }]);
+        app.drain_panel_outcomes(vec![gascii_plugin_api::PanelOutcome {
+            properties: vec![gascii_plugin_api::DocProperty::DefaultFrameDuration(300)],
+            ..Default::default()
+        }]);
 
         assert!(app.is_dirty(), "changing the default frame duration must mark the document dirty");
     }
@@ -609,7 +684,10 @@
     #[test]
     fn saving_resets_the_saved_session_meta_snapshot_so_the_document_reads_clean_again() {
         let mut app = GasciiApp::headless();
-        app.drain_panel_outcomes(vec![gascii_plugin_api::PanelOutcome { set_loop_playback: Some(false), ..Default::default() }]);
+        app.drain_panel_outcomes(vec![gascii_plugin_api::PanelOutcome {
+            properties: vec![gascii_plugin_api::DocProperty::LoopPlayback(false)],
+            ..Default::default()
+        }]);
         assert!(app.is_dirty(), "sanity: the toggle made it dirty");
 
         let path = std::env::temp_dir().join(format!("gascii_dirty_snapshot_save_test_{}.gascii", std::process::id()));
@@ -624,7 +702,10 @@
     #[test]
     fn opening_a_document_resets_the_saved_session_meta_snapshot_to_the_loaded_documents_own_values() {
         let mut app = GasciiApp::headless();
-        app.drain_panel_outcomes(vec![gascii_plugin_api::PanelOutcome { set_loop_playback: Some(false), ..Default::default() }]);
+        app.drain_panel_outcomes(vec![gascii_plugin_api::PanelOutcome {
+            properties: vec![gascii_plugin_api::DocProperty::LoopPlayback(false)],
+            ..Default::default()
+        }]);
         assert!(app.is_dirty(), "sanity: dirty before the open");
 
         // A single-frame document round-trips through the v1 envelope shape, which carries no
@@ -650,12 +731,66 @@
     #[test]
     fn create_new_document_resets_the_saved_session_meta_snapshot() {
         let mut app = GasciiApp::headless();
-        app.drain_panel_outcomes(vec![gascii_plugin_api::PanelOutcome { set_loop_playback: Some(false), ..Default::default() }]);
+        app.drain_panel_outcomes(vec![gascii_plugin_api::PanelOutcome {
+            properties: vec![gascii_plugin_api::DocProperty::LoopPlayback(false)],
+            ..Default::default()
+        }]);
         assert!(app.is_dirty());
 
         app.create_new_document();
 
         assert!(!app.is_dirty(), "a brand-new document must start clean regardless of the old document's dirty session-meta state");
+    }
+
+    /// `create_new_document` swaps in a `Document` that always starts at frame/layer 0 — the app-side
+    /// cursors must follow, or the first stroke on the fresh document is built against a stale,
+    /// out-of-range index and silently no-ops.
+    #[test]
+    fn create_new_document_resets_active_frame_and_active_layer() {
+        let mut app = GasciiApp::headless();
+        let add_frame = gascii_core::add_frame(&app.doc, 1, gascii_core::Frame::blank(app.doc.width, app.doc.height)).unwrap();
+        app.apply_edit(add_frame, None);
+        app.switch_active_frame(1);
+        for _ in 0..2 {
+            // Each add_layer lands its own new layer active, so two adds walk the cursor to 2.
+            let add_layer = gascii_core::add_layer(&app.doc, app.doc.layer_count()).unwrap();
+            app.apply_edit(add_layer, None);
+        }
+        assert_eq!(app.active_frame, 1, "sanity");
+        assert_eq!(app.active_layer, 2, "sanity");
+
+        app.create_new_document();
+
+        assert_eq!(app.active_frame, 0, "a fresh document must reset the frame cursor");
+        assert_eq!(app.active_layer, 0, "a fresh document must reset the layer cursor");
+    }
+
+    /// The `open_path` twin of `create_new_document_resets_active_frame_and_active_layer` — a loaded
+    /// document also always starts at frame/layer 0.
+    #[test]
+    fn open_path_resets_active_frame_and_active_layer() {
+        let mut app = GasciiApp::headless();
+        let add_frame = gascii_core::add_frame(&app.doc, 1, gascii_core::Frame::blank(app.doc.width, app.doc.height)).unwrap();
+        app.apply_edit(add_frame, None);
+        app.switch_active_frame(1);
+        for _ in 0..2 {
+            // Each add_layer lands its own new layer active, so two adds walk the cursor to 2.
+            let add_layer = gascii_core::add_layer(&app.doc, app.doc.layer_count()).unwrap();
+            app.apply_edit(add_layer, None);
+        }
+        assert_eq!(app.active_frame, 1, "sanity");
+        assert_eq!(app.active_layer, 2, "sanity");
+
+        let dir = scratch_dir("open_path_resets_cursors");
+        let path = dir.join("out.gascii");
+        let fresh = gascii_core::Document::new(4, 4);
+        std::fs::write(&path, save_string(&fresh)).unwrap();
+
+        app.open_path(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(app.active_frame, 0, "opening a document must reset the frame cursor");
+        assert_eq!(app.active_layer, 0, "opening a document must reset the layer cursor");
     }
 
     /// End-to-end through `handle_close_request`: a Loop toggle alone (no `Edit`, no undo entry)
@@ -665,7 +800,10 @@
     #[test]
     fn toggling_loop_playback_raises_the_close_confirm_veto_exactly_like_a_real_edit_would() {
         let mut app = GasciiApp::headless();
-        app.drain_panel_outcomes(vec![gascii_plugin_api::PanelOutcome { set_loop_playback: Some(false), ..Default::default() }]);
+        app.drain_panel_outcomes(vec![gascii_plugin_api::PanelOutcome {
+            properties: vec![gascii_plugin_api::DocProperty::LoopPlayback(false)],
+            ..Default::default()
+        }]);
         assert!(app.is_dirty(), "sanity: the toggle alone made it dirty");
         assert!(!app.history.can_undo(), "sanity: still no undo entry — this must go through the snapshot comparison");
 
@@ -783,7 +921,11 @@
             fn panel(&mut self, _ui: &mut egui::Ui, _kiosk: bool, host: &dyn gascii_plugin_api::PluginHost) -> gascii_plugin_api::PanelOutcome {
                 let doc = host.document();
                 let edit = gascii_core::add_frame(doc, 1, gascii_core::Frame::blank(doc.width, doc.height)).unwrap();
-                gascii_plugin_api::PanelOutcome { edits: vec![edit], set_active_frame: Some(1), ..Default::default() }
+                gascii_plugin_api::PanelOutcome {
+                    edits: vec![edit],
+                    properties: vec![gascii_plugin_api::DocProperty::ActiveFrame(1)],
+                    ..Default::default()
+                }
             }
             fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
                 self
@@ -835,7 +977,7 @@
         assert_eq!(app.doc, before_delete, "undo must byte-exactly restore the prior 2-frame document");
     }
 
-    /// `switch_active_frame` (the target of a `PanelOutcome::set_active_frame`) flushes via
+    /// `switch_active_frame` (the target of a `DocProperty::ActiveFrame`) flushes via
     /// `flush_all()`, but that only actually commits a `holds_session` tool's (Text/Selection)
     /// pending work — a plain stroke tool like Pencil does not hold a "session" the flush machinery
     /// recognizes, so a mid-drag Pencil press is left genuinely pending, not force-committed, across
@@ -1133,7 +1275,10 @@
 
     /// The real registered gascii-anim plugin, not a double: its timeline claims space once a
     /// second frame exists, and disabling the plugin must remove the timeline even then — the
-    /// frames stay in the document, but nothing draws a panel for them.
+    /// frames stay in the document, but nothing draws a panel for them. `gascii-layers` is disabled
+    /// alongside it here for the same reason as the single-frame gate test above: its own panel has
+    /// no gate to claim zero space, so it would otherwise still shrink the central panel and break
+    /// this test's "as if no panel loop ran at all" comparison.
     #[test]
     fn disabling_the_anim_plugin_removes_the_timeline_even_with_multiple_frames() {
         let mut app = GasciiApp::headless();
@@ -1142,6 +1287,8 @@
         assert_eq!(app.doc.frame_count(), 2);
         let anim = PLUGINS.iter().position(|d| d.id == gascii_anim::DESCRIPTOR.id).expect("gascii-anim is registered");
         app.set_plugin_enabled(anim, false);
+        let layers = PLUGINS.iter().position(|d| d.id == gascii_layers::DESCRIPTOR.id).expect("gascii-layers is registered");
+        app.set_plugin_enabled(layers, false);
 
         let ctx = egui::Context::default();
         let mut with_disabled_anim = None;
@@ -1163,6 +1310,39 @@
             bare_baseline.unwrap(),
             "with anim disabled, a two-frame document must lay out as if no panel loop ran at all"
         );
+    }
+
+    /// Disabling `gascii-layers` (Plugin Manager) with `layer_count() > 1` must not reset
+    /// `active_layer` or touch the document at all — the plugin's own panel/tick hooks are the only
+    /// things gated. Rendering must stay correct regardless: `composite_cell` is the host's own
+    /// choke point, never the plugin's, so the canvas still composites every visible layer with the
+    /// plugin disabled. Mirrors `gascii-anim`'s own disabled-with-multi-frame behavior.
+    #[test]
+    fn disabling_the_layers_plugin_with_multiple_layers_does_not_reset_active_layer_or_break_rendering() {
+        let mut app = GasciiApp::headless();
+        let add = gascii_core::add_layer(&app.doc, app.doc.layer_count()).unwrap();
+        app.apply_edit(add, None);
+        assert_eq!(app.active_layer, 1, "sanity: adding a layer makes it the active one");
+
+        let (cx, cy) = (app.doc.width / 2, app.doc.height / 2);
+        let top_bg = Rgba(11, 22, 33, 255);
+        app.doc.set_cell(1, cx, cy, gascii_core::Cell { ch: 'Y', fg: Rgba::WHITE, bg: top_bg });
+        let before = app.doc.clone();
+
+        let layers = PLUGINS.iter().position(|d| d.id == gascii_layers::DESCRIPTOR.id).expect("gascii-layers is registered");
+        app.set_plugin_enabled(layers, false);
+
+        assert_eq!(app.active_layer, 1, "disabling the plugin must not reset active_layer");
+        assert_eq!(app.doc.active_layer(), 1);
+        assert_eq!(app.doc, before, "disabling a plugin must never touch the document");
+
+        let ctx = egui::Context::default();
+        fonts::install_fonts(&ctx);
+        let _ = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+        let out = ctx.run_ui(raw_input_with_screen(300.0, 300.0), |ui| crate::canvas::show(ui, &mut app, false));
+        let seeded_color = egui::Color32::from_rgba_unmultiplied(top_bg.0, top_bg.1, top_bg.2, top_bg.3);
+        let count = out.shapes.iter().filter(|cs| matches!(&cs.shape, egui::Shape::Rect(r) if r.fill == seeded_color)).count();
+        assert_eq!(count, 1, "the host-owned composite must still include layer 1's content with gascii-layers disabled");
     }
 
     /// Every effective toggle rebuilds the renderer from the enabled plugins only — a disabled
@@ -1590,6 +1770,30 @@
         );
     }
 
+    /// The eyedropper samples the active layer's own raw cell even when a fully opaque layer above
+    /// it covers that cell on screen — deliberate, not a bug: the pick stays coherent with the
+    /// layer the user is about to draw on, and the on-screen composited color can blend content
+    /// from multiple layers into something not present on any single one of them.
+    #[test]
+    fn eyedropper_samples_the_active_layer_even_when_a_fully_opaque_layer_covers_it_on_screen() {
+        let mut app = GasciiApp::headless();
+        let (w, h) = (app.doc.width, app.doc.height);
+        app.doc.layers_mut().push(gascii_core::Layer::blank(w, h));
+        app.active_layer = 0;
+        app.doc.set_cell(0, 3, 3, gascii_core::Cell { ch: 'z', fg: Rgba(1, 2, 3, 255), bg: Rgba::TRANSPARENT });
+        // Layer 1, above the active layer, fully covers the same cell with an opaque glyph.
+        app.doc.set_cell(1, 3, 3, gascii_core::Cell { ch: '#', fg: Rgba(9, 9, 9, 255), bg: Rgba(9, 9, 9, 255) });
+
+        app.bind(Binding::L, ToolKind::Eyedropper);
+        crate::canvas::begin_gesture(&mut app, Binding::L, 3, 3, false, false);
+
+        let (expected_fg, _) = gascii_core::eyedrop(&app.doc.cell(0, 3, 3).copied().unwrap());
+        assert_eq!(
+            app.active_fg, expected_fg,
+            "the pick must read the active layer's own cell, not the opaque layer covering it on screen"
+        );
+    }
+
     /// Mirrors `tool_ctx_and_eyedropper_follow_active_layer`'s shape, but for `frame`:
     /// `active_frame` defaults to `0` and `tool_ctx` follows whatever it's set to.
     #[test]
@@ -1625,6 +1829,29 @@
         }]);
         app.apply_edit(cell_edit, None);
         assert_eq!(app.doc.active_frame(), 1, "apply_edit must sync doc's active-frame cursor from app.active_frame");
+    }
+
+    /// The layer twin of `apply_edit_syncs_doc_active_frame_from_app_active_frame_before_applying`:
+    /// `apply_edit`'s app -> doc sync actually reaches `doc.active_layer()` before every applied
+    /// edit, exercised end-to-end against a multi-layer document.
+    #[test]
+    fn apply_edit_syncs_doc_active_layer_from_app_active_layer_before_applying() {
+        let mut app = GasciiApp::headless();
+        let edit = gascii_core::add_layer(&app.doc, 1).unwrap();
+        app.apply_edit(edit, None);
+        assert_eq!(app.doc.layer_count(), 2);
+
+        app.active_layer = 1;
+        let cell_edit = gascii_core::Edit::Cells(vec![gascii_core::CellEdit {
+            frame: 0,
+            layer: 1,
+            x: 0,
+            y: 0,
+            before: gascii_core::Cell::BLANK,
+            after: gascii_core::Cell { ch: 'x', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT },
+        }]);
+        app.apply_edit(cell_edit, None);
+        assert_eq!(app.doc.active_layer(), 1, "apply_edit must sync doc's active-layer cursor from app.active_layer");
     }
 
     /// `apply_edit`'s doc -> app direction: `AddFrame` shifts `doc`'s cursor as a side effect of
@@ -1686,8 +1913,8 @@
         keys.sort();
         assert_eq!(
             keys,
-            vec!["background", "height", "layers", "version", "width"],
-            "a single-frame session must save exactly the pre-frames v1 key set — no frame-substrate field leaks in"
+            vec!["background", "height", "layer_meta", "layers", "version", "width"],
+            "a single-frame session must save exactly the v1 key set — no frame-substrate field leaks in"
         );
         assert_eq!(value["version"], 1, "a single-frame session must be tagged version 1, the pre-frames version");
 
@@ -2298,6 +2525,59 @@
         for (x, y) in [(1u16, 1u16), (2, 2)] {
             assert_eq!(app.doc.cell(0, x, y), Some(&gascii_core::Cell::BLANK), "redo re-applies the cut");
         }
+    }
+
+    /// `copy_selection` used to read `CellPatch::from_region(&self.doc, rect, 0)` — a literal layer
+    /// 0 — regardless of which layer was active. Pins that Ctrl+C on a non-zero active layer captures
+    /// that layer's own content, not layer 0's.
+    #[test]
+    fn copy_selection_captures_the_active_layer_not_layer_0() {
+        let mut app = GasciiApp::headless();
+        let edit = gascii_core::add_layer(&app.doc, app.doc.layer_count()).unwrap();
+        app.apply_edit(edit, None);
+        assert_eq!(app.active_layer, 1, "sanity: adding a layer makes it the active one");
+
+        app.doc.set_cell(1, 1, 1, cell('Q'));
+        // Layer 0 stays blank at the same coordinate, so a layer-0 read would return a blank cell.
+        assert_eq!(app.doc.cell(0, 1, 1), Some(&gascii_core::Cell::BLANK));
+
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Selection);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 1, y: 1 }, &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc);
+        app.acquire_keyboard(Binding::L);
+
+        let egui_ctx = egui::Context::default();
+        app.copy_selection(&egui_ctx);
+
+        let patch = app.internal_clipboard.as_ref().expect("copy must populate the clipboard");
+        assert_eq!(patch.to_text(), "Q", "the clipboard must hold the active layer's content, not layer 0's blank cell");
+    }
+
+    /// The data-loss scenario from the layer-0-literal bug: Cut on a non-zero active layer must
+    /// remove that layer's content AND fill the clipboard with the same content that was removed —
+    /// not silently discard it while the clipboard holds unrelated layer-0 content.
+    #[test]
+    fn cut_on_a_non_zero_active_layer_clipboard_matches_what_delete_removed() {
+        let mut app = GasciiApp::headless();
+        let edit = gascii_core::add_layer(&app.doc, app.doc.layer_count()).unwrap();
+        app.apply_edit(edit, None);
+        assert_eq!(app.active_layer, 1, "sanity: adding a layer makes it the active one");
+
+        app.doc.set_cell(1, 1, 1, cell('Q'));
+
+        app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Selection);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Press { x: 1, y: 1 }, &tctx, &app.doc);
+        app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc);
+        app.acquire_keyboard(Binding::L);
+
+        let egui_ctx = egui::Context::default();
+        app.cut_selection(&egui_ctx);
+
+        assert_eq!(app.doc.cell(1, 1, 1), Some(&gascii_core::Cell::BLANK), "cut must remove the active layer's content");
+        let patch = app.internal_clipboard.as_ref().expect("cut must populate the clipboard");
+        assert_eq!(patch.to_text(), "Q", "the clipboard must hold exactly what was removed from the active layer");
     }
 
     /// `request_redo` deliberately skips flushing first (see its own doc comment), so a live burst
@@ -2911,6 +3191,92 @@
                 "frame {i}'s text segment must match export_text of the reloaded document in isolation"
             );
         }
+    }
+
+    /// End-to-end, driven through real tool sessions and `apply_edit` rather than hand-built
+    /// documents: paint on layer 0, add a second layer, paint on it, hide layer 0 — text and PNG
+    /// export must then reflect only layer 1's content — and undoing the whole sequence restores
+    /// layer 0's visibility and content exactly.
+    #[test]
+    fn paint_add_layer_paint_hide_export_then_undo_restores_layer_0_exactly() {
+        let mut app = GasciiApp::headless();
+        app.doc = Document::new(4, 4);
+        app.history = History::new();
+        let pristine = app.doc.clone();
+
+        // Paint on layer 0.
+        app.active_glyph = 'A';
+        app.active_fg = Rgba(255, 0, 0, 255);
+        app.active_bg = Rgba(255, 0, 0, 255);
+        crate::canvas::begin_gesture(&mut app, Binding::L, 0, 0, false, false);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        if let ToolResponse::Commit(Some(edit)) = app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc) {
+            app.apply_edit(edit, Some(Binding::L));
+        }
+        app.stroke_owner = None;
+        assert_eq!(app.doc.cell(0, 0, 0).unwrap().ch, 'A', "sanity: layer 0's paint landed");
+        let after_paint0 = app.doc.clone();
+
+        // Add a second layer — becomes active automatically.
+        let add = gascii_core::add_layer(&app.doc, app.doc.layer_count()).unwrap();
+        app.apply_edit(add, None);
+        assert_eq!(app.active_layer, 1, "sanity: add_layer lands its own new layer active");
+
+        // Paint on layer 1.
+        app.active_glyph = 'B';
+        app.active_fg = Rgba(0, 0, 255, 255);
+        app.active_bg = Rgba(0, 0, 255, 255);
+        crate::canvas::begin_gesture(&mut app, Binding::L, 1, 1, false, false);
+        let tctx = crate::canvas::tool_ctx(&app, Binding::L);
+        if let ToolResponse::Commit(Some(edit)) = app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc) {
+            app.apply_edit(edit, Some(Binding::L));
+        }
+        app.stroke_owner = None;
+        assert_eq!(app.doc.cell(1, 1, 1).unwrap().ch, 'B', "sanity: layer 1's paint landed");
+
+        // Hide layer 0.
+        let hide = gascii_core::set_layer_visibility(&app.doc, 0, false).unwrap().unwrap();
+        app.apply_edit(hide, None);
+        assert!(!app.doc.layer_visible(0));
+
+        // Text export reflects only layer 1's content.
+        let text = export_text(&app.doc);
+        assert!(text.contains('B'), "text export must include layer 1's glyph: {text:?}");
+        assert!(!text.contains('A'), "text export must exclude layer 0's now-hidden glyph: {text:?}");
+
+        // PNG export reflects only layer 1's content: layer 0's tile is fully transparent, layer
+        // 1's tile carries its own bg color somewhere within it.
+        let cell_px = 12;
+        let (px_w, _px_h, pixels) = png_export::rasterize_rgba8(&app.doc, cell_px, None, None).unwrap();
+        let pixel_at = |x: u32, y: u32| -> [u8; 4] {
+            let idx = (y * px_w + x) as usize * 4;
+            [pixels[idx], pixels[idx + 1], pixels[idx + 2], pixels[idx + 3]]
+        };
+        let tile_pixels = |cx: u32, cy: u32| -> Vec<[u8; 4]> {
+            (0..cell_px).flat_map(|py| (0..cell_px).map(move |px| (px, py))).map(|(px, py)| pixel_at(cx * cell_px + px, cy * cell_px + py)).collect()
+        };
+        assert!(
+            tile_pixels(0, 0).iter().all(|p| p[3] == 0),
+            "layer 0's tile must be fully transparent in the PNG export once hidden"
+        );
+        let blue = [0u8, 0, 255, 255];
+        assert!(
+            tile_pixels(1, 1).contains(&blue),
+            "layer 1's tile must carry its own bg color in the PNG export"
+        );
+
+        // Undo the whole sequence: the hide first, then layer 1's paint, then the add, landing
+        // back at exactly the post-layer-0-paint snapshot; one more undo restores the pristine doc.
+        app.request_undo(); // undoes the hide
+        assert!(app.doc.layer_visible(0), "undoing the hide must restore layer 0's visibility");
+        assert_eq!(app.doc.cell(0, 0, 0).unwrap().ch, 'A', "layer 0's content must still be exactly what was painted");
+
+        app.request_undo(); // undoes layer 1's paint
+        app.request_undo(); // undoes add_layer
+        assert_eq!(app.doc, after_paint0, "undoing back to just after layer 0's paint must match that snapshot exactly");
+
+        app.request_undo(); // undoes layer 0's paint
+        assert_eq!(app.doc, pristine, "undoing the entire sequence must restore the pristine document exactly");
     }
 
     /// The New dialog's background color well (`new_bg`) must land on the freshly created
@@ -3612,16 +3978,20 @@
     /// commit, a live Text session's resync, a second Pencil commit that re-pins the Text session's
     /// `before` mid-burst, the Text session's own eventual commit, and finally undo/redo — every
     /// one of those five steps must read and write the SAME layer (2), and layer 0 must stay
-    /// completely untouched throughout. `active_layer` is session-only (always 0 in the shipped
-    /// app), but the plumbing this pins must already be correct for the layers feature that will
-    /// set it to something other than 0.
+    /// completely untouched throughout. `active_layer` now mirrors `doc.active_layer()`
+    /// (`apply_edit`'s seed/resync), so reaching layer 2 must go through the real, `History`-
+    /// tracked `add_layer` op rather than the raw `layers_mut()` bypass this test used before that
+    /// plumbing landed — `layer_meta` (the seed's bounds check) is `pub(crate)` to gascii-core, with
+    /// no bypass reachable from here. Each add lands its own new layer as active, so `active_layer`
+    /// ends at 2 without a hand-set.
     #[test]
     fn active_layer_resync_and_undo_redo_all_target_the_same_non_default_layer_under_adversarial_sequencing() {
         let mut app = GasciiApp::headless();
-        let (w, h) = (app.doc.width, app.doc.height);
-        app.doc.layers_mut().push(gascii_core::Layer::blank(w, h));
-        app.doc.layers_mut().push(gascii_core::Layer::blank(w, h));
-        app.active_layer = 2;
+        let add1 = gascii_core::add_layer(&app.doc, app.doc.layer_count()).unwrap();
+        app.apply_edit(add1, None);
+        let add2 = gascii_core::add_layer(&app.doc, app.doc.layer_count()).unwrap();
+        app.apply_edit(add2, None);
+        assert_eq!(app.active_layer, 2, "sanity: each add_layer lands its own new layer as active");
         app.mask = PlaneMask::ALL;
 
         // R: a first Pencil stroke stamps layer 2's (2,2) with 'Z'.
@@ -4437,7 +4807,7 @@
         );
     }
 
-    /// The other half of the same wiring: `.`'s `PanelOutcome::set_active_frame` must reach
+    /// The other half of the same wiring: `.`'s `DocProperty::ActiveFrame` must reach
     /// `switch_active_frame` through the same drain pass.
     #[test]
     fn plugin_tick_panel_outcome_set_active_frame_reaches_switch_active_frame_via_handle_keys() {
@@ -4452,7 +4822,7 @@
 
         assert_eq!(
             app.active_frame, 1,
-            "'.'s PanelOutcome::set_active_frame must reach switch_active_frame through drain_panel_outcomes"
+            "'.'s DocProperty::ActiveFrame must reach switch_active_frame through drain_panel_outcomes"
         );
     }
 

@@ -346,8 +346,9 @@ fn a_single_frame_document_saves_as_a_literal_version_1_envelope_with_exactly_th
     keys.sort();
     assert_eq!(
         keys,
-        vec!["background", "height", "layers", "version", "width"],
-        "a single-frame save must be exactly the pre-frames v1 key set — no v2-only field leaks in"
+        vec!["background", "height", "layer_meta", "layers", "version", "width"],
+        "a single-frame save must be exactly the pre-frames v1 key set plus the additive layer_meta \
+         field — no v2-only field leaks in"
     );
     assert_eq!(value["version"], 1, "a single-frame document must be tagged version 1, not CURRENT_VERSION (2)");
 }

@@ -70,6 +70,6 @@ mod tests {
         let kiosk = kiosk.unwrap();
 
         assert_eq!(windowed.edits.len(), kiosk.edits.len());
-        assert_eq!(windowed.set_active_frame, kiosk.set_active_frame);
+        assert_eq!(windowed.properties, kiosk.properties);
     }
 }

@@ -106,14 +106,14 @@ impl CanvasRenderer for OnionRenderer {
 }
 
 /// Paints frame `frame`'s committed cells only — no pending/hover/caret/selection overlay. Mirrors
-/// `NaiveRenderer::paint`'s own cell-drawing loop in shape, reading an explicit frame via
-/// `doc.cell_at` instead of the active one via `doc.cell`.
+/// `NaiveRenderer::paint`'s own cell-drawing loop in shape, compositing an explicit frame via
+/// `composite_cell` instead of the active one.
 fn paint_frame_cells(painter: &Painter, doc: &Document, frame: usize, ctx: &PaintCtx) {
     let (x0, y0, x1, y1) = ctx.visible;
     for y in y0..y1 {
         for x in x0..x1 {
-            let Some(c) = doc.cell_at(frame, 0, x, y) else { continue };
-            paint_cell(painter, c, ctx, x, y, None);
+            let c = gascii_core::composite_cell(doc, frame, x, y);
+            paint_cell(painter, &c, ctx, x, y, None);
         }
     }
 }
@@ -187,11 +187,11 @@ fn paint_tinted_frame(painter: &Painter, doc: &Document, frame: usize, ctx: &Pai
     let (x0, y0, x1, y1) = ctx.visible;
     for y in y0..y1 {
         for x in x0..x1 {
-            let Some(c) = doc.cell_at(frame, 0, x, y) else { continue };
+            let c = gascii_core::composite_cell(doc, frame, x, y);
             if c.is_blank() {
                 continue;
             }
-            paint_cell(painter, c, ctx, x, y, Some(tint));
+            paint_cell(painter, &c, ctx, x, y, Some(tint));
         }
     }
 }
@@ -376,6 +376,162 @@ mod tests {
         // called — proving onion's tint pass didn't run either, since it shares the same early
         // return as the playback override.
         assert_eq!(*calls.borrow(), 0);
+    }
+
+    /// The playback path (`paint_frame_cells`) must composite every visible layer of the played
+    /// frame, not just layer 0 — the bug this fix closes (`doc.cell_at(frame, 0, x, y)` silently
+    /// dropped content on any layer above 0).
+    #[test]
+    fn onion_renderer_playback_path_paints_content_from_a_non_zero_layer() {
+        let mut doc = Document::default_document();
+        let mut history = gascii_core::History::new();
+        let add = gascii_core::add_layer(&doc, doc.layer_count()).unwrap();
+        history.apply(&mut doc, add);
+        let (cx, cy) = (doc.width / 2, doc.height / 2);
+        let top_bg = gascii_core::Rgba(40, 60, 80, 255);
+        doc.set_cell(1, cx, cy, Cell { ch: 'Y', fg: gascii_core::Rgba::WHITE, bg: top_bg });
+
+        let inner = RecordingRenderer {
+            calls: Default::default(),
+            last_pending_len: Default::default(),
+            last_hover_len: Default::default(),
+            last_caret_some: Default::default(),
+            last_selection_some: Default::default(),
+        };
+        let state = SharedState::new();
+        state.borrow_mut().playing = true;
+        let mut renderer = OnionRenderer::new(Box::new(inner), state);
+
+        let ctx = egui::Context::default();
+        let seeded_color = color32(top_bg);
+        let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.painter().clone();
+            renderer.paint(
+                &painter,
+                &doc,
+                &FakeGrid,
+                Pos2::ZERO,
+                Vec2::new(10.0, 16.0),
+                (0, 0, doc.width, doc.height),
+                &[],
+                &[],
+                None,
+                None,
+            );
+        });
+        let count = out.shapes.iter().filter(|cs| matches!(&cs.shape, egui::Shape::Rect(r) if r.fill == seeded_color)).count();
+        assert_eq!(count, 1, "the playback path must composite layer 1's content, not drop it");
+    }
+
+    /// A hidden layer's content must be excluded from the playback path's composited paint, same
+    /// contract `composite_cell` gives every other consumer.
+    #[test]
+    fn onion_renderer_playback_path_excludes_a_hidden_layers_content() {
+        let mut doc = Document::default_document();
+        let mut history = gascii_core::History::new();
+        let add = gascii_core::add_layer(&doc, doc.layer_count()).unwrap();
+        history.apply(&mut doc, add);
+        let (cx, cy) = (doc.width / 2, doc.height / 2);
+        let hidden_bg = gascii_core::Rgba(40, 60, 80, 255);
+        doc.set_cell(1, cx, cy, Cell { ch: 'Y', fg: gascii_core::Rgba::WHITE, bg: hidden_bg });
+        let hide = gascii_core::set_layer_visibility(&doc, 1, false).unwrap().unwrap();
+        history.apply(&mut doc, hide);
+
+        let inner = RecordingRenderer {
+            calls: Default::default(),
+            last_pending_len: Default::default(),
+            last_hover_len: Default::default(),
+            last_caret_some: Default::default(),
+            last_selection_some: Default::default(),
+        };
+        let state = SharedState::new();
+        state.borrow_mut().playing = true;
+        let mut renderer = OnionRenderer::new(Box::new(inner), state);
+
+        let ctx = egui::Context::default();
+        let seeded_color = color32(hidden_bg);
+        let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.painter().clone();
+            renderer.paint(
+                &painter,
+                &doc,
+                &FakeGrid,
+                Pos2::ZERO,
+                Vec2::new(10.0, 16.0),
+                (0, 0, doc.width, doc.height),
+                &[],
+                &[],
+                None,
+                None,
+            );
+        });
+        let count = out.shapes.iter().filter(|cs| matches!(&cs.shape, egui::Shape::Rect(r) if r.fill == seeded_color)).count();
+        assert_eq!(count, 0, "a hidden layer's content must never reach the playback path's composited paint");
+    }
+
+    /// `paint_tinted_frame` (the actual onion-skin overlay, distinct from `paint_frame_cells`'
+    /// playback path above) must also composite every visible layer of its neighbor frame through
+    /// `composite_cell`, and exclude a hidden one — same contract, different call site. Layer 1's
+    /// content sits alone at the seeded cell (layer 0 stays blank there), so a tinted rect only
+    /// appears at all once the composite includes it.
+    #[test]
+    fn onion_skin_tint_path_composites_a_non_zero_layer_and_excludes_it_once_hidden() {
+        let mut doc = Document::default_document();
+        let mut history = gascii_core::History::new();
+        let add_frame_edit = gascii_core::add_frame(&doc, 1, gascii_core::Frame::blank(doc.width, doc.height)).unwrap();
+        history.apply(&mut doc, add_frame_edit);
+        let add_layer_edit = gascii_core::add_layer(&doc, doc.layer_count()).unwrap();
+        history.apply(&mut doc, add_layer_edit);
+        assert_eq!(doc.active_frame(), 0, "sanity: inserting after the active frame leaves it unchanged");
+
+        let (cx, cy) = (doc.width / 2, doc.height / 2);
+        // Frame 0 (the prev-neighbor once frame 1 becomes active), layer 1 only.
+        doc.set_cell(1, cx, cy, Cell { ch: 'Y', fg: gascii_core::Rgba::WHITE, bg: gascii_core::Rgba(1, 2, 3, 255) });
+        assert!(doc.set_active_frame(1), "the onion skin tints neighbors around the active frame");
+
+        let paint = |doc: &Document| {
+            let inner = RecordingRenderer {
+                calls: Default::default(),
+                last_pending_len: Default::default(),
+                last_hover_len: Default::default(),
+                last_caret_some: Default::default(),
+                last_selection_some: Default::default(),
+            };
+            let state = SharedState::new();
+            state.borrow_mut().onion_enabled = true;
+            state.borrow_mut().onion_prev = 1;
+            let mut renderer = OnionRenderer::new(Box::new(inner), state);
+            let ctx = egui::Context::default();
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                let painter = ui.painter().clone();
+                renderer.paint(
+                    &painter,
+                    doc,
+                    &FakeGrid,
+                    Pos2::ZERO,
+                    Vec2::new(10.0, 16.0),
+                    (0, 0, doc.width, doc.height),
+                    &[],
+                    &[],
+                    None,
+                    None,
+                );
+            })
+        };
+
+        // A single configured prev-neighbor (depth 1) tints at full strength — ONION_PREV_TINT
+        // itself, unscaled (`onion_alpha_scale`'s own `depth <= 1` branch).
+        let visible = paint(&doc);
+        let visible_count =
+            visible.shapes.iter().filter(|cs| matches!(&cs.shape, egui::Shape::Rect(r) if r.fill == ONION_PREV_TINT)).count();
+        assert_eq!(visible_count, 1, "the onion-skin tint pass must composite layer 1's content from the prev-neighbor frame");
+
+        let hide = gascii_core::set_layer_visibility(&doc, 1, false).unwrap().unwrap();
+        history.apply(&mut doc, hide);
+        let hidden = paint(&doc);
+        let hidden_count =
+            hidden.shapes.iter().filter(|cs| matches!(&cs.shape, egui::Shape::Rect(r) if r.fill == ONION_PREV_TINT)).count();
+        assert_eq!(hidden_count, 0, "hiding layer 1 must exclude its content from the onion-skin tint pass too");
     }
 
     fn doc_with_frames(n: usize) -> Document {

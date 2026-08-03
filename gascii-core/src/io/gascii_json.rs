@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{Cell, Document, Frame, Layer, Rgba};
+use crate::model::{Cell, Document, Frame, Layer, LayerMeta, Rgba};
 use crate::palette::{validate_width, WidthReject};
 
 /// Highest version this build can *read*. `save_string` may still choose to *write* v1 (see the
@@ -52,6 +52,10 @@ struct FileEnvelope {
     /// keeps those files loading unchanged rather than becoming a rejected/unsupported version.
     #[serde(default = "default_background")]
     background: Rgba,
+    /// Additive, same reasoning as `background`. Permissively defaulted at load if absent or its
+    /// length doesn't match the loaded layer count — see `resolve_layer_meta`.
+    #[serde(default)]
+    layer_meta: Vec<FileLayerMeta>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -66,6 +70,9 @@ struct FileEnvelopeV2 {
     #[serde(default = "Document::default_loop_playback")]
     loop_playback: bool,
     frames: Vec<FileFrame>,
+    /// Additive, same reasoning as `FileEnvelope::layer_meta`.
+    #[serde(default)]
+    layer_meta: Vec<FileLayerMeta>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -80,6 +87,27 @@ struct FileLayer {
     glyphs: Vec<String>,
     fg: Vec<Vec<(u16, Rgba)>>,
     bg: Vec<Vec<(u16, Rgba)>>,
+}
+
+/// The wire shape of one `LayerMeta` entry.
+#[derive(Serialize, Deserialize)]
+struct FileLayerMeta {
+    name: String,
+    #[serde(default = "LayerMeta::default_visible")]
+    visible: bool,
+}
+
+/// `file_meta`'s length is only ever trusted when it matches `n` (the actually-loaded layer
+/// count) exactly — a mismatch (including "absent entirely," the legacy-file case) synthesizes
+/// `LayerMeta::default_named` for every index instead of rejecting the file. Metadata is cosmetic;
+/// content safety never depends on it (compositing always iterates the real per-frame layer count,
+/// only *consulting* `layer_meta` for the visibility flag — see `Document::layer_visible`).
+fn resolve_layer_meta(file_meta: Vec<FileLayerMeta>, n: usize) -> Vec<LayerMeta> {
+    if file_meta.len() == n {
+        file_meta.into_iter().map(|m| LayerMeta { name: LayerMeta::clamp_name(m.name), visible: m.visible }).collect()
+    } else {
+        (0..n).map(LayerMeta::default_named).collect()
+    }
 }
 
 /// Why loading a `.gascii` file failed. Never a panic, even on adversarial/malformed input.
@@ -118,6 +146,11 @@ pub enum LoadError {
     /// A frame declares zero layers. A v1 file's implicit single frame is always reported as
     /// `frame: 0`.
     NoLayers { frame: usize },
+    /// A v2 envelope's frames don't all declare the same layer count. Every structural layer edit
+    /// (`layer_ops.rs`) assumes a uniform per-frame layer count, so a mismatched file is rejected
+    /// here rather than becoming a `History::apply` panic risk later (see `structural_edit_is_valid`'s
+    /// `frames_consistent` guard, which this check is the load-time counterpart to).
+    LayerCountMismatch { frame: usize, expected: usize, found: usize },
 }
 
 impl std::fmt::Display for LoadError {
@@ -164,6 +197,10 @@ impl std::fmt::Display for LoadError {
                 write!(f, "frame {frame}, layer {layer}, row {row}, column {col}: glyph is {why}, not single-width")
             }
             LoadError::NoLayers { frame } => write!(f, "frame {frame} has no layers"),
+            LoadError::LayerCountMismatch { frame, expected, found } => write!(
+                f,
+                "frame {frame} has {found} layers, expected {expected} (every frame must declare the same layer count)"
+            ),
         }
     }
 }
@@ -180,6 +217,12 @@ pub fn save_string(doc: &Document) -> String {
     }
 }
 
+fn encode_layer_meta(doc: &Document) -> Vec<FileLayerMeta> {
+    (0..doc.layer_count())
+        .map(|i| FileLayerMeta { name: doc.layer_name(i).unwrap_or_default().to_string(), visible: doc.layer_visible(i) })
+        .collect()
+}
+
 fn save_v1(doc: &Document) -> String {
     let layers = (0..doc.layers().len()).map(|i| encode_layer_at(doc, 0, i)).collect();
     let envelope = FileEnvelope {
@@ -188,6 +231,7 @@ fn save_v1(doc: &Document) -> String {
         height: doc.height,
         layers,
         background: doc.background,
+        layer_meta: encode_layer_meta(doc),
     };
     serde_json::to_string(&envelope).expect("Document -> FileEnvelope is always serializable")
 }
@@ -207,6 +251,7 @@ fn save_v2(doc: &Document) -> String {
         frame_duration_ms: doc.frame_duration_ms,
         loop_playback: doc.loop_playback,
         frames,
+        layer_meta: encode_layer_meta(doc),
     };
     serde_json::to_string(&envelope).expect("Document -> FileEnvelopeV2 is always serializable")
 }
@@ -260,6 +305,8 @@ fn load_v1(s: &str) -> Result<Document, LoadError> {
         decode_layer_into(&mut doc, 0, idx, file_layer)?;
     }
     doc.background = envelope.background;
+    doc.layer_meta = resolve_layer_meta(envelope.layer_meta, doc.layers().len());
+    doc.active_layer = 0;
     Ok(doc)
 }
 
@@ -292,6 +339,16 @@ fn load_v2(s: &str) -> Result<Document, LoadError> {
             return Err(LoadError::TooManyLayers { frame: i, found: file_frame.layers.len(), max: Document::MAX_LAYERS });
         }
     }
+    // Every frame must declare the same layer count — structural layer edits (`layer_ops.rs`)
+    // assume this uniformity, so a mismatched file is rejected here, before any per-frame
+    // Layer::blank allocation, rather than becoming a panic risk once layers are structurally
+    // edited later.
+    let expected_layers = envelope.frames[0].layers.len();
+    for (i, f) in envelope.frames.iter().enumerate() {
+        if f.layers.len() != expected_layers {
+            return Err(LoadError::LayerCountMismatch { frame: i, expected: expected_layers, found: f.layers.len() });
+        }
+    }
     // The joint budget: computed from already-parsed Vec::len()s only, before any Layer::blank
     // call — a new multiplicative axis (frame count) on top of the existing width/height/layer
     // caps, closing the ~1TB worst case three independent per-axis caps alone would still permit.
@@ -319,6 +376,8 @@ fn load_v2(s: &str) -> Result<Document, LoadError> {
     doc.background = envelope.background;
     doc.frame_duration_ms = clamp_frame_duration_ms(envelope.frame_duration_ms);
     doc.loop_playback = envelope.loop_playback;
+    doc.layer_meta = resolve_layer_meta(envelope.layer_meta, expected_layers);
+    doc.active_layer = 0;
     Ok(doc)
 }
 
@@ -489,8 +548,19 @@ mod tests {
         doc.set_cell(0, 1, 1, cell('a', Rgba::WHITE, Rgba::TRANSPARENT));
         doc.set_cell(1, 2, 2, cell('b', Rgba(9, 9, 9, 255), Rgba(8, 8, 8, 255)));
         let back = load_str(&save_string(&doc)).unwrap();
-        assert_eq!(doc, back);
         assert_eq!(back.layers().len(), 2);
+        assert_eq!(back.cell(0, 1, 1), doc.cell(0, 1, 1));
+        assert_eq!(back.cell(1, 2, 2), doc.cell(1, 2, 2));
+        // `doc` bypasses `layer_ops` via the pre-existing `layers_mut()` escape hatch, leaving
+        // `layer_meta` (len 1) out of lockstep with the real 2-layer content it was never updated
+        // to describe. Per `layer_meta`'s permissive contract, cell content still round-trips
+        // exactly, but `layer_meta` itself does not: the saved envelope carries only 1 metadata
+        // entry against 2 real layers, so the loader's own length-mismatch guard
+        // (`resolve_layer_meta`) discards it
+        // and synthesizes fresh defaults rather than reproducing the original, already-inconsistent
+        // metadata.
+        assert_eq!(back.layer_count(), 2, "layer_meta is resynchronized to the real layer count on load");
+        assert_ne!(doc, back, "layer_meta itself does not round-trip byte-exact for a document built via the escape hatch");
     }
 
     // --- frame substrate: v1/v2 dispatch and multi-frame round trips ---
@@ -558,6 +628,7 @@ mod tests {
             frame_duration_ms: u32::MAX,
             loop_playback: true,
             frames: vec![frame_over, frame_under],
+            layer_meta: Vec::new(),
         };
         let json = serde_json::to_string(&envelope).unwrap();
         let doc = load_str(&json).unwrap();
@@ -1032,5 +1103,165 @@ mod tests {
     #[test]
     fn empty_json_object_is_rejected_cleanly_not_a_panic() {
         assert!(matches!(load_str("{}"), Err(LoadError::Json(_))));
+    }
+
+    // --- layer metadata: round trips, legacy defaults, and cross-frame mismatch rejection ---
+
+    #[test]
+    fn v2_frames_with_mismatched_layer_counts_are_rejected() {
+        let value = serde_json::json!({
+            "version": 2, "width": 2, "height": 2,
+            "frames": [frame_json(1), frame_json(2)],
+        });
+        let json = serde_json::to_string(&value).unwrap();
+        match load_str(&json) {
+            Err(LoadError::LayerCountMismatch { frame, expected, found }) => {
+                assert_eq!(frame, 1, "the second frame (index 1) is the one that disagrees with frame 0");
+                assert_eq!(expected, 1);
+                assert_eq!(found, 2);
+            }
+            other => panic!("expected LayerCountMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v2_mismatched_layer_counts_are_rejected_even_when_every_frame_individually_stays_under_max_layers() {
+        // Three frames, each individually well under MAX_LAYERS, but not all equal to each other —
+        // must still be rejected; this isn't a cap-boundary check, it's a uniformity check.
+        let value = serde_json::json!({
+            "version": 2, "width": 2, "height": 2,
+            "frames": [frame_json(3), frame_json(3), frame_json(4)],
+        });
+        let json = serde_json::to_string(&value).unwrap();
+        match load_str(&json) {
+            Err(LoadError::LayerCountMismatch { frame, expected, found }) => {
+                assert_eq!(frame, 2);
+                assert_eq!(expected, 3);
+                assert_eq!(found, 4);
+            }
+            other => panic!("expected LayerCountMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn layer_meta_name_and_visibility_round_trip_through_v1() {
+        let mut doc = Document::new(3, 3);
+        let mut history = crate::edit::History::new();
+        let add = crate::layer_ops::add_layer(&doc, 1).unwrap();
+        history.apply(&mut doc, add);
+        let rename = crate::layer_ops::set_layer_name(&doc, 1, "Ink".to_string()).unwrap().unwrap();
+        history.apply(&mut doc, rename);
+        let hide = crate::layer_ops::set_layer_visibility(&doc, 0, false).unwrap().unwrap();
+        history.apply(&mut doc, hide);
+        // The active-layer cursor is UI/session state, not round-tripped (mirrors active_frame's
+        // own contract) — reset it to the loader's own unconditional default before comparing.
+        assert!(doc.set_active_layer(0));
+
+        let json = save_string(&doc);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value.get("frames").is_none(), "sanity: a single-frame document still saves as v1");
+
+        let back = load_str(&json).unwrap();
+        assert_eq!(back.layer_name(1), Some("Ink"));
+        assert!(!back.layer_visible(0));
+        assert!(back.layer_visible(1));
+        assert_eq!(back, doc, "the full document, including layer_meta, must round-trip byte-exact");
+    }
+
+    #[test]
+    fn layer_meta_name_and_visibility_round_trip_through_v2() {
+        let mut doc = Document::new(3, 3);
+        let mut history = crate::edit::History::new();
+        let add_frame_edit = crate::frame_ops::add_frame(&doc, 1, Frame::blank(3, 3)).unwrap();
+        history.apply(&mut doc, add_frame_edit);
+        let add_layer_edit = crate::layer_ops::add_layer(&doc, 1).unwrap();
+        history.apply(&mut doc, add_layer_edit);
+        let rename = crate::layer_ops::set_layer_name(&doc, 1, "Shading".to_string()).unwrap().unwrap();
+        history.apply(&mut doc, rename);
+        // The active-layer cursor is UI/session state, not round-tripped (mirrors active_frame's
+        // own contract) — reset it to the loader's own unconditional default before comparing.
+        assert!(doc.set_active_layer(0));
+
+        let json = save_string(&doc);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value.get("frames").is_some(), "sanity: a multi-frame document saves as v2");
+
+        let back = load_str(&json).unwrap();
+        assert_eq!(back.layer_name(1), Some("Shading"));
+        assert_eq!(back, doc, "the full document, including layer_meta, must round-trip byte-exact");
+    }
+
+    /// Mirrors `a_legacy_file_with_no_background_field_loads_as_opaque_black`: a file saved before
+    /// `layer_meta` existed (no such key at all) must load with a synthesized default, not an error.
+    #[test]
+    fn a_legacy_file_with_no_layer_meta_field_loads_with_synthesized_defaults() {
+        let doc = Document::new(2, 2);
+        let mut value: serde_json::Value = serde_json::from_str(&save_string(&doc)).unwrap();
+        value.as_object_mut().unwrap().remove("layer_meta");
+        let json = serde_json::to_string(&value).unwrap();
+        let back = load_str(&json).unwrap();
+        assert_eq!(back.layer_count(), 1);
+        assert_eq!(back.layer_name(0), Some("Layer 1"));
+        assert!(back.layer_visible(0));
+    }
+
+    /// The v2 twin of `a_legacy_file_with_no_layer_meta_field_loads_with_synthesized_defaults`: a
+    /// multi-frame file saved before `layer_meta` existed (no such key anywhere in the envelope)
+    /// must load every frame with a synthesized single default layer, not an error.
+    #[test]
+    fn a_legacy_v2_file_with_no_layer_meta_field_loads_every_frame_with_synthesized_defaults() {
+        let mut doc = Document::new(2, 2);
+        let mut history = crate::edit::History::new();
+        let add_frame_edit = crate::frame_ops::add_frame(&doc, 1, Frame::blank(2, 2)).unwrap();
+        history.apply(&mut doc, add_frame_edit);
+
+        let mut value: serde_json::Value = serde_json::from_str(&save_string(&doc)).unwrap();
+        assert!(value.get("frames").is_some(), "sanity: a multi-frame document saves as v2");
+        value.as_object_mut().unwrap().remove("layer_meta");
+        let json = serde_json::to_string(&value).unwrap();
+
+        let back = load_str(&json).unwrap();
+        assert_eq!(back.frame_count(), 2);
+        assert_eq!(back.layer_count(), 1);
+        assert_eq!(back.layer_name(0), Some("Layer 1"));
+        assert!(back.layer_visible(0));
+    }
+
+    /// A `layer_meta` array whose length doesn't match the loaded layer count is discarded
+    /// wholesale in favor of synthesized defaults — never partially trusted, never rejected.
+    #[test]
+    fn a_layer_meta_array_whose_length_mismatches_the_loaded_layer_count_is_discarded_for_defaults() {
+        let mut doc = Document::new(2, 2);
+        let mut history = crate::edit::History::new();
+        let add = crate::layer_ops::add_layer(&doc, 1).unwrap(); // now 2 real layers
+        history.apply(&mut doc, add);
+        let rename = crate::layer_ops::set_layer_name(&doc, 0, "Custom".to_string()).unwrap().unwrap();
+        history.apply(&mut doc, rename);
+
+        let mut value: serde_json::Value = serde_json::from_str(&save_string(&doc)).unwrap();
+        // Truncate the saved layer_meta array to length 1, out of sync with the real 2-layer content.
+        value["layer_meta"].as_array_mut().unwrap().truncate(1);
+        let json = serde_json::to_string(&value).unwrap();
+
+        let back = load_str(&json).unwrap();
+        assert_eq!(back.layer_count(), 2, "the real layer count still comes from the layers themselves, not layer_meta");
+        assert_eq!(back.layer_name(0), Some("Layer 1"), "a length-mismatched layer_meta is discarded entirely, not partially trusted");
+        assert_eq!(back.layer_name(1), Some("Layer 2"));
+    }
+
+    /// A `layer_meta[i].name` far past `LayerMeta::MAX_NAME_LEN` must be truncated at load, not
+    /// rejected — the same never-reject posture every other untrusted-but-cosmetic field in this
+    /// loader already uses.
+    #[test]
+    fn a_layer_meta_name_far_past_the_length_cap_is_truncated_not_rejected() {
+        let doc = Document::new(2, 2);
+        let mut value: serde_json::Value = serde_json::from_str(&save_string(&doc)).unwrap();
+        let huge_name = "x".repeat(LayerMeta::MAX_NAME_LEN * 4);
+        value["layer_meta"][0]["name"] = serde_json::Value::String(huge_name);
+        let json = serde_json::to_string(&value).unwrap();
+
+        let back = load_str(&json).unwrap();
+        let name = back.layer_name(0).unwrap();
+        assert_eq!(name.chars().count(), LayerMeta::MAX_NAME_LEN, "the loaded name must be clamped to the cap, not rejected");
     }
 }

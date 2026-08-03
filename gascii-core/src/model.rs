@@ -101,6 +101,40 @@ pub struct DocExtent {
     pub height: u16,
 }
 
+/// A layer's document-global identity: name + visibility. Kept in lockstep with every frame's own
+/// layer count only along the sanctioned mutation path (`layer_ops.rs` + the format loader) — see
+/// `Document::layer_visible`'s doc comment for why nothing else is required to honor that lockstep.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct LayerMeta {
+    pub name: String,
+    #[serde(default = "LayerMeta::default_visible")]
+    pub visible: bool,
+}
+impl LayerMeta {
+    /// Sane upper bound on a layer's own name — untrusted file input and a plugin-driven rename
+    /// are otherwise unbounded, and a name is both stored/round-tripped and painted into the
+    /// layers panel every frame. Generous enough that no real name gets close to it.
+    pub const MAX_NAME_LEN: usize = 256;
+    /// `pub(crate)`: also used as `io/gascii_json.rs`'s `FileLayerMeta` serde default, not just
+    /// `LayerMeta`'s own.
+    pub(crate) fn default_visible() -> bool {
+        true
+    }
+    /// `"Layer {index + 1}"`, visible — the name a freshly added layer or a synthesized-at-load
+    /// placeholder both get.
+    pub(crate) fn default_named(index: usize) -> Self {
+        LayerMeta { name: format!("Layer {}", index + 1), visible: true }
+    }
+    /// Truncates `name` to `MAX_NAME_LEN` chars (never rejects — degrades sanely, same posture as
+    /// `clamp_frame_duration_ms`), cutting on a char boundary so multi-byte glyphs never split.
+    pub(crate) fn clamp_name(name: String) -> String {
+        match name.char_indices().nth(Self::MAX_NAME_LEN) {
+            Some((byte_idx, _)) => name[..byte_idx].to_string(),
+            None => name,
+        }
+    }
+}
+
 /// A document's own opaque black — the default background for a document that predates this
 /// field, and the New dialog's starting well value.
 fn default_background() -> Rgba {
@@ -120,6 +154,15 @@ pub struct Frame {
 impl Frame {
     pub fn blank(width: u16, height: u16) -> Self {
         Frame { layers: vec![Layer::blank(width, height)], duration_override: None }
+    }
+    /// A blank frame with exactly `layer_count` blank layers (at least 1) — for a caller (e.g. a
+    /// new animation frame) that must match a document's *current* layer count rather than always
+    /// assuming one, unlike `blank`.
+    pub fn blank_with_layers(width: u16, height: u16, layer_count: usize) -> Self {
+        Frame {
+            layers: (0..layer_count.max(1)).map(|_| Layer::blank(width, height)).collect(),
+            duration_override: None,
+        }
     }
 }
 
@@ -149,6 +192,16 @@ pub struct Document {
     /// `pub(crate)`, same reasoning. Structural ops route their before/after active_frame through
     /// the `Edit` payload rather than allowing a direct external write.
     pub(crate) active_frame: usize,
+    /// `pub(crate)`, mirroring `frames`' own visibility rationale: every structural change
+    /// (add/remove/reorder/rename/show-hide) MUST go through `layer_ops.rs` + `History`. Its length
+    /// is the document's own layer-count ground truth (`layer_count()`) — see `layer_visible`'s doc
+    /// comment for how a mismatch against an individual frame's `layers.len()` is tolerated, not
+    /// enforced as a hard invariant.
+    pub(crate) layer_meta: Vec<LayerMeta>,
+    /// `pub(crate)`, same reasoning as `active_frame`. Structural layer ops route their
+    /// before/after active_layer through the `Edit` payload rather than allowing a direct external
+    /// write.
+    pub(crate) active_layer: usize,
 }
 impl Document {
     pub const DEFAULT_WIDTH: u16 = 120;
@@ -204,6 +257,8 @@ impl Document {
             loop_playback: true,
             frames: vec![Frame::blank(width, height)],
             active_frame: 0,
+            layer_meta: vec![LayerMeta::default_named(0)],
+            active_layer: 0,
         }
     }
     /// Default new document: 120×40.
@@ -234,6 +289,9 @@ impl Document {
     /// `pub`, mirroring the field's own visibility before frames existed (`layers` was a fully public
     /// `Vec<Layer>`) — layer structure was never `History`-tracked, so this preserves exactly the
     /// mutation surface that already existed, just reached through a method instead of a field.
+    /// `layer_ops.rs` is the sanctioned path for anything the layers UI needs to stay consistent
+    /// (`layer_meta`, `active_layer`, undo/redo) — reaching for this escape hatch instead risks
+    /// desyncing those from the layer stack it just changed.
     pub fn layers_mut(&mut self) -> &mut Vec<Layer> {
         &mut self.frames[self.active_frame].layers
     }
@@ -314,6 +372,35 @@ impl Document {
     /// out-of-bounds `frame`.
     pub fn resolved_frame_duration_ms(&self, frame: usize) -> Option<u32> {
         self.frames.get(frame).map(|f| f.duration_override.unwrap_or(self.frame_duration_ms))
+    }
+
+    /// The document's own layer-count ground truth — `layer_meta.len()`, not any individual
+    /// frame's `layers.len()` (see `layer_visible`'s doc comment for why those two can diverge).
+    pub fn layer_count(&self) -> usize {
+        self.layer_meta.len()
+    }
+    pub fn active_layer(&self) -> usize {
+        self.active_layer
+    }
+    /// `false` (no-op, cursor unchanged) if `idx` is out of bounds.
+    pub fn set_active_layer(&mut self, idx: usize) -> bool {
+        if idx < self.layer_meta.len() {
+            self.active_layer = idx;
+            true
+        } else {
+            false
+        }
+    }
+    /// `true` for an out-of-range `layer` — permissive default, mirroring the tolerant stance
+    /// `layer_meta` takes toward a hand-built `Document` whose layer content and metadata have
+    /// drifted out of lockstep (see the `layer_meta` field doc): a missing metadata entry must
+    /// never hide content that's actually there.
+    pub fn layer_visible(&self, layer: usize) -> bool {
+        self.layer_meta.get(layer).is_none_or(|m| m.visible)
+    }
+    /// `None` only for an out-of-range `layer`.
+    pub fn layer_name(&self, layer: usize) -> Option<&str> {
+        self.layer_meta.get(layer).map(|m| m.name.as_str())
     }
 }
 
@@ -582,5 +669,50 @@ mod tests {
             Document::MAX_WIDTH as usize * Document::MAX_HEIGHT as usize * Document::MAX_LAYERS,
             "the derived joint budget must not silently desync from its three source constants"
         );
+    }
+
+    // --- layer substrate ---
+
+    #[test]
+    fn document_new_seeds_exactly_one_visible_layer_named_layer_1() {
+        let doc = Document::new(4, 3);
+        assert_eq!(doc.layer_count(), 1);
+        assert_eq!(doc.active_layer(), 0);
+        assert_eq!(doc.layer_name(0), Some("Layer 1"));
+        assert!(doc.layer_visible(0));
+    }
+
+    #[test]
+    fn layer_visible_defaults_to_true_for_an_out_of_range_index() {
+        let doc = Document::new(4, 3);
+        assert!(doc.layer_visible(0));
+        assert!(doc.layer_visible(99), "an out-of-range layer must default to visible, never hide content that's actually there");
+    }
+
+    #[test]
+    fn layer_name_returns_none_for_an_out_of_range_index() {
+        let doc = Document::new(4, 3);
+        assert_eq!(doc.layer_name(99), None);
+    }
+
+    #[test]
+    fn set_active_layer_rejects_an_out_of_bounds_index_and_leaves_the_cursor_unchanged() {
+        let mut doc = Document::new(4, 4);
+        assert!(!doc.set_active_layer(1), "only layer 0 exists");
+        assert_eq!(doc.active_layer(), 0, "cursor must be unchanged after a rejected set");
+    }
+
+    #[test]
+    fn frame_blank_with_layers_builds_the_requested_layer_count() {
+        let frame = Frame::blank_with_layers(3, 2, 4);
+        assert_eq!(frame.layers.len(), 4);
+        assert!(frame.layers.iter().all(|l| l.cells().len() == 6));
+        assert!(frame.layers.iter().all(|l| l.cells().iter().all(Cell::is_blank)));
+    }
+
+    #[test]
+    fn frame_blank_with_layers_clamps_a_zero_layer_count_up_to_one() {
+        let frame = Frame::blank_with_layers(2, 2, 0);
+        assert_eq!(frame.layers.len(), 1, "a document must never have zero layers, even from a raw constructor call");
     }
 }

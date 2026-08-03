@@ -1,5 +1,26 @@
 use gascii_core::Edit;
 
+/// A non-`Edit` document property a plugin's `panel`/`tick` wants overwritten directly — the host
+/// applies each as a plain field write outside `History`, not an undo entry. New document
+/// properties join this enum, not a new field on `PanelOutcome` — this enum is the resolution of
+/// the growth policy that struct used to carry.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DocProperty {
+    /// Moves the editing cursor to a frame index. Not itself undoable — only structural
+    /// `frame_ops::*` edits touch `History`; the cursor move itself is a plain field write the
+    /// host resyncs on undo/redo, mirroring `ActiveLayer`'s identical contract below.
+    ActiveFrame(usize),
+    /// Overwrites `Document.loop_playback` directly — that field is a plain, non-`Edit`-tracked
+    /// "set-and-forget" document property (mirrors `background`'s own precedent).
+    LoopPlayback(bool),
+    /// Overwrites `Document.frame_duration_ms` (the document-level default playback duration)
+    /// directly — the same plain, non-`Edit`-tracked "set-and-forget" shape as `LoopPlayback`, for
+    /// the identical reason (mirrors `background`'s own precedent).
+    DefaultFrameDuration(u32),
+    /// Moves the editing cursor to a layer index. Not itself undoable, mirroring `ActiveFrame`.
+    ActiveLayer(usize),
+}
+
 /// What a plugin's `panel` wants to happen to the document this frame — collected by the host,
 /// never applied by the plugin itself. Mirrors `gascii_core::frame_ops`'s own "pure value describes
 /// the change; the caller with full context applies it" contract, one layer further out.
@@ -9,25 +30,9 @@ pub struct PanelOutcome {
     /// into one `Edit`, so History's granularity matches what the user actually did one click at a
     /// time.
     pub edits: Vec<Edit>,
-    /// A request to move the editing cursor. Not itself undoable — mirrors `active_layer`'s own
-    /// plain-session-state precedent; only structural `frame_ops::*` edits touch `History`. `None`
-    /// means "no change requested this frame."
-    pub set_active_frame: Option<usize>,
-    /// A request to overwrite `Document.loop_playback` directly — that field is a plain, non-`Edit`-
-    /// tracked "set-and-forget" document property (mirrors `background`'s own precedent), so this
-    /// mirrors `set_active_frame`'s exact shape: a plain field write the host applies outside
-    /// `History`, not an undo entry. `None` means "no change requested this frame."
-    pub set_loop_playback: Option<bool>,
-    /// A request to overwrite `Document.frame_duration_ms` (the document-level default playback
-    /// duration) directly — the same plain, non-`Edit`-tracked "set-and-forget" shape as
-    /// `set_loop_playback`, for the identical reason (mirrors `background`'s own precedent). `None`
-    /// means "no change requested this frame."
-    ///
-    /// Growth policy for this struct: one `Option<T>` field per non-`Edit` document property the
-    /// host applies outside `History`. If this list reaches four, replace it with a
-    /// `Vec<DocProperty>` enum so `drain_panel_outcomes` gets an exhaustive match instead of one
-    /// more hand-written `if let` per property.
-    pub set_default_frame_duration: Option<u32>,
+    /// Non-`Edit` document properties this outcome requests, applied in order via a plain field
+    /// write outside `History` — see `DocProperty`.
+    pub properties: Vec<DocProperty>,
     /// A readable failure message for a control this panel drew that could not carry out its
     /// requested change (e.g. a `frame_ops::*` call rejected by `MAX_FRAMES`/the cell budget). The
     /// host writes this straight into `last_error`, the same channel every other structural action
@@ -46,9 +51,24 @@ mod tests {
     fn default_outcome_requests_nothing() {
         let outcome = PanelOutcome::default();
         assert!(outcome.edits.is_empty());
-        assert!(outcome.set_active_frame.is_none());
-        assert!(outcome.set_loop_playback.is_none());
-        assert!(outcome.set_default_frame_duration.is_none());
+        assert!(outcome.properties.is_empty());
         assert!(outcome.error.is_none());
+    }
+
+    /// Every variant round-trips through construction and an exhaustive match — pins the enum's
+    /// shape so a future variant addition is caught here as a non-exhaustive-match compile error,
+    /// not silently ignored by a consumer's `match`.
+    #[test]
+    fn doc_property_variants_construct_and_match_exhaustively() {
+        let props =
+            vec![DocProperty::ActiveFrame(3), DocProperty::LoopPlayback(true), DocProperty::DefaultFrameDuration(120), DocProperty::ActiveLayer(2)];
+        for p in props {
+            match p {
+                DocProperty::ActiveFrame(i) => assert_eq!(i, 3),
+                DocProperty::LoopPlayback(v) => assert!(v),
+                DocProperty::DefaultFrameDuration(ms) => assert_eq!(ms, 120),
+                DocProperty::ActiveLayer(i) => assert_eq!(i, 2),
+            }
+        }
     }
 }

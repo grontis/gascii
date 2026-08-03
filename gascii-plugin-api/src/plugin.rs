@@ -173,10 +173,10 @@ mod tests {
             p.options_ui("anything", ui, geom(), &host);
             let tick_outcome = p.tick(ui, false, false, &host);
             assert!(tick_outcome.edits.is_empty(), "default tick must request no edits");
-            assert!(tick_outcome.set_active_frame.is_none(), "default tick must not request a frame switch");
+            assert!(tick_outcome.properties.is_empty(), "default tick must not request a document property change");
             let outcome = p.panel(ui, false, &host);
             assert!(outcome.edits.is_empty(), "default panel must request no edits");
-            assert!(outcome.set_active_frame.is_none(), "default panel must not request a frame switch");
+            assert!(outcome.properties.is_empty(), "default panel must not request a document property change");
         });
 
         assert!(NullPlugin::tool_capabilities().is_empty());

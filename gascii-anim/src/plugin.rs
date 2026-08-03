@@ -1,5 +1,5 @@
 use egui::Ui;
-use gascii_plugin_api::{CanvasRenderer, PanelOutcome, Plugin, PluginDescriptor, PluginHost, PluginShortcut};
+use gascii_plugin_api::{CanvasRenderer, DocProperty, PanelOutcome, Plugin, PluginDescriptor, PluginHost, PluginShortcut};
 
 use crate::decorator::OnionRenderer;
 use crate::shared::SharedState;
@@ -184,12 +184,12 @@ impl Plugin for AnimPlugin {
             let doc = host.document();
             if prev {
                 if let Some(idx) = doc.active_frame().checked_sub(1) {
-                    outcome.set_active_frame = Some(idx);
+                    outcome.properties.push(DocProperty::ActiveFrame(idx));
                 }
             } else if next {
                 let active = doc.active_frame();
                 if active + 1 < doc.frame_count() {
-                    outcome.set_active_frame = Some(active + 1);
+                    outcome.properties.push(DocProperty::ActiveFrame(active + 1));
                 }
             }
 
@@ -274,6 +274,15 @@ mod tests {
         }
     }
 
+    /// Extracts the single `DocProperty::ActiveFrame` a test outcome carries, if any — the read
+    /// side of the migration from `PanelOutcome::set_active_frame`.
+    fn active_frame_of(outcome: &PanelOutcome) -> Option<usize> {
+        outcome.properties.iter().find_map(|p| match p {
+            DocProperty::ActiveFrame(i) => Some(*i),
+            _ => None,
+        })
+    }
+
     #[test]
     fn tool_capabilities_is_empty() {
         assert!(AnimPlugin::tool_capabilities().is_empty());
@@ -297,7 +306,7 @@ mod tests {
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| outcome = Some(p.panel(ui, false, &host)));
         let outcome = outcome.unwrap();
         assert!(outcome.edits.is_empty());
-        assert!(outcome.set_active_frame.is_none());
+        assert!(active_frame_of(&outcome).is_none());
     }
 
     #[test]
@@ -691,7 +700,7 @@ mod tests {
         raw.events.push(no_modifier_key_event(egui::Key::Comma));
         let mut outcome = None;
         let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, false, false, &host)));
-        assert_eq!(outcome.unwrap().set_active_frame, Some(0));
+        assert_eq!(active_frame_of(&outcome.unwrap()), Some(0));
     }
 
     #[test]
@@ -704,7 +713,7 @@ mod tests {
         raw.events.push(no_modifier_key_event(egui::Key::Comma));
         let mut outcome = None;
         let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, false, false, &host)));
-        assert_eq!(outcome.unwrap().set_active_frame, None, "there is no frame before 0");
+        assert_eq!(active_frame_of(&outcome.unwrap()), None, "there is no frame before 0");
     }
 
     #[test]
@@ -717,7 +726,7 @@ mod tests {
         raw.events.push(no_modifier_key_event(egui::Key::Period));
         let mut outcome = None;
         let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, false, false, &host)));
-        assert_eq!(outcome.unwrap().set_active_frame, Some(1));
+        assert_eq!(active_frame_of(&outcome.unwrap()), Some(1));
     }
 
     /// Mirrors `tick_clamps_playback_frame_after_frame_count_shrinks_between_ticks`'s own edge
@@ -734,7 +743,7 @@ mod tests {
         raw.events.push(no_modifier_key_event(egui::Key::Period));
         let mut outcome = None;
         let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, false, false, &host)));
-        assert_eq!(outcome.unwrap().set_active_frame, None, "there is no frame past the last one");
+        assert_eq!(active_frame_of(&outcome.unwrap()), None, "there is no frame past the last one");
     }
 
     #[test]
@@ -795,7 +804,7 @@ mod tests {
         let mut outcome = None;
         let _ = ctx.run_ui(raw, |ui| outcome = Some(p.tick(ui, true, false, &host)));
         let outcome = outcome.unwrap();
-        assert_eq!(outcome.set_active_frame, None, "',' must be suppressed while focused");
+        assert_eq!(active_frame_of(&outcome), None, "',' must be suppressed while focused");
         assert!(outcome.edits.is_empty(), "Shift+D must be suppressed while focused");
     }
 }

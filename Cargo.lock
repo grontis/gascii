@@ -1248,6 +1248,7 @@ dependencies = [
  "gascii-anim",
  "gascii-core",
  "gascii-density-brush",
+ "gascii-layers",
  "gascii-plugin-api",
  "gascii-stylus",
  "image",
@@ -1277,6 +1278,15 @@ dependencies = [
 
 [[package]]
 name = "gascii-density-brush"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "gascii-core",
+ "gascii-plugin-api",
+]
+
+[[package]]
+name = "gascii-layers"
 version = "0.1.0"
 dependencies = [
  "egui",

@@ -92,21 +92,25 @@ impl GasciiApp {
             for edit in outcome.edits {
                 self.apply_edit(edit, None);
             }
-            if let Some(idx) = outcome.set_active_frame {
-                self.switch_active_frame(idx);
-            }
-            if let Some(loop_playback) = outcome.set_loop_playback {
-                // A plain field write, not an `Edit` — matches `Document.loop_playback`'s own
-                // "set-and-forget, never History-tracked" contract (see `PanelOutcome::
-                // set_loop_playback`'s doc comment). `is_dirty()` covers this via the saved
-                // session-meta snapshot (see `saved_loop_playback`'s doc comment) — no separate
-                // "mark dirty" call needed.
-                self.doc.loop_playback = loop_playback;
-            }
-            if let Some(duration_ms) = outcome.set_default_frame_duration {
-                // Same shape as `set_loop_playback` above — a plain field write, never `History`-
-                // tracked (see `PanelOutcome::set_default_frame_duration`'s doc comment).
-                self.doc.frame_duration_ms = duration_ms;
+            for prop in outcome.properties {
+                match prop {
+                    gascii_plugin_api::DocProperty::ActiveFrame(idx) => self.switch_active_frame(idx),
+                    gascii_plugin_api::DocProperty::ActiveLayer(idx) => self.switch_active_layer(idx),
+                    gascii_plugin_api::DocProperty::LoopPlayback(loop_playback) => {
+                        // A plain field write, not an `Edit` — matches `Document.loop_playback`'s
+                        // own "set-and-forget, never History-tracked" contract (see
+                        // `DocProperty::LoopPlayback`'s doc comment). `is_dirty()` covers this via
+                        // the saved session-meta snapshot (see `saved_loop_playback`'s doc
+                        // comment) — no separate "mark dirty" call needed.
+                        self.doc.loop_playback = loop_playback;
+                    }
+                    gascii_plugin_api::DocProperty::DefaultFrameDuration(duration_ms) => {
+                        // Same shape as `LoopPlayback` above — a plain field write, never
+                        // `History`-tracked (see `DocProperty::DefaultFrameDuration`'s doc
+                        // comment).
+                        self.doc.frame_duration_ms = duration_ms;
+                    }
+                }
             }
             if let Some(msg) = outcome.error {
                 self.last_error = Some(msg);

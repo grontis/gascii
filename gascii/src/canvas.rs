@@ -59,11 +59,10 @@ impl CanvasRenderer for NaiveRenderer {
         let font_id = canvas_font_id(vp.font_px());
         for y in y0..y1 {
             for x in x0..x1 {
-                // Literal, not `app.active_layer`: this renderer has no `GasciiApp` handle, only
-                // `doc`. v1 documents have exactly one layer, so this is behavior-identical.
-                let Some(c) = doc.cell(0, x, y) else {
-                    continue;
-                };
+                // Composites every visible layer of the active frame — `composite_cell` is the
+                // same choke point every exporter and the animation overlay use, so hidden-layer
+                // exclusion and multi-layer content are handled in exactly one place.
+                let c = gascii_core::io::composite_cell(doc, doc.active_frame(), x, y);
                 let rect_min = vp.cell_to_screen(x, y, cell, origin);
                 if c.bg.3 > 0 {
                     let rect = Rect::from_min_size(rect_min, cell);
@@ -368,11 +367,25 @@ pub(crate) fn begin_gesture(app: &mut GasciiApp, b: Binding, x: u16, y: u16, alt
 
     if app.slot(b).kind == ToolKind::Eyedropper || alt_sample {
         // A one-shot pick, not a gesture: there is no ownership to track and no `Edit` to apply.
+        // Deliberately samples the active layer's own raw cell, not the composited (on-screen)
+        // color: the eyedropper is coherent with what the user is about to draw on top of, and a
+        // composited cell can blend content from multiple layers into a color that isn't actually
+        // present on any single one of them.
         if let Some(picked) = app.doc.cell(app.active_layer, x, y).copied() {
             let (fg, bg) = gascii_core::eyedrop(&picked);
             app.active_fg = fg;
             app.active_bg = bg;
         }
+        return false;
+    }
+
+    // A hidden active layer refuses strokes outright — Photoshop/Aseprite convention: no gesture
+    // starts, so there is nothing to flush or undo, only a readable status-bar message.
+    if !app.doc.layer_visible(app.active_layer) {
+        app.last_error = Some(format!(
+            "Layer \"{}\" is hidden — show it to draw on it",
+            app.doc.layer_name(app.active_layer).unwrap_or("?")
+        ));
         return false;
     }
 
@@ -1304,6 +1317,52 @@ mod tests {
         assert_eq!(via_plugins_bg_count, bare_bg_count, "both must paint the seeded cell's background the same number of times");
     }
 
+    /// `NaiveRenderer::paint` must composite every visible layer, not just layer 0 — the bug this
+    /// fix closes (`composite_cell` was previously bypassed by a literal `doc.cell(0, x, y)` read,
+    /// so content on any layer above 0 silently vanished from the canvas).
+    #[test]
+    fn naive_renderer_paints_content_from_a_non_zero_layer() {
+        let mut app = GasciiApp::headless();
+        let mut history = gascii_core::History::new();
+        let add = gascii_core::add_layer(&app.doc, app.doc.layer_count()).unwrap();
+        history.apply(&mut app.doc, add);
+
+        let (cx, cy) = (app.doc.width / 2, app.doc.height / 2);
+        let top_bg = Rgba(40, 60, 80, 255);
+        app.doc.set_cell(1, cx, cy, gascii_core::Cell { ch: 'Y', fg: Rgba::WHITE, bg: top_bg });
+        app.renderer = Box::new(NaiveRenderer);
+
+        let ctx = headless_ctx();
+        let out = ctx.run_ui(raw_input_with_screen(300.0, 300.0, false), |ui| show(ui, &mut app, false));
+        let seeded_color = color32(top_bg);
+        let count = out.shapes.iter().filter(|cs| matches!(&cs.shape, Shape::Rect(r) if r.fill == seeded_color)).count();
+        assert_eq!(count, 1, "content on layer 1 must be painted through composite_cell, not dropped");
+    }
+
+    /// A hidden layer's content must be excluded from the composited paint, even though the
+    /// underlying cell data is still there — proves the exclusion happens through `composite_cell`,
+    /// the single choke point every renderer and exporter shares.
+    #[test]
+    fn naive_renderer_excludes_a_hidden_layers_content() {
+        let mut app = GasciiApp::headless();
+        let mut history = gascii_core::History::new();
+        let add = gascii_core::add_layer(&app.doc, app.doc.layer_count()).unwrap();
+        history.apply(&mut app.doc, add);
+
+        let (cx, cy) = (app.doc.width / 2, app.doc.height / 2);
+        let hidden_bg = Rgba(40, 60, 80, 255);
+        app.doc.set_cell(1, cx, cy, gascii_core::Cell { ch: 'Y', fg: Rgba::WHITE, bg: hidden_bg });
+        let hide = gascii_core::set_layer_visibility(&app.doc, 1, false).unwrap().unwrap();
+        history.apply(&mut app.doc, hide);
+        app.renderer = Box::new(NaiveRenderer);
+
+        let ctx = headless_ctx();
+        let out = ctx.run_ui(raw_input_with_screen(300.0, 300.0, false), |ui| show(ui, &mut app, false));
+        let seeded_color = color32(hidden_bg);
+        let count = out.shapes.iter().filter(|cs| matches!(&cs.shape, Shape::Rect(r) if r.fill == seeded_color)).count();
+        assert_eq!(count, 0, "a hidden layer's content must never reach the composited paint");
+    }
+
     /// The focus-loss cancel path (`canvas.rs`'s own focus-edge block) must clear the pressure
     /// override alongside the stroke it belongs to — otherwise a stale override could leak into
     /// whatever stroke happens next after focus returns.
@@ -1415,6 +1474,69 @@ mod tests {
         assert_eq!(app.active_bg, expected_bg);
         assert_eq!(app.slot(Binding::L).kind, ToolKind::Pencil, "alt_sample must never rebind the slot's own kind");
         assert_eq!(app.stroke_owner, None, "a one-shot pick must not claim stroke ownership");
+    }
+
+    /// A press against a hidden active layer must refuse to start a stroke at all: no tool session,
+    /// no document mutation, a readable `last_error` — the Photoshop/Aseprite convention, not a
+    /// silent "draws, then vanishes on commit."
+    #[test]
+    fn begin_gesture_on_a_hidden_active_layer_starts_no_session_and_sets_last_error() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Pencil);
+        let hide = gascii_core::set_layer_visibility(&app.doc, 0, false).unwrap().unwrap();
+        app.apply_edit(hide, None);
+        assert!(!app.doc.layer_visible(app.active_layer), "sanity: layer 0 is now hidden");
+
+        let before = app.doc.cell(0, 2, 2).copied();
+        let started = begin_gesture(&mut app, Binding::L, 2, 2, false, false);
+
+        assert!(!started, "a press on a hidden active layer must not start a gesture");
+        assert_eq!(app.stroke_owner, None, "no session may be started");
+        assert_eq!(app.doc.cell(0, 2, 2).copied(), before, "the document must be completely untouched");
+        assert!(app.last_error.is_some(), "a readable error must be surfaced");
+        assert!(app.last_error.as_deref().unwrap().contains("hidden"), "the message must explain why: {:?}", app.last_error);
+    }
+
+    /// The eyedropper's one-shot pick reads, never writes — it must still succeed against a hidden
+    /// active layer, unlike an ordinary stroke.
+    #[test]
+    fn begin_gesture_alt_sample_against_a_hidden_active_layer_still_succeeds() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Pencil);
+        app.doc.set_cell(app.active_layer, 2, 2, gascii_core::Cell {
+            ch: 'x',
+            fg: gascii_core::Rgba(10, 20, 30, 255),
+            bg: gascii_core::Rgba(40, 50, 60, 255),
+        });
+        let (expected_fg, expected_bg) = gascii_core::eyedrop(&app.doc.cell(app.active_layer, 2, 2).copied().unwrap());
+        let hide = gascii_core::set_layer_visibility(&app.doc, 0, false).unwrap().unwrap();
+        app.apply_edit(hide, None);
+
+        let started = begin_gesture(&mut app, Binding::L, 2, 2, true, false);
+
+        assert!(!started, "an Alt-sample press is a one-shot pick, not a gesture");
+        assert_eq!(app.active_fg, expected_fg, "the pick must succeed even against a hidden layer");
+        assert_eq!(app.active_bg, expected_bg);
+        assert!(app.last_error.is_none(), "a successful pick must not set an error");
+    }
+
+    /// Re-showing the layer (`SetLayerVisibility`) must immediately unblock the same press that was
+    /// refused while it was hidden.
+    #[test]
+    fn begin_gesture_succeeds_again_after_a_set_layer_visibility_edit_re_shows_the_layer() {
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Pencil);
+        let hide = gascii_core::set_layer_visibility(&app.doc, 0, false).unwrap().unwrap();
+        app.apply_edit(hide, None);
+        assert!(!begin_gesture(&mut app, Binding::L, 2, 2, false, false), "sanity: blocked while hidden");
+
+        let show = gascii_core::set_layer_visibility(&app.doc, 0, true).unwrap().unwrap();
+        app.apply_edit(show, None);
+        app.last_error = None;
+
+        let started = begin_gesture(&mut app, Binding::L, 2, 2, false, false);
+        assert!(started, "a press must succeed again once the active layer is shown");
+        assert_eq!(app.stroke_owner, Some(Binding::L));
     }
 
     /// The `!stroke_in_progress` gate `begin_gesture`'s doc comment describes is inherited from
