@@ -243,9 +243,10 @@ pub fn status_bar(ui: &mut Ui, app: &mut GasciiApp) {
     ui.spacing_mut().item_spacing.x = 20.0;
     let coord = app.hovered_cell.map(|(x, y)| format!("cell {x},{y}")).unwrap_or_else(|| "cell –".to_owned());
     super::status_bar::mono(ui, coord, false);
-    if let Some(err) = app.last_error.clone() {
+    if let Some((err, left)) = app.error_flash(std::time::Instant::now()) {
         let t = theme::current(ui.ctx());
         ui.label(egui::RichText::new(err).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_error));
+        ui.ctx().request_repaint_after(left);
     }
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         super::status_bar::mono(ui, format!("doc {}×{}", app.doc.width, app.doc.height), false);

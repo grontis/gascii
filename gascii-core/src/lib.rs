@@ -31,7 +31,7 @@ pub use io::export_png::{
 };
 pub use io::export_text::{export_text, export_text_frames, export_text_frames_with_trim};
 pub use io::gascii_json::{load_str, save_string, LoadError, CURRENT_VERSION};
-pub use io::{composite, composite_cell, composite_frame};
+pub use io::{composite, composite_cell, composite_frame, visible_layers};
 pub use join::{arms_of, char_of, join as join_arms, ArmSet};
 pub use model::{Cell, DocExtent, Document, Frame, Layer, LayerMeta, Rgba};
 pub use palette::{builtin_pages, validate_width, Page, WidthReject};

@@ -378,7 +378,7 @@ impl GasciiApp {
                     .color(t.fg_secondary),
             );
             if let Some(err) = &self.last_error {
-                ui.label(egui::RichText::new(err.clone()).color(t.fg_error));
+                ui.label(egui::RichText::new(err.text.clone()).color(t.fg_error));
             }
             ui.add_space(12.0);
             dialog::buttons(ui, "Cancel", "Resize")
@@ -397,14 +397,13 @@ impl GasciiApp {
                     }
                     Ok(None) => self.open_dialog = None, // same extent: silent close
                     Err(ResizeError::ZeroExtent) => {
-                        self.last_error = Some("resize: width and height must be at least 1".to_string());
+                        self.flash_error("resize: width and height must be at least 1");
                     }
                     Err(ResizeError::TooLarge { max_width, max_height, .. }) => {
-                        self.last_error =
-                            Some(format!("resize: exceeds the {max_width}x{max_height} maximum"));
+                        self.flash_error(format!("resize: exceeds the {max_width}x{max_height} maximum"));
                     }
                     Err(ResizeError::TotalCellBudgetExceeded { .. }) => {
-                        self.last_error = Some("resize: exceeds the maximum total cell budget".to_string());
+                        self.flash_error("resize: exceeds the maximum total cell budget");
                     }
                 }
             }
@@ -581,7 +580,7 @@ impl GasciiApp {
             ui.label(egui::RichText::new(readout).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary));
 
             if let Some(err) = &self.last_error {
-                ui.label(egui::RichText::new(err.clone()).color(t.fg_error));
+                ui.label(egui::RichText::new(err.text.clone()).color(t.fg_error));
             }
 
             ui.add_space(12.0);
@@ -620,7 +619,7 @@ impl GasciiApp {
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) => {
-                self.last_error = Some(format!("failed to load image: {e}"));
+                self.flash_error(format!("failed to load image: {e}"));
                 return;
             }
         };
@@ -633,7 +632,7 @@ impl GasciiApp {
                 self.image_bg_gen += 1;
                 self.last_error = None;
             }
-            Err(e) => self.last_error = Some(format!("failed to load image: {e}")),
+            Err(e) => self.flash_error(format!("failed to load image: {e}")),
         }
     }
 
@@ -686,7 +685,7 @@ impl GasciiApp {
                 self.last_error = None;
                 self.close_export_dialog();
             }
-            ExportOutcome::Failed(e) => self.last_error = Some(e),
+            ExportOutcome::Failed(e) => self.flash_error(e),
         }
     }
 

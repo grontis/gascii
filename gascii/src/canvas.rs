@@ -50,66 +50,65 @@ impl CanvasRenderer for NaiveRenderer {
         selection: Option<SelectionView>,
     ) {
         let (x0, y0, x1, y1) = visible;
-        let doc_bg = color32(doc.background);
 
         // The full-`doc_rect` background fill lives in `show()`, ahead of the trace-image block —
-        // not here — so the trace paints above it instead of being immediately painted over. This
-        // renderer only ever fills `doc_bg` per-cell (vacated float regions, pending-cell previews)
-        // from here down.
+        // not here — so the trace paints above it instead of being immediately painted over.
+        //
+        // Layers paint stacked ("acetate"), bottom to top: each visible layer's own backgrounds
+        // and glyphs in turn, so glyph ink from different layers can overlap visibly in one cell
+        // and only an opaque upper background occludes what's beneath. Pending stroke cells and a
+        // lifted float's vacated source region replace the ACTIVE layer's committed cells at their
+        // coordinates, painted in that layer's own z-slot — layers above still draw on top, and
+        // layers beneath show through wherever the preview cell is blank, the same result the
+        // commit will produce. (A doc-background fill for those regions would instead punch a hole
+        // through every other layer's ink.)
         let font_id = canvas_font_id(vp.font_px());
-        for y in y0..y1 {
-            for x in x0..x1 {
-                // Composites every visible layer of the active frame — `composite_cell` is the
-                // same choke point every exporter and the animation overlay use, so hidden-layer
-                // exclusion and multi-layer content are handled in exactly one place.
-                let c = gascii_core::io::composite_cell(doc, doc.active_frame(), x, y);
-                let rect_min = vp.cell_to_screen(x, y, cell, origin);
-                if c.bg.3 > 0 {
-                    let rect = Rect::from_min_size(rect_min, cell);
-                    painter.rect_filled(rect, 0.0, color32(c.bg));
+        let frame = doc.active_frame();
+        let pending_set: std::collections::HashSet<(u16, u16)> = pending.iter().map(|p| (p.x, p.y)).collect();
+        let lifted = selection.and_then(|s| s.lifted_source);
+        for layer in gascii_core::visible_layers(doc, frame) {
+            let is_active = layer == doc.active_layer();
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    if is_active && (pending_set.contains(&(x, y)) || lifted.as_ref().is_some_and(|r| r.contains(x, y))) {
+                        continue;
+                    }
+                    let Some(&c) = doc.cell_at(frame, layer, x, y) else { continue };
+                    let rect_min = vp.cell_to_screen(x, y, cell, origin);
+                    if c.bg.3 > 0 {
+                        painter.rect_filled(Rect::from_min_size(rect_min, cell), 0.0, color32(c.bg));
+                    }
+                    if c.ch != ' ' {
+                        painter.text(
+                            rect_min,
+                            Align2::LEFT_TOP,
+                            c.ch,
+                            font_id.clone(),
+                            color32(c.fg),
+                        );
+                    }
                 }
-                if c.ch != ' ' {
+            }
+            if !is_active {
+                continue;
+            }
+            for p in pending {
+                if p.x < x0 || p.x >= x1 || p.y < y0 || p.y >= y1 {
+                    continue;
+                }
+                let rect_min = vp.cell_to_screen(p.x, p.y, cell, origin);
+                if p.cell.bg.3 > 0 {
+                    painter.rect_filled(Rect::from_min_size(rect_min, cell), 0.0, color32(p.cell.bg));
+                }
+                if p.cell.ch != ' ' {
                     painter.text(
                         rect_min,
                         Align2::LEFT_TOP,
-                        c.ch,
+                        p.cell.ch,
                         font_id.clone(),
-                        color32(c.fg),
+                        color32(p.cell.fg),
                     );
                 }
-            }
-        }
-
-        // A floating stamp's vacated source region: painted as plain background, after doc cells
-        // and before the pending overlay, so it reads as erased under the float even though the
-        // document itself was never mutated.
-        if let Some(src) = selection.and_then(|s| s.lifted_source) {
-            painter.rect_filled(cell_rect_to_screen(src, vp, cell, origin), 0.0, doc_bg);
-        }
-
-        for p in pending {
-            if p.x < x0 || p.x >= x1 || p.y < y0 || p.y >= y1 {
-                continue;
-            }
-            let rect_min = vp.cell_to_screen(p.x, p.y, cell, origin);
-            let rect = Rect::from_min_size(rect_min, cell);
-            // A pending cell is the exact result the commit will write, so the preview must
-            // fully replace this destination cell down to the canvas background first — a Blank
-            // pending cell (ch ' ', transparent bg) would otherwise leave whatever's already
-            // painted there (the underlying doc glyph, or the vacated-source fill above) showing
-            // through, contradicting what the drop actually produces.
-            painter.rect_filled(rect, 0.0, doc_bg);
-            if p.cell.bg.3 > 0 {
-                painter.rect_filled(rect, 0.0, color32(p.cell.bg));
-            }
-            if p.cell.ch != ' ' {
-                painter.text(
-                    rect_min,
-                    Align2::LEFT_TOP,
-                    p.cell.ch,
-                    font_id.clone(),
-                    color32(p.cell.fg),
-                );
             }
         }
 
@@ -382,7 +381,7 @@ pub(crate) fn begin_gesture(app: &mut GasciiApp, b: Binding, x: u16, y: u16, alt
     // A hidden active layer refuses strokes outright — Photoshop/Aseprite convention: no gesture
     // starts, so there is nothing to flush or undo, only a readable status-bar message.
     if !app.doc.layer_visible(app.active_layer) {
-        app.last_error = Some(format!(
+        app.flash_error(format!(
             "Layer \"{}\" is hidden — show it to draw on it",
             app.doc.layer_name(app.active_layer).unwrap_or("?")
         ));
@@ -1363,6 +1362,35 @@ mod tests {
         assert_eq!(count, 0, "a hidden layer's content must never reach the composited paint");
     }
 
+    /// The acetate model: layers paint stacked, so a top-layer glyph with a transparent bg over a
+    /// bottom-layer glyph must leave BOTH glyphs' text shapes in the paint — the bottom layer's
+    /// ink is never dropped in favor of a flattened single glyph per cell.
+    #[test]
+    fn naive_renderer_paints_overlapping_glyphs_from_both_layers() {
+        let mut app = GasciiApp::headless();
+        let mut history = gascii_core::History::new();
+        let add = gascii_core::add_layer(&app.doc, app.doc.layer_count()).unwrap();
+        history.apply(&mut app.doc, add);
+
+        let (cx, cy) = (app.doc.width / 2, app.doc.height / 2);
+        let bottom_fg = Rgba(200, 10, 10, 255);
+        let top_fg = Rgba(10, 200, 10, 255);
+        app.doc.set_cell(0, cx, cy, gascii_core::Cell { ch: 'O', fg: bottom_fg, bg: Rgba::TRANSPARENT });
+        app.doc.set_cell(1, cx, cy, gascii_core::Cell { ch: 'X', fg: top_fg, bg: Rgba::TRANSPARENT });
+        app.renderer = Box::new(NaiveRenderer);
+
+        let ctx = headless_ctx();
+        let out = ctx.run_ui(raw_input_with_screen(300.0, 300.0, false), |ui| show(ui, &mut app, false));
+        let glyphs_of = |color: gascii_core::Rgba| {
+            out.shapes
+                .iter()
+                .filter(|cs| matches!(&cs.shape, Shape::Text(t) if t.fallback_color == color32(color)))
+                .count()
+        };
+        assert_eq!(glyphs_of(bottom_fg), 1, "the bottom layer's glyph must still be painted");
+        assert_eq!(glyphs_of(top_fg), 1, "the top layer's glyph must be painted over it");
+    }
+
     /// The focus-loss cancel path (`canvas.rs`'s own focus-edge block) must clear the pressure
     /// override alongside the stroke it belongs to — otherwise a stale override could leak into
     /// whatever stroke happens next after focus returns.
@@ -1494,7 +1522,7 @@ mod tests {
         assert_eq!(app.stroke_owner, None, "no session may be started");
         assert_eq!(app.doc.cell(0, 2, 2).copied(), before, "the document must be completely untouched");
         assert!(app.last_error.is_some(), "a readable error must be surfaced");
-        assert!(app.last_error.as_deref().unwrap().contains("hidden"), "the message must explain why: {:?}", app.last_error);
+        assert!(app.last_error_text().unwrap().contains("hidden"), "the message must explain why: {:?}", app.last_error_text());
     }
 
     /// The eyedropper's one-shot pick reads, never writes — it must still succeed against a hidden

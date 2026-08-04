@@ -35,10 +35,12 @@ pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
 
     // Errors take the flexible middle — the one place with room, and next to nothing they would
     // push around. `fg_error`, never `fg_text`: an error rendered like ordinary telemetry is an
-    // error the user misses.
-    if let Some(err) = app.last_error.clone() {
+    // error the user misses. The repaint at expiry is what erases the message on an otherwise
+    // idle screen — without it the last painted frame would show it indefinitely.
+    if let Some((err, left)) = app.error_flash(std::time::Instant::now()) {
         let t = theme::current(ui.ctx());
         ui.label(egui::RichText::new(err).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_error));
+        ui.ctx().request_repaint_after(left);
     }
 
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

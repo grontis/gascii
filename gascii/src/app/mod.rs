@@ -120,6 +120,17 @@ pub(crate) struct PluginRuntime {
     pub(crate) resume_pending: bool,
 }
 
+/// How long the status bar shows an `ErrorFlash` before it disappears on its own.
+pub(crate) const ERROR_FLASH_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// One error message plus the moment it was raised. The status bar stops showing it
+/// `ERROR_FLASH_TTL` after that moment (`GasciiApp::error_flash`); dialog-inline validation reads
+/// `text` directly and keeps it until the dialog resolves or clears it.
+pub(crate) struct ErrorFlash {
+    pub(crate) text: String,
+    pub(crate) at: std::time::Instant,
+}
+
 pub struct GasciiApp {
     pub(crate) doc: Document,
     pub(crate) viewport: Viewport,
@@ -283,7 +294,7 @@ pub struct GasciiApp {
     /// Up to 8 most-recently-opened/saved paths, most recent first. A failed re-open drops its
     /// entry rather than leaving a dead path in the list.
     pub(crate) recent_files: Vec<PathBuf>,
-    pub(crate) last_error: Option<String>,
+    pub(crate) last_error: Option<ErrorFlash>,
     /// The undo-stack edit id (`History::top_edit_id`) at the moment of the last successful save
     /// or load — `None` matches a fresh `History`'s own sentinel. `is_dirty` is a pure comparison
     /// against `self.history.top_edit_id()`; nothing else needs to know about this field.
@@ -660,7 +671,32 @@ impl GasciiApp {
             WidthReject::ZeroWidth => "zero-width character",
             WidthReject::DoubleWidth => "wider than one cell",
         };
-        self.last_error = Some(format!("typed {ch:?} rejected: {why}"));
+        self.flash_error(format!("typed {ch:?} rejected: {why}"));
+    }
+
+    /// Raises a status-bar error, stamping the moment it was raised so `error_flash` can expire it.
+    pub(crate) fn flash_error(&mut self, text: impl Into<String>) {
+        self.last_error = Some(ErrorFlash { text: text.into(), at: std::time::Instant::now() });
+    }
+
+    /// The status bar's view of `last_error`: the text plus the time left before it expires,
+    /// `None` once `ERROR_FLASH_TTL` has passed. Takes `now` rather than reading the clock so the
+    /// expiry decision is testable without waiting out the TTL.
+    pub(crate) fn error_flash(&self, now: std::time::Instant) -> Option<(&str, std::time::Duration)> {
+        let flash = self.last_error.as_ref()?;
+        let elapsed = now.saturating_duration_since(flash.at);
+        if elapsed >= ERROR_FLASH_TTL {
+            return None;
+        }
+        Some((flash.text.as_str(), ERROR_FLASH_TTL - elapsed))
+    }
+
+    /// `last_error`'s bare text, without the status bar's expiry rule. Production reads inside
+    /// dialog closures use the field directly (`&self.last_error` borrows one field; a method call
+    /// would borrow all of `self` and collide with the closure's other captures).
+    #[cfg(test)]
+    pub(crate) fn last_error_text(&self) -> Option<&str> {
+        self.last_error.as_ref().map(|e| e.text.as_str())
     }
 
     /// Tool-select (`P`/`E`/`I`/`T`/`F`/`R`/`L`/`S`), undo/redo, and Ctrl+C copy keys. The

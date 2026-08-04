@@ -1,8 +1,15 @@
-//! Layer-general compositing and file I/O. `composite_cell()` is the single choke point that turns
-//! one layer stack's worth of `Cell`s at a coordinate into one flattened `Cell`, honoring
-//! per-layer visibility; `composite_frame()` is the whole-sheet wrapper around it, and `composite()`
-//! is the active-frame convenience wrapper around that. Every exporter and every renderer builds on
-//! one of these three rather than re-walking layers itself.
+//! Layer-general compositing and file I/O. Two consumption models share the layer stack, and both
+//! keep hidden-layer exclusion inside this module:
+//!
+//! - **Stacked ("acetate") painting** — `visible_layers()` yields the paint order, and each
+//!   consumer (the canvas renderer, the animation playback overlay, PNG export) paints every
+//!   layer's own backgrounds and glyphs bottom-to-top. Glyph ink from different layers can overlap
+//!   visibly in one cell; only an opaque upper background occludes what's beneath. This is the
+//!   canonical on-screen/raster model.
+//! - **Flattening** — `composite_cell()` turns one coordinate's layer stack into one `Cell` (top
+//!   glyph wins the cell), with `composite_frame()`/`composite()` as whole-sheet and active-frame
+//!   wrappers. The only option for single-glyph-per-cell consumers: text export and thumbnails —
+//!   a `.txt` cell can't hold two overlapping characters.
 
 pub mod export_png;
 pub mod export_text;
@@ -32,12 +39,10 @@ pub fn composite_frame(doc: &Document, frame: usize) -> Option<Vec<Vec<Cell>>> {
 }
 
 /// Flattens a single cell at `(x, y)` across every visible layer of `frame`, bottom-to-top
-/// alpha-over compositing — `Cell::BLANK` for an out-of-bounds `frame`/coordinate. This is the one
-/// choke point every consumer of layered content composites through: `composite_frame` (and via it
-/// every exporter and thumbnail), the canvas's own default renderer, and the animation overlay all
-/// call this instead of reading a single literal layer, so hidden-layer exclusion and multi-layer
-/// content are handled in exactly one place, unconditionally — correct rendering never depends on
-/// any plugin being enabled.
+/// alpha-over compositing — `Cell::BLANK` for an out-of-bounds `frame`/coordinate. One glyph per
+/// cell, top wins: the flattening model for consumers that can only hold a single character per
+/// cell (text export, thumbnails). Painting consumers (canvas, playback overlay, PNG export) walk
+/// `visible_layers` and stack instead — see the module doc.
 pub fn composite_cell(doc: &Document, frame: usize, x: u16, y: u16) -> Cell {
     let Some(layers) = doc.frame_layers(frame) else { return Cell::BLANK };
     let mut out = Cell::BLANK;
@@ -49,6 +54,15 @@ pub fn composite_cell(doc: &Document, frame: usize, x: u16, y: u16) -> Cell {
         out = alpha_over(out, over);
     }
     out
+}
+
+/// Indices of `frame`'s visible layers, bottom to top — the paint order for stacked ("acetate")
+/// rendering. Empty for an out-of-bounds `frame`. Every painter that stacks layers walks this
+/// instead of `0..layer_count` so hidden-layer exclusion stays here, next to `composite_cell`'s
+/// own — the two models can never disagree about which layers exist.
+pub fn visible_layers(doc: &Document, frame: usize) -> Vec<usize> {
+    let Some(layers) = doc.frame_layers(frame) else { return Vec::new() };
+    (0..layers.len()).filter(|&layer| doc.layer_visible(layer)).collect()
 }
 
 fn alpha_over(under: Cell, over: Cell) -> Cell {
@@ -85,6 +99,43 @@ mod tests {
 
     fn cell(ch: char, fg: Rgba, bg: Rgba) -> Cell {
         Cell { ch, fg, bg }
+    }
+
+    #[test]
+    fn visible_layers_yields_bottom_to_top_and_skips_hidden_layers() {
+        let mut doc = Document::new(2, 2);
+        let mut history = crate::edit::History::new();
+        for _ in 0..2 {
+            let edit = crate::layer_ops::add_layer(&doc, doc.layer_count()).unwrap();
+            history.apply(&mut doc, edit);
+        }
+        assert_eq!(visible_layers(&doc, 0), vec![0, 1, 2]);
+
+        let hide = crate::layer_ops::set_layer_visibility(&doc, 1, false).unwrap().unwrap();
+        history.apply(&mut doc, hide);
+        assert_eq!(visible_layers(&doc, 0), vec![0, 2], "a hidden layer is excluded, order stays bottom-to-top");
+    }
+
+    #[test]
+    fn visible_layers_of_an_out_of_bounds_frame_is_empty() {
+        let doc = Document::new(2, 2);
+        assert!(visible_layers(&doc, 5).is_empty());
+    }
+
+    /// The two consumption models must agree on which layers exist: a layer `composite_cell`
+    /// excludes must also be absent from `visible_layers`, and vice versa.
+    #[test]
+    fn visible_layers_and_composite_cell_agree_on_hidden_layer_exclusion() {
+        let mut doc = Document::new(1, 1);
+        let mut history = crate::edit::History::new();
+        let edit = crate::layer_ops::add_layer(&doc, 1).unwrap();
+        history.apply(&mut doc, edit);
+        doc.set_cell(1, 0, 0, cell('t', Rgba::WHITE, Rgba::TRANSPARENT));
+        let hide = crate::layer_ops::set_layer_visibility(&doc, 1, false).unwrap().unwrap();
+        history.apply(&mut doc, hide);
+
+        assert_eq!(visible_layers(&doc, 0), vec![0]);
+        assert_eq!(composite_cell(&doc, 0, 0, 0), Cell::BLANK, "the flattened view excludes the same hidden layer");
     }
 
     #[test]

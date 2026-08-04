@@ -106,14 +106,16 @@ impl CanvasRenderer for OnionRenderer {
 }
 
 /// Paints frame `frame`'s committed cells only — no pending/hover/caret/selection overlay. Mirrors
-/// `NaiveRenderer::paint`'s own cell-drawing loop in shape, compositing an explicit frame via
-/// `composite_cell` instead of the active one.
+/// `NaiveRenderer::paint`'s own stacked ("acetate") layer walk, against an explicit frame instead
+/// of the active one, so playback shows exactly what editing that frame shows.
 fn paint_frame_cells(painter: &Painter, doc: &Document, frame: usize, ctx: &PaintCtx) {
     let (x0, y0, x1, y1) = ctx.visible;
-    for y in y0..y1 {
-        for x in x0..x1 {
-            let c = gascii_core::composite_cell(doc, frame, x, y);
-            paint_cell(painter, &c, ctx, x, y, None);
+    for layer in gascii_core::visible_layers(doc, frame) {
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let Some(&c) = doc.cell_at(frame, layer, x, y) else { continue };
+                paint_cell(painter, &c, ctx, x, y, None);
+            }
         }
     }
 }

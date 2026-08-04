@@ -227,19 +227,19 @@ impl GasciiApp {
             // Matches "Resize Canvas…"'s own convention: a specific, readable message per error
             // variant, not a raw `{e:?}` dump.
             Err(FrameOpError::TooManyFrames { max, .. }) => {
-                self.last_error = Some(format!("add frame: exceeds the {max} maximum"));
+                self.flash_error(format!("add frame: exceeds the {max} maximum"));
             }
             Err(FrameOpError::TotalCellBudgetExceeded { .. }) => {
-                self.last_error = Some("add frame: exceeds the maximum total cell budget".to_string());
+                self.flash_error("add frame: exceeds the maximum total cell budget");
             }
             Err(FrameOpError::TooManyLayers { max, .. }) => {
-                self.last_error = Some(format!("add frame: exceeds the {max} maximum layer count"));
+                self.flash_error(format!("add frame: exceeds the {max} maximum layer count"));
             }
             Err(FrameOpError::IndexOutOfBounds { .. } | FrameOpError::LastFrame) => {
                 // Unreachable from this call site: `duplicate_frame` is always given
                 // `self.doc.active_frame()`, a provably in-range index, and never returns
                 // `LastFrame` (that's `remove_frame`'s own error).
-                self.last_error = Some("add frame: unexpected error".to_string());
+                self.flash_error("add frame: unexpected error");
             }
         }
     }
@@ -379,7 +379,7 @@ impl GasciiApp {
             // whatever tool is mid-gesture active — landing the pasted stamp on `accept_stamp`
             // would then hit that tool's default no-op and discard the clipboard content with no
             // trace. Skip the paste outright and say so, rather than silently losing it.
-            self.last_error = Some("paste ignored: a drag is in progress".to_string());
+            self.flash_error("paste ignored: a drag is in progress");
             return;
         }
         self.flush_all(); // drop any current float before reading self.doc / switching tools
@@ -389,7 +389,7 @@ impl GasciiApp {
             let (patch, dropped) =
                 CellPatch::from_external_text(text, self.active_fg, self.active_bg);
             if dropped > 0 {
-                self.last_error = Some(format!("paste: {dropped} character(s) rejected"));
+                self.flash_error(format!("paste: {dropped} character(s) rejected"));
             }
             patch
         };

@@ -1,9 +1,10 @@
-//! PNG export: composites a `Document` (via `gascii_core::composite`) and rasterizes each cell's
-//! glyph through `fontdue`, encoding the result via `image`. `gascii-core` stays headless — the
-//! only thing it contributes is `validate_png_dimensions`, which this module treats as the sole
-//! authority on whether a pixel buffer may be allocated at all.
+//! PNG export: paints a `Document`'s visible layers stacked ("acetate", bottom to top — the same
+//! model the canvas renders, via `gascii_core::visible_layers`) and rasterizes each cell's glyph
+//! through `fontdue`, encoding the result via `image`. `gascii-core` stays headless — the only
+//! things it contributes are the layer order and `validate_png_dimensions`, which this module
+//! treats as the sole authority on whether a pixel buffer may be allocated at all.
 
-use gascii_core::{composite, composite_frame, validate_png_dimensions, Cell, Document, Rgba};
+use gascii_core::{validate_png_dimensions, visible_layers, Document, Rgba};
 
 #[derive(Debug)]
 pub enum PngExportAppError {
@@ -138,28 +139,29 @@ pub(crate) fn build_raster_assets(
     RasterAssets::prepare(px_w, px_h, cell_px, bg_image)
 }
 
-/// Rasterizes an already-composited grid at `cell_px` pixels per cell into a straight-alpha RGBA8
-/// pixel buffer (row-major, `4 * width * height` bytes) plus its `(width, height)`. `opaque_bg`
-/// pre-fills every pixel with that color before compositing cell content over it (`None` keeps the
-/// buffer transparent, so a cell's own transparent bg stays transparent in the result). `bg_image`
-/// — `(source, opacity)` — is composited next, beneath the cells and above `opaque_bg`: the source
-/// is resized to *cover* (fill, crop the overflow, see `image_bg::fit_cover`) the `px_w`×`px_h`
-/// frame and blended in at `opacity`. The resize itself runs in premultiplied-alpha space (see
-/// `premultiply`/`unpremultiply`) so a translucent source's soft edges don't fringe. `None` skips it
-/// entirely (today's export, unchanged).
+/// Rasterizes frame `frame`'s visible layers, stacked bottom to top, at `cell_px` pixels per cell
+/// into a straight-alpha RGBA8 pixel buffer (row-major, `4 * width * height` bytes) plus its
+/// `(width, height)`. Each layer's own cell backgrounds and glyphs blend over everything painted
+/// so far — the same acetate model the canvas shows, so glyph ink from different layers overlaps
+/// in the export exactly as on screen. `opaque_bg` pre-fills every pixel with that color before
+/// any layer is painted (`None` keeps the buffer transparent, so a cell's own transparent bg stays
+/// transparent in the result). `bg_image` — `(source, opacity)` — is composited next, beneath the
+/// cells and above `opaque_bg`: the source is resized to *cover* (fill, crop the overflow, see
+/// `image_bg::fit_cover`) the `px_w`×`px_h` frame and blended in at `opacity`. The resize itself
+/// runs in premultiplied-alpha space (see `premultiply`/`unpremultiply`) so a translucent source's
+/// soft edges don't fringe. `None` skips it entirely.
 ///
-/// The pure pixel-math half of PNG export, parameterized by an explicit composited grid so both
-/// the active-frame (`rasterize_rgba8`) and frame-explicit (`rasterize_frame_rgba8`) entry points
-/// share one glyph/background blending loop. `assets` carries everything fixed across an export's
-/// frames (the parsed font, the pre-resized background, the glyph bitmap cache) — see
+/// The pure pixel-math half of PNG export, shared by the active-frame (`rasterize_rgba8`) and
+/// frame-explicit (`rasterize_frame_rgba8`) entry points. `assets` carries everything fixed across
+/// an export's frames (the parsed font, the pre-resized background, the glyph bitmap cache) — see
 /// `RasterAssets`'s own doc comment. `assets.bg`, if present, was already built for exactly this
 /// `doc`/`cell_px`'s own `px_w x px_h`; a caller passing assets from a different document/`cell_px`
 /// would get nonsense placement, but every caller in this module builds them together (`
 /// rasterize_rgba8`/`rasterize_frame_rgba8`/`rasterize_frame_rgba8_with_assets`), so that mismatch
 /// never actually happens.
-fn rasterize_composited(
+fn rasterize_frame_stacked(
     doc: &Document,
-    composited: &[Vec<Cell>],
+    frame: usize,
     cell_px: u32,
     opaque_bg: Option<Rgba>,
     assets: &RasterAssets,
@@ -186,46 +188,48 @@ fn rasterize_composited(
         }
     }
 
-    for y in 0..doc.height {
-        for x in 0..doc.width {
-            let cell = composited[y as usize][x as usize];
-            let cell_x0 = x as i64 * cell_px as i64;
-            let cell_y0 = y as i64 * cell_px as i64;
+    for layer in visible_layers(doc, frame) {
+        for y in 0..doc.height {
+            for x in 0..doc.width {
+                let Some(&cell) = doc.cell_at(frame, layer, x, y) else { continue };
+                let cell_x0 = x as i64 * cell_px as i64;
+                let cell_y0 = y as i64 * cell_px as i64;
 
-            if cell.bg.3 > 0 {
-                for py in 0..cell_px as i64 {
-                    for pxo in 0..cell_px as i64 {
-                        let (px, py2) = (cell_x0 + pxo, cell_y0 + py);
-                        if px >= 0 && py2 >= 0 && (px as u32) < px_w && (py2 as u32) < px_h {
-                            blend_pixel(&mut img, px as u32, py2 as u32, cell.bg);
+                if cell.bg.3 > 0 {
+                    for py in 0..cell_px as i64 {
+                        for pxo in 0..cell_px as i64 {
+                            let (px, py2) = (cell_x0 + pxo, cell_y0 + py);
+                            if px >= 0 && py2 >= 0 && (px as u32) < px_w && (py2 as u32) < px_h {
+                                blend_pixel(&mut img, px as u32, py2 as u32, cell.bg);
+                            }
                         }
                     }
                 }
-            }
 
-            if cell.ch != ' ' {
-                let (metrics, bitmap) = assets.glyph(cell.ch, cell_px);
-                let origin_x = cell_x0 + metrics.xmin as i64;
-                let origin_y = cell_y0 + assets.ascent.round() as i64 - metrics.height as i64 - metrics.ymin as i64;
-                for gy in 0..metrics.height {
-                    for gx in 0..metrics.width {
-                        let coverage = bitmap[gy * metrics.width + gx];
-                        if coverage == 0 {
-                            continue;
+                if cell.ch != ' ' {
+                    let (metrics, bitmap) = assets.glyph(cell.ch, cell_px);
+                    let origin_x = cell_x0 + metrics.xmin as i64;
+                    let origin_y = cell_y0 + assets.ascent.round() as i64 - metrics.height as i64 - metrics.ymin as i64;
+                    for gy in 0..metrics.height {
+                        for gx in 0..metrics.width {
+                            let coverage = bitmap[gy * metrics.width + gx];
+                            if coverage == 0 {
+                                continue;
+                            }
+                            let px = origin_x + gx as i64;
+                            let py = origin_y + gy as i64;
+                            if px < 0 || py < 0 || px as u32 >= px_w || py as u32 >= px_h {
+                                continue;
+                            }
+                            // Combine the glyph's per-pixel coverage with the cell's own fg alpha,
+                            // so a translucent fg color still attenuates the glyph correctly.
+                            let alpha = (coverage as f32 / 255.0) * (cell.fg.3 as f32 / 255.0);
+                            let a_byte = (alpha * 255.0).round() as u8;
+                            if a_byte == 0 {
+                                continue;
+                            }
+                            blend_pixel(&mut img, px as u32, py as u32, Rgba(cell.fg.0, cell.fg.1, cell.fg.2, a_byte));
                         }
-                        let px = origin_x + gx as i64;
-                        let py = origin_y + gy as i64;
-                        if px < 0 || py < 0 || px as u32 >= px_w || py as u32 >= px_h {
-                            continue;
-                        }
-                        // Combine the glyph's per-pixel coverage with the cell's own fg alpha, so
-                        // a translucent fg color still attenuates the glyph correctly.
-                        let alpha = (coverage as f32 / 255.0) * (cell.fg.3 as f32 / 255.0);
-                        let a_byte = (alpha * 255.0).round() as u8;
-                        if a_byte == 0 {
-                            continue;
-                        }
-                        blend_pixel(&mut img, px as u32, py as u32, Rgba(cell.fg.0, cell.fg.1, cell.fg.2, a_byte));
                     }
                 }
             }
@@ -235,8 +239,8 @@ fn rasterize_composited(
     Ok((px_w, px_h, img.into_raw()))
 }
 
-/// Rasterizes `doc`'s active-frame composited cells at `cell_px` pixels per cell. See
-/// `rasterize_composited` for the pixel-math contract; this is the active-frame convenience
+/// Rasterizes `doc`'s active frame at `cell_px` pixels per cell. See
+/// `rasterize_frame_stacked` for the pixel-math contract; this is the active-frame convenience
 /// wrapper the export dialog's live preview and single-frame PNG export both use. Builds its own
 /// one-shot `RasterAssets` — correct for a lone call, but a multi-frame export must build one
 /// `RasterAssets` up front and drive `rasterize_frame_rgba8_with_assets` in a loop instead, or it
@@ -249,7 +253,7 @@ pub fn rasterize_rgba8(
     bg_image: Option<(&image::RgbaImage, f32)>,
 ) -> Result<(u32, u32, Vec<u8>), PngExportAppError> {
     let assets = build_raster_assets(doc, cell_px, bg_image)?;
-    rasterize_composited(doc, &composite(doc), cell_px, opaque_bg, &assets)
+    rasterize_frame_stacked(doc, doc.active_frame(), cell_px, opaque_bg, &assets)
 }
 
 /// Frame-explicit analog of `rasterize_rgba8`, for a caller that already needs cross-frame
@@ -286,9 +290,7 @@ pub(crate) fn rasterize_frame_rgba8_with_assets(
     opaque_bg: Option<Rgba>,
     assets: &RasterAssets,
 ) -> Result<(u32, u32, Vec<u8>), PngExportAppError> {
-    let composited =
-        composite_frame(doc, frame).expect("frame is always in 0..doc.frame_count() for every caller in this crate");
-    rasterize_composited(doc, &composited, cell_px, opaque_bg, assets)
+    rasterize_frame_stacked(doc, frame, cell_px, opaque_bg, assets)
 }
 
 /// Rasterizes `doc`'s composited cells at `cell_px` pixels per cell into PNG bytes. Blank cells
@@ -351,6 +353,46 @@ mod tests {
 
     fn doc_with(w: u16, h: u16) -> Document {
         Document::new(w, h)
+    }
+
+    /// The acetate model at the pixel level: a top-layer glyph with transparent bg over a
+    /// bottom-layer full block leaves BOTH layers' ink in the export — uncovered block pixels keep
+    /// the bottom layer's exact color while the top glyph's ink lands over the rest. A flatten
+    /// regression (top glyph wins the whole cell) would erase every red pixel.
+    #[test]
+    fn overlapping_glyphs_on_two_layers_both_reach_the_export() {
+        let mut doc = doc_with(1, 1);
+        doc.set_cell(0, 0, 0, Cell { ch: '█', fg: Rgba(255, 0, 0, 255), bg: Rgba::TRANSPARENT });
+        let mut history = gascii_core::History::new();
+        let add = gascii_core::add_layer(&doc, 1).unwrap();
+        history.apply(&mut doc, add);
+        doc.set_cell(1, 0, 0, Cell { ch: 'X', fg: Rgba(0, 255, 0, 255), bg: Rgba::TRANSPARENT });
+
+        let bytes = export_png(&doc, 32, None, None).unwrap();
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        assert!(
+            decoded.pixels().any(|p| p.0 == [255, 0, 0, 255]),
+            "the bottom block's ink must survive wherever the top glyph doesn't cover it"
+        );
+        assert!(decoded.pixels().any(|p| p.0[1] > 0), "the top glyph's ink must land on top of the block");
+    }
+
+    /// Hidden-layer exclusion holds in the stacked export path, not just the flattened composite.
+    #[test]
+    fn a_hidden_top_layer_is_excluded_from_the_stacked_export() {
+        let mut doc = doc_with(1, 1);
+        doc.set_cell(0, 0, 0, Cell { ch: '█', fg: Rgba(255, 0, 0, 255), bg: Rgba::TRANSPARENT });
+        let mut history = gascii_core::History::new();
+        let add = gascii_core::add_layer(&doc, 1).unwrap();
+        history.apply(&mut doc, add);
+        doc.set_cell(1, 0, 0, Cell { ch: 'X', fg: Rgba(0, 255, 0, 255), bg: Rgba::TRANSPARENT });
+        let hide = gascii_core::set_layer_visibility(&doc, 1, false).unwrap().unwrap();
+        history.apply(&mut doc, hide);
+
+        let bytes = export_png(&doc, 32, None, None).unwrap();
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        assert!(decoded.pixels().all(|p| p.0[1] == 0), "no hidden-layer ink may reach the export");
+        assert!(decoded.pixels().any(|p| p.0 == [255, 0, 0, 255]), "the visible bottom layer still exports");
     }
 
     #[test]

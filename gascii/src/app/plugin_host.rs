@@ -60,7 +60,7 @@ impl GasciiApp {
     /// `host`'s borrow of `self.doc` ends at its last use inside the loop (NLL), before the drain
     /// pass's `&mut self` calls. Called with the host's own live root `Ui` — see `Plugin::panel`'s
     /// doc comment for why a plain `Context` cannot substitute for this. A returned `PanelOutcome
-    /// ::error` is written straight into `self.last_error` — the same status-bar channel every other
+    /// ::error` is surfaced via `flash_error` — the same status-bar channel every other
     /// structural trigger already uses (`add_frame_via_menu`, "Resize Canvas…"), so a plugin-
     /// originated failure reads identically to a host-originated one.
     pub(super) fn run_plugin_panels(&mut self, ui: &mut eframe::egui::Ui, kiosk: bool) {
@@ -83,8 +83,8 @@ impl GasciiApp {
     /// the drain half of the two-pass draw-then-drain (or tick-then-drain) shape `run_plugin_panels`
     /// and `handle_keys` both need: `apply_edit`/`switch_active_frame` need the whole of `&mut self`,
     /// which would conflict with `self.plugins`'s still-live mutable borrow if called from inside
-    /// the draw/tick loop itself. A returned `PanelOutcome::error` is written straight into
-    /// `self.last_error` — the same status-bar channel every other structural trigger already uses
+    /// the draw/tick loop itself. A returned `PanelOutcome::error` is surfaced via
+    /// `flash_error` — the same status-bar channel every other structural trigger already uses
     /// (`add_frame_via_menu`, "Resize Canvas…"), so a plugin-originated failure reads identically to
     /// a host-originated one.
     pub(super) fn drain_panel_outcomes(&mut self, outcomes: Vec<gascii_plugin_api::PanelOutcome>) {
@@ -113,7 +113,7 @@ impl GasciiApp {
                 }
             }
             if let Some(msg) = outcome.error {
-                self.last_error = Some(msg);
+                self.flash_error(msg);
             }
         }
     }

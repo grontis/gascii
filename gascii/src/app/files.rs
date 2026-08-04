@@ -94,12 +94,12 @@ impl GasciiApp {
                     self.note_recent_file(path);
                 }
                 Err(e) => {
-                    self.last_error = Some(format!("failed to load {}: {e}", path.display()));
+                    self.flash_error(format!("failed to load {}: {e}", path.display()));
                     self.recent_files.retain(|p| p != path);
                 }
             },
             Err(e) => {
-                self.last_error = Some(format!("failed to read {}: {e}", path.display()));
+                self.flash_error(format!("failed to read {}: {e}", path.display()));
                 self.recent_files.retain(|p| p != path);
             }
         }
@@ -137,7 +137,7 @@ impl GasciiApp {
                 self.saved_frame_duration_ms = self.doc.frame_duration_ms;
                 self.note_recent_file(path);
             }
-            Err(e) => self.last_error = Some(format!("failed to save {}: {e}", path.display())),
+            Err(e) => self.flash_error(format!("failed to save {}: {e}", path.display())),
         }
     }
 

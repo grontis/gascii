@@ -94,7 +94,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
                 // because a menu click is not itself a key event egui surfaces the clipboard on.
                 match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
                     Ok(text) => app.paste_text(&text),
-                    Err(e) => app.last_error = Some(format!("paste: clipboard read failed: {e}")),
+                    Err(e) => app.flash_error(format!("paste: clipboard read failed: {e}")),
                 }
             }
             let cut = egui::Button::new("Cut").shortcut_text(chords::chord_label(ChordId::Cut));

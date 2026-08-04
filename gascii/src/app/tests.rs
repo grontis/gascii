@@ -836,7 +836,31 @@
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.run_plugin_panels(ui, false));
 
-        assert_eq!(app.last_error.as_deref(), Some("add frame: exceeds the 256 maximum"));
+        assert_eq!(app.last_error_text(), Some("add frame: exceeds the 256 maximum"));
+    }
+
+    /// The status bar's expiry rule: `error_flash` shows a fresh message with its time-left, stops
+    /// showing it once `ERROR_FLASH_TTL` has passed, while `last_error_text` (the dialog-inline
+    /// read) keeps the message regardless — dialog validation must not vanish mid-edit.
+    #[test]
+    fn error_flash_expires_for_the_status_bar_but_persists_for_dialog_reads() {
+        let mut app = GasciiApp::headless();
+        let now = std::time::Instant::now();
+        assert!(app.error_flash(now).is_none(), "no error, nothing to flash");
+
+        // Stamped explicitly rather than through `flash_error` so `now`-relative arithmetic is
+        // exact — `flash_error` reads its own, slightly later clock.
+        app.last_error = Some(crate::app::ErrorFlash { text: "boom".to_string(), at: now });
+        let (text, left) = app.error_flash(now).expect("a fresh flash must be visible");
+        assert_eq!(text, "boom");
+        assert!(left <= crate::app::ERROR_FLASH_TTL, "time-left is bounded by the TTL");
+
+        let after_ttl = now + crate::app::ERROR_FLASH_TTL;
+        assert!(app.error_flash(after_ttl).is_none(), "at/past the TTL the status bar stops showing it");
+        assert_eq!(app.last_error_text(), Some("boom"), "the dialog-inline read must not expire");
+
+        app.flash_error("again");
+        assert!(app.error_flash(std::time::Instant::now()).is_some(), "a re-raise restarts the clock");
     }
 
     /// A `PanelOutcome` carrying BOTH a successful edit and a failure message in the same drain pass
@@ -866,7 +890,7 @@
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.run_plugin_panels(ui, false));
 
         assert_eq!(app.doc.resolved_frame_duration_ms(0), Some(50), "the succeeding half of a multi-op outcome must still apply");
-        assert_eq!(app.last_error.as_deref(), Some("duplicate frame: exceeds the 256 maximum"), "the failing half must still surface");
+        assert_eq!(app.last_error_text(), Some("duplicate frame: exceeds the 256 maximum"), "the failing half must still surface");
     }
 
     /// A `PanelOutcome`-originated `duplicate_frame` edit (built from the real `gascii_core::
@@ -1033,7 +1057,7 @@
         app.add_frame_via_menu();
 
         assert_eq!(app.doc.frame_count(), Document::MAX_FRAMES, "a rejected add must not change frame_count");
-        assert_eq!(app.last_error.as_deref(), Some("add frame: exceeds the 256 maximum"));
+        assert_eq!(app.last_error_text(), Some("add frame: exceeds the 256 maximum"));
     }
 
     /// The Animation menu's "Add Frame" bootstrap: duplicates the active frame and flushes any pending
