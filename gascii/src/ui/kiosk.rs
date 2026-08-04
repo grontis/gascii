@@ -206,6 +206,16 @@ fn colors(ui: &mut Ui, app: &mut GasciiApp, k: f32) {
     }
     ui.add_space(8.0);
     quick_colors(ui, app, k);
+    ui.add_space(8.0);
+    // Same explicit recolor action the windowed sidebar's COLORS section offers.
+    let can_recolor = app
+        .selection_slot()
+        .and_then(|b| app.slot(b).tool.selection_overlay())
+        .and_then(|v| v.marquee)
+        .is_some();
+    if widgets::button(ui, "Recolor Selection", false, can_recolor).clicked() {
+        app.recolor_selection();
+    }
 }
 
 /// `color_picker_body` hung off a well, scaled up for touch — bumps the interact size and slider

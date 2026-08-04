@@ -4692,10 +4692,83 @@
         );
     }
 
+    /// `Ctrl+D`/Edit ▸ Duplicate Selection: the copy lands as a moveable float offset one cell
+    /// down-right, and committing it leaves BOTH the original and the copy in the document — a
+    /// duplicate, never a move.
+    #[test]
+    fn duplicate_selection_commits_a_copy_and_leaves_the_original_in_place() {
+        let mut app = GasciiApp::headless();
+        app.doc.set_cell(0, 0, 0, gascii_core::Cell { ch: 'A', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        app.select_all();
+
+        app.duplicate_selection();
+        let b = app.selection_slot().expect("the selection session survives a duplicate");
+        let float_rect = app.slot(b).tool.selection_overlay().and_then(|v| v.marquee).expect("the copy is a live float");
+        assert_eq!((float_rect.x0, float_rect.y0), (1, 1), "the copy lands one cell down-right of the source");
+
+        app.flush_all(); // drop the float where it sits
+        assert_eq!(app.doc.cell(0, 0, 0).unwrap().ch, 'A', "the original must be untouched");
+        assert_eq!(app.doc.cell(0, 1, 1).unwrap().ch, 'A', "the committed copy lands at the offset");
+    }
+
+    /// The Recolor Selection button, transparent BG well: one undoable edit that sets glyph-
+    /// bearing cells' text color to the active FG — existing backgrounds and blank cells stay
+    /// untouched (a transparent well means "no background change", never "wipe backgrounds"),
+    /// and undo restores the previous colors exactly.
+    #[test]
+    fn recolor_selection_with_a_transparent_bg_well_recolors_glyphs_and_keeps_backgrounds() {
+        let mut app = GasciiApp::headless();
+        let old_fg = Rgba(10, 20, 30, 255);
+        let kept_bg = Rgba(40, 50, 60, 255);
+        app.doc.set_cell(0, 1, 1, gascii_core::Cell { ch: 'A', fg: old_fg, bg: kept_bg });
+        app.select_all();
+
+        app.active_fg = Rgba(200, 0, 0, 255);
+        assert_eq!(app.active_bg, Rgba::TRANSPARENT, "sanity: the BG well starts transparent");
+        app.recolor_selection();
+
+        let recolored = app.doc.cell(0, 1, 1).unwrap();
+        assert_eq!(recolored.fg, Rgba(200, 0, 0, 255), "the glyph's text color follows the active FG");
+        assert_eq!(recolored.ch, 'A', "the glyph itself is untouched");
+        assert_eq!(recolored.bg, kept_bg, "a transparent BG well must never wipe an existing background");
+        assert_eq!(app.doc.cell(0, 0, 0), Some(&gascii_core::Cell::BLANK), "blank cells stay blank");
+
+        app.request_undo();
+        assert_eq!(app.doc.cell(0, 1, 1).unwrap().fg, old_fg, "undo restores the previous text color");
+    }
+
+    /// The Recolor Selection button, BG well holding a color: painted cells' backgrounds follow
+    /// the BG well too — including bg-only (space) cells — while blank cells still stay blank
+    /// (recolor changes what's painted, it never fills empty space).
+    #[test]
+    fn recolor_selection_with_a_set_bg_well_recolors_backgrounds_of_painted_cells_only() {
+        let mut app = GasciiApp::headless();
+        let old_fg = Rgba(10, 20, 30, 255);
+        let old_bg = Rgba(40, 50, 60, 255);
+        app.doc.set_cell(0, 1, 1, gascii_core::Cell { ch: 'A', fg: old_fg, bg: old_bg });
+        app.doc.set_cell(0, 2, 1, gascii_core::Cell { ch: ' ', fg: old_fg, bg: old_bg }); // bg-only cell
+        app.select_all();
+
+        app.active_fg = Rgba(200, 0, 0, 255);
+        app.active_bg = Rgba(0, 0, 200, 255);
+        app.recolor_selection();
+
+        let glyph_cell = app.doc.cell(0, 1, 1).unwrap();
+        assert_eq!(glyph_cell.fg, Rgba(200, 0, 0, 255), "the glyph's text color follows the FG well");
+        assert_eq!(glyph_cell.bg, Rgba(0, 0, 200, 255), "the glyph cell's background follows the BG well");
+        let bg_only = app.doc.cell(0, 2, 1).unwrap();
+        assert_eq!(bg_only.bg, Rgba(0, 0, 200, 255), "a bg-only cell's background follows the BG well too");
+        assert_eq!(bg_only.fg, old_fg, "a space glyph's text color is meaningless and left alone");
+        assert_eq!(app.doc.cell(0, 0, 0), Some(&gascii_core::Cell::BLANK), "blank cells are never filled");
+
+        app.request_undo();
+        assert_eq!(app.doc.cell(0, 1, 1).unwrap().bg, old_bg, "undo restores the previous background");
+    }
+
     /// The user-facing checkpoint dropped `D` (reset fg/bg) entirely: a bare, unmodified `D` press
     /// must not be bound to anything — no color change, no tool switch, no document mutation.
-    /// `Ctrl+D`/`Shift+D` (Deselect/animation duplicate-frame) are unaffected; this only pins the
-    /// bare key.
+    /// `Ctrl+D`/`Shift+D` (duplicate-selection/animation duplicate-frame) are unaffected; this
+    /// only pins the bare key.
     #[test]
     fn bare_d_key_is_bound_to_nothing_and_leaves_colors_and_tools_untouched() {
         let mut app = GasciiApp::headless();
@@ -4750,10 +4823,11 @@
         assert_eq!(app.doc.cell(0, 1, 1).unwrap().ch, 'x', "no selection: nothing may be deleted");
     }
 
-    /// `Ctrl+D` must clear the marquee and release the keyboard without deleting the selection's
-    /// content — the same pair `canvas.rs`'s own Selection-Escape handling already performs.
+    /// `Ctrl+D` duplicates the selection: the copy lands as a live float one cell down-right, the
+    /// session keeps the keyboard (the float is immediately moveable), and the original content is
+    /// never touched. Deselect moved to Escape/the menu when Ctrl+D became Duplicate.
     #[test]
-    fn ctrl_d_via_handle_keys_clears_the_marquee_and_releases_the_keyboard_without_deleting_content() {
+    fn ctrl_d_via_handle_keys_duplicates_the_selection_as_a_moveable_float() {
         let mut app = GasciiApp::headless();
         selection_at_1_1(&mut app);
         assert_eq!(app.selection_slot(), Some(Binding::L), "sanity: L holds the live selection");
@@ -4763,12 +4837,15 @@
         raw.events.push(key_event(egui::Key::D, egui::Modifiers::COMMAND));
         let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
 
-        assert_eq!(app.keyboard_owner(), None, "Ctrl+D must release the keyboard");
-        assert!(
-            app.slot(Binding::L).tool.selection_overlay().is_none(),
-            "Ctrl+D must clear the marquee"
-        );
-        assert_eq!(app.doc.cell(0, 1, 1).unwrap().ch, 'x', "Ctrl+D must never delete the selected content");
+        assert_eq!(app.keyboard_owner(), Some(Binding::L), "the duplicate is a live session — keyboard stays claimed");
+        let float_rect = app.slot(Binding::L).tool.selection_overlay().and_then(|v| v.marquee)
+            .expect("the copy must be live as a float");
+        assert_eq!((float_rect.x0, float_rect.y0), (2, 2), "the copy lands one cell down-right of the source");
+        assert_eq!(app.doc.cell(0, 1, 1).unwrap().ch, 'x', "the original must never be touched");
+
+        app.flush_all();
+        assert_eq!(app.doc.cell(0, 2, 2).unwrap().ch, 'x', "dropping the float commits the copy");
+        assert_eq!(app.doc.cell(0, 1, 1).unwrap().ch, 'x', "the original survives the drop too");
     }
 
     /// `Ctrl+D` with no live selection must be a true no-op.
@@ -4785,9 +4862,9 @@
         assert_eq!(app.slot(Binding::L).kind, ToolKind::Pencil, "nothing may change with no live selection");
     }
 
-    /// `Ctrl+D` must be suppressed while a widget has focus, matching Undo/Redo's own gate: a
-    /// `ToolEvent::Cancel` discards a lifted-but-not-dropped float outright, so pressing Ctrl+D
-    /// while typing into a popup field must not reach the canvas and silently drop pending work.
+    /// `Ctrl+D` must be suppressed while a widget has focus, matching Undo/Redo's own gate:
+    /// `duplicate_selection` flushes pending work and spawns a float, so pressing Ctrl+D while
+    /// typing into a popup field must not reach the canvas and rewrite the session underneath.
     #[test]
     fn ctrl_d_is_suppressed_while_a_widget_has_keyboard_focus() {
         let mut app = GasciiApp::headless();

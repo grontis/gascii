@@ -102,13 +102,20 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
                 let ctx = ui.ctx().clone();
                 app.cut_selection(&ctx);
             }
+            let duplicate =
+                egui::Button::new("Duplicate Selection").shortcut_text(chords::chord_label(ChordId::Duplicate));
+            if ui.add_enabled(can_copy, duplicate).clicked() {
+                app.duplicate_selection();
+            }
             ui.separator();
             let select_all = egui::Button::new("Select All").shortcut_text(chords::chord_label(ChordId::SelectAll));
             if ui.add(select_all).clicked() {
                 app.select_all();
             }
             let can_deselect = app.selection_slot().is_some();
-            let deselect = egui::Button::new("Deselect").shortcut_text(chords::chord_label(ChordId::Deselect));
+            // Esc is `canvas.rs`'s own Selection-Escape branch, not a `CHORDS` row — a literal
+            // hint, since `chord_label` only speaks for registered chords.
+            let deselect = egui::Button::new("Deselect").shortcut_text("Esc");
             if ui.add_enabled(can_deselect, deselect).clicked() {
                 app.deselect();
             }

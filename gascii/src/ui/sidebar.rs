@@ -507,6 +507,17 @@ fn colors(ui: &mut Ui, app: &mut GasciiApp) {
         color_popup(ui, &wells.fg, &mut app.active_fg);
         color_popup(ui, &wells.bg, &mut app.active_bg);
     });
+    ui.add_space(4.0);
+    // Recolor is an explicit action next to the wells — changing the well itself never recolors
+    // a selection. Enabled only while a marquee exists.
+    let can_recolor = app
+        .selection_slot()
+        .and_then(|b| app.slot(b).tool.selection_overlay())
+        .and_then(|v| v.marquee)
+        .is_some();
+    if widgets::button(ui, "Recolor Selection", false, can_recolor).clicked() {
+        app.recolor_selection();
+    }
 }
 
 fn write_toggles(ui: &mut Ui, app: &mut GasciiApp) {

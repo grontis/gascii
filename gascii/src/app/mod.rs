@@ -723,7 +723,7 @@ impl GasciiApp {
         let widget_focused = ui.memory(|m| m.focused().is_some());
         let focused = widget_focused || suppresses_tool_shortcuts(owner_kind);
         let is_fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
-        let (redo_shift, undo, redo_y, select_all, copy, copy_all, cut, deselect, generic_always) =
+        let (redo_shift, undo, redo_y, select_all, copy, copy_all, cut, duplicate, generic_always) =
             ui.input_mut(|i| {
                 // Cmd/Ctrl+Shift+Z must be consumed before the plain Cmd/Ctrl+Z pattern, since
                 // `matches_logically` ignores extra Shift/Alt — checking undo first would swallow
@@ -741,10 +741,10 @@ impl GasciiApp {
                 // reads `Event::Copy`/`Event::Cut` off this frame's event list too, via its own
                 // `filtered_events` — cloned, not consumed, so an unguarded scan here would fire
                 // `copy_selection`/`cut_selection` on the canvas alongside the field's own cut/copy
-                // of its selected text. Deselect (Ctrl+D) joins it too: `ToolEvent::Cancel` discards
-                // a lifted-but-not-dropped float outright, so a Ctrl+D typed into a focused popup
-                // must not reach the canvas and silently drop pending work underneath it.
-                let (redo_shift, undo, redo_y, select_all, copy, copy_all, cut, deselect) = if widget_focused {
+                // of its selected text. Duplicate (Ctrl+D) joins it too: it flushes pending work
+                // and spawns a float, so a Ctrl+D typed into a focused popup must not reach the
+                // canvas and rewrite the session underneath it.
+                let (redo_shift, undo, redo_y, select_all, copy, copy_all, cut, duplicate) = if widget_focused {
                     (false, false, false, false, false, false, false, false)
                 } else {
                     let (copy, copy_all) = copy_events(&i.events, i.modifiers.shift);
@@ -770,7 +770,7 @@ impl GasciiApp {
                 // a second key pattern (D-7), so the generic loop above already consumes it; no
                 // hand-written second `consume_key` call needed here anymore.
                 let generic_always = chords::consume_generic_chords(i, ChordDispatch::GenericAlways);
-                (redo_shift, undo, redo_y, select_all, copy, copy_all, cut, deselect, generic_always)
+                (redo_shift, undo, redo_y, select_all, copy, copy_all, cut, duplicate, generic_always)
             });
         let save = generic_always.contains(&ChordId::Save);
         let export_dialog = generic_always.contains(&ChordId::ExportDialog);
@@ -887,8 +887,8 @@ impl GasciiApp {
         if select_all {
             self.select_all();
         }
-        if deselect {
-            self.deselect();
+        if duplicate {
+            self.duplicate_selection();
         }
         // `+`/`=`/`-`, no modifiers: the same zoom step the status bar's buttons and the View menu
         // use. Guarded like the tool-select keys so typing into a focused field never zooms.

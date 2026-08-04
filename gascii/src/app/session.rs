@@ -4,7 +4,7 @@
 //! subsystem rather than touching `self.doc`/`self.slots` directly.
 
 use eframe::egui;
-use gascii_core::{clear_document, duplicate_frame, CellPatch, FrameOpError, ToolEvent, ToolResponse};
+use gascii_core::{clear_document, duplicate_frame, Cell, CellEdit, CellPatch, Edit, FrameOpError, ToolEvent, ToolResponse};
 
 use super::{make_tool, Binding, GasciiApp, ToolKind};
 
@@ -348,16 +348,14 @@ impl GasciiApp {
         self.slots[b.ix()].tool.update(ToolEvent::SelectAll, &tctx, &self.doc);
     }
 
-    /// `Ctrl+D`/Edit ▸ Deselect: clears the marquee/keyboard claim without deleting document
-    /// content — the identical pair `canvas.rs`'s own Selection-Escape branch already performs. A
-    /// no-op unless a Selection binding currently holds the keyboard.
+    /// Edit ▸ Deselect (keyboard: Escape, via `canvas.rs`'s own Selection-Escape branch — the
+    /// identical pair this performs): clears the marquee/keyboard claim without deleting document
+    /// content. A no-op unless a Selection binding currently holds the keyboard.
     ///
     /// "Without deleting content" means the document, not an uncommitted float: `ToolEvent::Cancel`
     /// discards a lifted-but-not-dropped float outright rather than committing it, matching
-    /// `canvas.rs`'s own Selection-Escape precedent exactly (that branch is deliberately
-    /// non-flushing so Escape-as-abort can discard an in-progress move). A user who has moved or
-    /// pasted a float and presses `Ctrl+D` expecting to "just clear the selection" loses that
-    /// float's content, not just the marquee outline.
+    /// the Selection-Escape precedent exactly (that branch is deliberately non-flushing so
+    /// Escape-as-abort can discard an in-progress move).
     pub(crate) fn deselect(&mut self) {
         let Some(b) = self.selection_slot() else {
             return;
@@ -365,6 +363,74 @@ impl GasciiApp {
         let tctx = crate::canvas::tool_ctx(self, b);
         self.slots[b.ix()].tool.update(ToolEvent::Cancel, &tctx, &self.doc);
         self.release_keyboard(b);
+    }
+
+    /// `Ctrl+D`/Edit ▸ Duplicate Selection: re-stamps a copy of the selected region as a floating
+    /// stamp one cell down-right of the source, leaving the original committed content in place.
+    /// The float is immediately moveable and commits wherever it's dropped, exactly like a paste
+    /// (`accept_stamp` with no source region, so dropping never blanks the original). A no-op
+    /// unless a Selection binding has a region defined, same as `copy_selection`.
+    pub(crate) fn duplicate_selection(&mut self) {
+        let Some(b) = self.selection_slot() else {
+            return;
+        };
+        // A lifted float's cells must be in `self.doc` before capturing the region — same rule as
+        // `copy_selection` (a Ctrl+D mid-move duplicates the float's landed position).
+        self.flush_all();
+        let Some(rect) = self.slots[b.ix()].tool.selection_overlay().and_then(|v| v.marquee) else {
+            return;
+        };
+        let patch = CellPatch::from_region(&self.doc, rect, self.active_layer);
+        // One cell down-right (clamped inside the document) so the copy reads as a copy instead of
+        // invisibly covering its source cell-for-cell.
+        let at = (
+            (rect.x0 + 1).min(self.doc.width.saturating_sub(1)),
+            (rect.y0 + 1).min(self.doc.height.saturating_sub(1)),
+        );
+        self.slots[b.ix()].tool.accept_stamp(patch, at, &self.doc);
+    }
+
+    /// The sidebar's "Recolor Selection" button: recolors the selected region's painted cells
+    /// (active layer) to the active colors, as one undoable edit. Deliberately an explicit action
+    /// — changing a color well never recolors a selection by itself. Per cell: a glyph's text
+    /// color takes the FG well; the background takes the BG well ONLY when that well holds an
+    /// actual color — a transparent BG well means "no background change", never "wipe every
+    /// background", since transparent is the well's untouched default. Blank cells stay blank —
+    /// recolor changes what's painted, it never fills empty space.
+    pub(crate) fn recolor_selection(&mut self) {
+        let Some(b) = self.selection_slot() else {
+            return;
+        };
+        // Same flush-before-reading rule as `copy_selection`.
+        self.flush_all();
+        let Some(rect) = self.slots[b.ix()].tool.selection_overlay().and_then(|v| v.marquee) else {
+            return;
+        };
+        let (frame, layer) = (self.active_frame, self.active_layer);
+        let write_bg = self.active_bg.3 > 0;
+        let mut cells = Vec::new();
+        for y in rect.y0..=rect.y1 {
+            for x in rect.x0..=rect.x1 {
+                let Some(&before) = self.doc.cell_at(frame, layer, x, y) else { continue };
+                if before.is_blank() {
+                    continue;
+                }
+                let mut after = before;
+                if before.ch != ' ' {
+                    after.fg = self.active_fg;
+                }
+                if write_bg {
+                    after.bg = self.active_bg;
+                }
+                if after != before {
+                    cells.push(CellEdit { frame, layer, x, y, before, after });
+                }
+            }
+        }
+        if cells.is_empty() {
+            return; // nothing changed: no empty undo entry
+        }
+        self.apply_edit(Edit::Cells(cells), Some(b));
     }
 
     /// Reconciles a pasted `Event::Paste` text against the internal clipboard: if it matches the

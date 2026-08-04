@@ -1,9 +1,11 @@
 # 8-3-2026 todos
 
-selection tool: we should implement a modify color feature. When an area is selected, we should provide an option for updating the color of it. 
-My UX intuition points me to the idea that this should be an explicit button, rather than just changing the selected colors, as that could be bad if the user did not intend to change the color of the selection.
+~~selection tool: we should implement a modify color feature. When an area is selected, we should provide an option for updating the color of it. 
+My UX intuition points me to the idea that this should be an explicit button, rather than just changing the selected colors, as that could be bad if the user did not intend to change the color of the selection.~~
+DONE 8-3: "Recolor Selection" button in the sidebar's COLORS section (windowed + kiosk), enabled while a selection exists — one undoable edit. Glyph text color follows the FG well; backgrounds follow the BG well when it holds a color (a transparent BG well leaves backgrounds untouched rather than wiping them). Blank cells are never filled.
 
-selection tool: selecting and then pressing ctrl + d duplicate selection and leave it selected and moveable, leaving the previously selected in place
+~~selection tool: selecting and then pressing ctrl + d duplicate selection and leave it selected and moveable, leaving the previously selected in place~~
+DONE 8-3: Ctrl+D / Edit ▸ Duplicate Selection — copy lands as a moveable float one cell down-right, original untouched. Deselect moved to Escape (menu item hint updated).
 
 ~~The layers feature does not work as inteneded. If we create a second layer, the characters should be rendered on top of the characters of the bottom layer (showing both). 
 Current implementation just replaces characters in the bottom layer. This essentially makes the currently implemented layer feature useless.~~

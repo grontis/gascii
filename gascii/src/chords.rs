@@ -43,7 +43,7 @@ pub(crate) enum ChordId {
     ZoomOutAlias,
     SelectAll,
     Cut,
-    Deselect,
+    Duplicate,
     HelpOverlay,
 }
 
@@ -56,10 +56,10 @@ pub(crate) enum ChordDispatch {
     /// Covers `SelectAll` too: `Ctrl+A` while a widget has focus is `egui::TextEdit`'s own
     /// select-all-text-in-the-field chord (confirmed against the vendored
     /// `text_selection/cursor_range.rs`), so it needs the same `widget_focused`-only gate Undo/Redo
-    /// already use — not the uniform subset's ungated `GenericAlways`. `Deselect` joins the same
-    /// gate for a different reason: `ToolEvent::Cancel` discards a lifted-but-not-dropped float
-    /// outright, so a Ctrl+D typed while a popup field (e.g. the hex color field) has focus must
-    /// not reach past it and silently drop the user's pending work on the canvas underneath.
+    /// already use — not the uniform subset's ungated `GenericAlways`. `Duplicate` joins the same
+    /// gate for a different reason: it flushes pending work and spawns a float, so a Ctrl+D typed
+    /// while a popup field (e.g. the hex color field) has focus must not reach past it and rewrite
+    /// the canvas session underneath.
     HandWritten,
     /// Consumed by [`consume_generic_chords`] inside `handle_keys`'s main `ui.input_mut` closure,
     /// unconditionally — Save/Export/Fit and every other row sharing this gate: never suppressed by
@@ -222,7 +222,7 @@ pub(crate) const CHORDS: &[ChordDef] = &[
     },
     ChordDef { id: ChordId::Cut, name: "Cut", label: "Ctrl+X", keys: &[], dispatch: ChordDispatch::HandWritten },
     ChordDef {
-        id: ChordId::Deselect, name: "Deselect",
+        id: ChordId::Duplicate, name: "Duplicate Selection",
         label: "Ctrl+D",
         keys: &[(egui::Modifiers::COMMAND, egui::Key::D)],
         dispatch: ChordDispatch::HandWritten,
@@ -348,7 +348,7 @@ mod tests {
             ChordId::ZoomOutAlias,
             ChordId::SelectAll,
             ChordId::Cut,
-            ChordId::Deselect,
+            ChordId::Duplicate,
             ChordId::HelpOverlay,
         ];
         for id in ids {
