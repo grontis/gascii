@@ -277,7 +277,7 @@ mod tests {
         for y in 0..10u16 {
             doc.set_cell_at(1, 0, 5, y, Cell { ch: '│', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
         }
-        assert_eq!(doc.active_frame(), 0, "doc's active frame stays 0; only ctx.frame targets frame 1");
+        doc.set_active_frame(0); // only ctx.frame targets frame 1
 
         let mut tctx = ctx(PlaneMask::ALL, '#');
         tctx.frame = 1;

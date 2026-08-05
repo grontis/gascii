@@ -272,23 +272,29 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
         ui.add_space(6.0);
         egui::ScrollArea::horizontal().id_salt("gascii_anim_strip").auto_shrink([false, true]).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.spacing_mut().item_spacing.x = 6.0;
                 for i in 0..doc.frame_count() {
-                    // Allocated at the identical size regardless of visibility, so layout, scroll
-                    // extent, and drag-reorder geometry never depend on which indices are
-                    // currently culled — only whether `get_or_build` (and the texture paint below
-                    // it) actually runs does.
+                    // Allocated at the identical size regardless of visibility or active state, so
+                    // layout, scroll extent, and drag-reorder geometry never depend on which
+                    // indices are currently culled or selected — only whether `get_or_build` (and
+                    // the texture paint below it) actually runs does. The active thumb pops by
+                    // *painting* into a slightly expanded rect instead; the 6px item spacing keeps
+                    // that expansion from touching its neighbors.
                     let (rect, resp) = ui.allocate_exact_size(thumb_size, Sense::click());
+                    let active = i == doc.active_frame();
+                    let draw = if active { rect.expand(2.0) } else { rect };
                     let clip = ui.clip_rect();
                     if thumb_is_visible(rect.min.x, thumb_size.x, clip.min.x, clip.max.x) {
                         let texture = thumbs.get_or_build(ui.ctx(), doc, i, top_edit_id);
                         if let Some(tex) = texture {
-                            ui.painter().image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                            ui.painter().image(tex.id(), draw, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
                         }
                     }
-                    let active = i == doc.active_frame();
-                    let (border, width) = if active { (t.border_strong, 2.0) } else { (t.border_soft, 1.0) };
-                    ui.painter().rect_stroke(rect, 2.0, Stroke::new(width, border), StrokeKind::Inside);
+                    // `bg_inverse`, not `border_strong`: inversion is the chrome's selection
+                    // signal (see `gascii::ui::theme`'s module doc), and `border_strong` is a
+                    // low-contrast gray in the dark theme.
+                    let (border, width) = if active { (t.bg_inverse, 2.0) } else { (t.border_soft, 1.0) };
+                    ui.painter().rect_stroke(draw, 2.0, Stroke::new(width, border), StrokeKind::Inside);
                     if resp.clicked() && !active {
                         outcome.properties.push(DocProperty::ActiveFrame(i));
                     }
@@ -312,6 +318,9 @@ mod tests {
             let edit = add_frame(&doc, i, Frame::blank(doc.width, doc.height)).unwrap();
             history.apply(&mut doc, edit);
         }
+        // `add_frame` selects each inserted frame — park the cursor back at 0 so tests state
+        // their own starting frame explicitly.
+        doc.set_active_frame(0);
         doc
     }
 
@@ -466,6 +475,44 @@ mod tests {
         assert!(outcome.edits.is_empty());
         assert!(outcome.properties.is_empty());
         assert!(outcome.error.is_none());
+    }
+
+    /// The active frame's thumb must pop: painted into an expanded rect with the 2px
+    /// inversion-color border, while inactive thumbs keep the 1px soft outline at the allocated
+    /// size. Pinned through the emitted shapes so a regression back to the old low-contrast
+    /// `border_strong` marker fails.
+    #[test]
+    fn body_paints_the_active_thumb_enlarged_with_the_inversion_border() {
+        let mut doc = doc_with_frames(3);
+        doc.set_active_frame(1);
+        let state = SharedState::new();
+        let mut thumbs = ThumbnailCache::new();
+        let ctx = egui::Context::default();
+        let thumb = Vec2::new(48.0, 30.0);
+        let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = body(ui, &doc, &state, &mut thumbs, thumb, 24.0, Some(1));
+        });
+        let t = theme::current(&ctx);
+
+        let rects: Vec<_> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Rect(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+
+        let active: Vec<_> = rects.iter().filter(|r| r.stroke.width == 2.0 && r.stroke.color == t.bg_inverse).collect();
+        assert_eq!(active.len(), 1, "exactly one thumb carries the active border");
+        let a = active[0].rect;
+        assert!(a.width() > thumb.x && a.height() > thumb.y, "the active thumb paints larger than its allocation");
+
+        let inactive = rects
+            .iter()
+            .filter(|r| r.stroke.width == 1.0 && r.stroke.color == t.border_soft && (r.rect.size() - thumb).length() < 0.5)
+            .count();
+        assert_eq!(inactive, 2, "the two inactive thumbs keep the soft outline at the allocated size");
     }
 
     /// The Loop checkbox reads `Document.loop_playback` as its source of truth and, on a no-input

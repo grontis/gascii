@@ -473,6 +473,7 @@
         let mut app = GasciiApp::headless();
         let edit = gascii_core::add_frame(&app.doc, 1, gascii_core::Frame::blank(app.doc.width, app.doc.height)).unwrap();
         app.apply_edit(edit, None);
+        app.switch_active_frame(0);
         assert_eq!(app.doc.resolved_frame_duration_ms(0), Some(Document::DEFAULT_FRAME_DURATION_MS));
 
         struct EditOutcomeDouble;
@@ -511,6 +512,7 @@
         let mut app = GasciiApp::headless();
         let edit = gascii_core::add_frame(&app.doc, 1, gascii_core::Frame::blank(app.doc.width, app.doc.height)).unwrap();
         app.apply_edit(edit, None);
+        app.switch_active_frame(0);
 
         // A pending Text burst on L, uncommitted, at (0,0) on frame 0.
         app.slots[Binding::L.ix()] = ToolSlot::new(ToolKind::Text);
@@ -1014,6 +1016,7 @@
         let mut app = GasciiApp::headless();
         let edit = gascii_core::add_frame(&app.doc, 1, gascii_core::Frame::blank(app.doc.width, app.doc.height)).unwrap();
         app.apply_edit(edit, None);
+        app.switch_active_frame(0);
         assert_eq!(app.active_frame, 0);
 
         app.active_glyph = 'Z';
@@ -1081,6 +1084,21 @@
         assert_eq!(app.doc.cell_at(1, 0, 0, 0).unwrap().ch, 'D', "the duplicate must carry the source frame's content");
         assert_eq!(app.doc.cell_at(1, 0, 1, 0).unwrap().ch, 'X', "the duplicate must carry the just-flushed burst too");
         assert!(app.last_error.is_none());
+    }
+
+    /// Adding a frame moves the editing cursor onto it — the user's next action is on the frame
+    /// just created — and undo returns the cursor to the frame it left.
+    #[test]
+    fn add_frame_via_menu_selects_the_newly_added_frame_and_undo_returns_the_cursor() {
+        let mut app = GasciiApp::headless();
+        app.add_frame_via_menu();
+        assert_eq!(app.doc.frame_count(), 2);
+        assert_eq!(app.active_frame, 1, "the new frame becomes the working frame");
+        assert_eq!(app.doc.active_frame(), 1);
+
+        app.request_undo();
+        assert_eq!(app.doc.frame_count(), 1);
+        assert_eq!(app.active_frame, 0, "undo returns the cursor to the source frame");
     }
 
     /// End-to-end integration: drives the whole Add-Frame/switch-frame/undo commit chain together
@@ -1878,18 +1896,18 @@
         assert_eq!(app.doc.active_layer(), 1, "apply_edit must sync doc's active-layer cursor from app.active_layer");
     }
 
-    /// `apply_edit`'s doc -> app direction: `AddFrame` shifts `doc`'s cursor as a side effect of
-    /// applying (inserting at index 0 pushes the active frame from 0 to 1) — `app.active_frame`
-    /// must follow that shift, not just the app -> doc seed. Then `request_undo`'s own doc -> app
-    /// resync must follow `doc`'s cursor back down when the insert is undone.
+    /// `apply_edit`'s doc -> app direction: `AddFrame` moves `doc`'s cursor onto the inserted
+    /// frame as a side effect of applying — `app.active_frame` must follow that move, not just the
+    /// app -> doc seed. Then `request_undo`'s own doc -> app resync must follow `doc`'s cursor
+    /// back down when the insert is undone.
     #[test]
     fn undoing_an_add_frame_moves_the_docs_cursor_and_app_active_frame_follows() {
         let mut app = GasciiApp::headless();
-        let edit = gascii_core::add_frame(&app.doc, 0, gascii_core::Frame::blank(app.doc.width, app.doc.height)).unwrap();
+        let edit = gascii_core::add_frame(&app.doc, 1, gascii_core::Frame::blank(app.doc.width, app.doc.height)).unwrap();
         app.apply_edit(edit, None);
         assert_eq!(app.doc.frame_count(), 2);
-        assert_eq!(app.doc.active_frame(), 1, "inserting at index 0 shifts the active cursor forward");
-        assert_eq!(app.active_frame, 1, "apply_edit's doc -> app resync must follow the shift");
+        assert_eq!(app.doc.active_frame(), 1, "the inserted frame becomes the active cursor");
+        assert_eq!(app.active_frame, 1, "apply_edit's doc -> app resync must follow the move");
 
         app.request_undo();
         assert_eq!(app.doc.active_frame(), 0, "undo restores doc's pre-insert cursor");
@@ -4914,6 +4932,7 @@
     fn plugin_tick_panel_outcome_set_active_frame_reaches_switch_active_frame_via_handle_keys() {
         let mut app = GasciiApp::headless();
         app.add_frame_via_menu(); // now 2 frames, so '.' has somewhere to advance to
+        app.switch_active_frame(0);
         assert_eq!(app.active_frame, 0);
 
         let ctx = egui::Context::default();

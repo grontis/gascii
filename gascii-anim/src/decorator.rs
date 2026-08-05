@@ -484,7 +484,7 @@ mod tests {
         history.apply(&mut doc, add_frame_edit);
         let add_layer_edit = gascii_core::add_layer(&doc, doc.layer_count()).unwrap();
         history.apply(&mut doc, add_layer_edit);
-        assert_eq!(doc.active_frame(), 0, "sanity: inserting after the active frame leaves it unchanged");
+        doc.set_active_frame(0);
 
         let (cx, cy) = (doc.width / 2, doc.height / 2);
         // Frame 0 (the prev-neighbor once frame 1 becomes active), layer 1 only.

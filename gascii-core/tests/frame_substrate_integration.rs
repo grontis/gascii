@@ -111,25 +111,25 @@ fn drawing_via_pencil_on_two_frames_then_reordering_then_undoing_the_full_stack_
 
     let e2 = add_frame(&doc, 1, Frame::blank(4, 4)).unwrap();
     history.apply(&mut doc, e2);
-    forward.push(doc.clone()); // depth 2: a second, blank frame
+    forward.push(doc.clone()); // depth 2: a second, blank frame — now the active one
 
-    // Frame 1 is drawn on via ctx.frame explicitly — the cursor (doc.active_frame()) never moves
-    // to select it, deliberately: this is the design's own point (Solution 2's whole premise) that
-    // CellEdit addressing never depends on the document's active-frame cursor.
+    // Frame 1 is drawn on via ctx.frame explicitly — CellEdit addressing never depends on the
+    // document's active-frame cursor (that independence is pinned per-tool in the ctx-frame unit
+    // tests; here the cursor happens to sit on 1 because AddFrame selected the frame it inserted).
     let e3 = press_release(&tctx(1, 'b'), &doc, 3, 3);
     history.apply(&mut doc, e3);
     forward.push(doc.clone()); // depth 3: 'b' on frame 1
 
-    assert_eq!(doc.active_frame(), 0, "sanity: drawing on frame 1 via ctx.frame never moved the cursor");
+    assert_eq!(doc.active_frame(), 1, "sanity: the cursor sits on the frame AddFrame inserted");
     let e4 = reorder_frame(&doc, 0, 1).unwrap().unwrap();
     history.apply(&mut doc, e4);
     forward.push(doc.clone()); // depth 4: frames swapped
 
-    // The reorder both moved content and (since the cursor was sitting at the 'from' index) moved
-    // the active-frame cursor along with it — a genuine tracked side effect, not a no-op.
+    // The reorder both moved content and shifted the active-frame cursor along with its frame —
+    // a genuine tracked side effect, not a no-op.
     assert_eq!(doc.cell_at(1, 0, 0, 0).unwrap().ch, 'a', "'a' followed the reorder from index 0 to index 1");
     assert_eq!(doc.cell_at(0, 0, 3, 3).unwrap().ch, 'b', "'b' followed the reorder from index 1 to index 0");
-    assert_eq!(doc.active_frame(), 1, "the cursor was at the moved index (0) and must follow it to 1");
+    assert_eq!(doc.active_frame(), 0, "the cursor's frame slid from index 1 to 0 and the cursor followed it");
 
     assert_eq!(forward.len(), 5);
 
@@ -166,13 +166,14 @@ fn a_frame_reorder_landing_mid_stroke_must_be_resynced_or_a_masked_off_plane_com
     let mut doc = Document::new(4, 4);
     let mut history = History::new();
     let add = add_frame(&doc, 1, Frame::blank(4, 4)).unwrap();
-    history.apply(&mut doc, add);
+    history.apply(&mut doc, add); // the new frame becomes active
+    assert!(doc.set_active_frame(0));
 
     // Distinguishing bg at the same coordinate on each frame (the setup content itself isn't what
     // is under test, so it's written directly rather than through a tool). `set_cell_at` is
     // `pub(crate)`-only, so this integration crate switches the active frame instead, mirroring
     // every other integration test's convention.
-    doc.set_cell(0, 2, 2, Cell { ch: 'o', fg: Rgba::WHITE, bg: color_p }); // frame 0, active by default
+    doc.set_cell(0, 2, 2, Cell { ch: 'o', fg: Rgba::WHITE, bg: color_p }); // frame 0
     assert!(doc.set_active_frame(1));
     doc.set_cell(0, 2, 2, Cell { ch: 'o', fg: Rgba::WHITE, bg: color_q });
     assert!(doc.set_active_frame(0));
@@ -474,7 +475,8 @@ fn clearing_the_active_frame_leaves_other_frames_intact_through_a_save_load_roun
     let mut doc = Document::new(3, 3);
     let mut history = History::new();
     let e1 = add_frame(&doc, 1, Frame::blank(3, 3)).unwrap();
-    history.apply(&mut doc, e1);
+    history.apply(&mut doc, e1); // the new frame becomes active
+    assert!(doc.set_active_frame(0));
 
     doc.set_cell(0, 0, 0, cell('x', Rgba::WHITE, Rgba::TRANSPARENT)); // frame 0
     assert!(doc.set_active_frame(1));

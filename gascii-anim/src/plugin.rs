@@ -345,6 +345,9 @@ mod tests {
             let edit = gascii_core::add_frame(&doc, i, gascii_core::Frame::blank(doc.width, doc.height)).unwrap();
             history.apply(&mut doc, edit);
         }
+        // `add_frame` selects each inserted frame — park the cursor back at 0 so tests state
+        // their own starting frame explicitly.
+        doc.set_active_frame(0);
         doc
     }
 

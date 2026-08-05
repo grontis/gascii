@@ -2,14 +2,10 @@
 //! contract `frame_ops.rs`/`resize_document`/`clear_document` already use, so `History` stays the
 //! sole place that ever actually mutates a `Document`'s layer collection.
 //!
-//! `add_layer`/`duplicate_layer` deliberately diverge from `frame_ops::add_frame`/`duplicate_frame`
-//! in one respect: the newly inserted layer's own index always becomes the active layer
-//! (`active_layer_after == index`), rather than reusing `shift_for_insert`'s "wherever the old
-//! cursor landed" rule the frame side uses. Frame duplication is an animation-timeline action — the
-//! user is usually still refining the *source* frame. Layer duplication is a per-layer-editor
-//! action — the user's very next action is almost always drawing on the new/duplicated layer, so
-//! it should already be selected. This is a deliberate UX divergence, not an oversight; don't "fix"
-//! it to match `duplicate_frame`.
+//! `add_layer`/`duplicate_layer` and `frame_ops::add_frame`/`duplicate_frame` share one selection
+//! rule: the newly inserted element's own index becomes the active one (`active_*_after ==
+//! index`) — the user's very next action is almost always on the layer/frame just added or
+//! duplicated, so it should already be selected. Undo restores the previously active index.
 //!
 //! `remove_layer`/`reorder_layer` reuse `frame_ops`'s `shift_for_remove`/`shift_for_move` verbatim —
 //! removing or reordering an *uninvolved* active layer shifts by exactly the same rule as the frame

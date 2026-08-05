@@ -703,7 +703,7 @@ mod tests {
         let mut history = crate::edit::History::new();
         history.apply(&mut doc, edit);
         doc.set_cell_at(1, 0, 1, 1, c('B', Rgba::WHITE, Rgba::TRANSPARENT));
-        assert_eq!(doc.active_frame(), 0, "doc's active frame stays 0; only the `frame` argument targets frame 1");
+        doc.set_active_frame(0); // only the `frame` argument targets frame 1
 
         let pending = vec![PendingCell { x: 1, y: 1, cell: c('C', Rgba::WHITE, Rgba::TRANSPARENT) }];
         let edit = diff_pending(&pending, &doc, 1, 0).expect("the cell differs from frame 1's content");

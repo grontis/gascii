@@ -4,7 +4,7 @@
 //! subsystem rather than touching `self.doc`/`self.slots` directly.
 
 use eframe::egui;
-use gascii_core::{clear_document, duplicate_frame, Cell, CellEdit, CellPatch, Edit, FrameOpError, ToolEvent, ToolResponse};
+use gascii_core::{clear_document, duplicate_frame, CellEdit, CellPatch, Edit, FrameOpError, ToolEvent, ToolResponse};
 
 use super::{make_tool, Binding, GasciiApp, ToolKind};
 

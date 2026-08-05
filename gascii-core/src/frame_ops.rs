@@ -18,15 +18,6 @@ pub enum FrameOpError {
     TooManyLayers { found: usize, max: usize },
 }
 
-/// How `active` shifts when a new element lands at index `at` in a `Vec::insert`.
-fn shift_for_insert(active: usize, at: usize) -> usize {
-    if at <= active {
-        active + 1
-    } else {
-        active
-    }
-}
-
 /// How `active` shifts when the element at `removed` is taken out via `Vec::remove`, given the
 /// vec's `new_len` (post-removal). `pub(crate)`: reused verbatim by `layer_ops::remove_layer` —
 /// removing a layer shifts an uninvolved active layer index by exactly the same rule as removing a
@@ -100,8 +91,10 @@ fn check_caps(
 pub fn add_frame(doc: &Document, at: usize, frame: Frame) -> Result<Edit, FrameOpError> {
     check_caps(doc, doc.frame_count() + 1, frame.layers.len(), frame.layers.len())?;
     let active_before = doc.active_frame();
-    let active_after = shift_for_insert(active_before, at);
-    Ok(Edit::AddFrame { index: at, frame, active_frame_before: active_before, active_frame_after: active_after })
+    // The inserted frame becomes active (`active_frame_after == at`) — the same rule
+    // `layer_ops::add_layer` uses: the user's next action is almost always on the frame just
+    // added or duplicated. Undo restores `active_frame_before`.
+    Ok(Edit::AddFrame { index: at, frame, active_frame_before: active_before, active_frame_after: at })
 }
 
 /// Clones frame `index` and inserts the clone immediately after it.
@@ -163,23 +156,29 @@ mod tests {
     }
 
     #[test]
-    fn add_frame_at_zero_shifts_a_lower_active_frame_forward() {
-        let doc = Document::new(3, 3);
-        let edit = add_frame(&doc, 0, blank(3, 3)).unwrap();
-        let Edit::AddFrame { active_frame_before, active_frame_after, .. } = edit else { panic!("expected AddFrame") };
-        assert_eq!(active_frame_before, 0);
-        assert_eq!(active_frame_after, 1, "inserting at/before the active index shifts it forward");
-    }
-
-    #[test]
-    fn add_frame_after_active_frame_leaves_it_unchanged() {
+    fn add_frame_makes_the_inserted_frame_active_wherever_it_lands() {
         let mut doc = Document::new(3, 3);
         let mut history = History::new();
         let edit = add_frame(&doc, 1, blank(3, 3)).unwrap();
-        history.apply(&mut doc, edit); // now 2 frames, active still 0
-        let edit = add_frame(&doc, 2, blank(3, 3)).unwrap();
-        let Edit::AddFrame { active_frame_after, .. } = edit else { panic!("expected AddFrame") };
-        assert_eq!(active_frame_after, 0, "inserting after the active index leaves it unchanged");
+        history.apply(&mut doc, edit);
+        assert_eq!(doc.active_frame(), 1, "the appended frame becomes active");
+
+        let edit = add_frame(&doc, 0, blank(3, 3)).unwrap();
+        let Edit::AddFrame { active_frame_before, active_frame_after, .. } = edit else { panic!("expected AddFrame") };
+        assert_eq!(active_frame_before, 1);
+        assert_eq!(active_frame_after, 0, "the inserted frame becomes active, matching layer_ops' rule");
+    }
+
+    #[test]
+    fn undoing_an_add_frame_restores_the_previously_active_frame() {
+        let mut doc = Document::new(3, 3);
+        let mut history = History::new();
+        let edit = add_frame(&doc, 1, blank(3, 3)).unwrap();
+        history.apply(&mut doc, edit);
+        assert_eq!(doc.active_frame(), 1);
+
+        history.undo(&mut doc);
+        assert_eq!(doc.active_frame(), 0, "undo must return the cursor to the frame it left");
     }
 
     #[test]
@@ -187,10 +186,10 @@ mod tests {
         let mut doc = Document::new(3, 3);
         let mut history = History::new();
         let edit = add_frame(&doc, 0, blank(3, 3)).unwrap();
-        history.apply(&mut doc, edit); // 2 frames, active now 1
+        history.apply(&mut doc, edit);
         let edit = add_frame(&doc, 0, blank(3, 3)).unwrap();
-        history.apply(&mut doc, edit); // 3 frames, active now 2
-        assert_eq!(doc.active_frame(), 2);
+        history.apply(&mut doc, edit); // 3 frames
+        doc.set_active_frame(2);
 
         let edit = remove_frame(&doc, 0).unwrap();
         let Edit::RemoveFrame { active_frame_after, .. } = edit else { panic!("expected RemoveFrame") };
@@ -202,7 +201,8 @@ mod tests {
         let mut doc = Document::new(3, 3);
         let mut history = History::new();
         let edit = add_frame(&doc, 1, blank(3, 3)).unwrap();
-        history.apply(&mut doc, edit); // 2 frames, active 0
+        history.apply(&mut doc, edit); // 2 frames
+        doc.set_active_frame(0);
         assert_eq!(doc.frame_count(), 2);
         assert_eq!(doc.active_frame(), 0);
 
@@ -222,9 +222,10 @@ mod tests {
         let mut doc = Document::new(3, 3);
         let mut history = History::new();
         let edit = add_frame(&doc, 1, blank(3, 3)).unwrap();
-        history.apply(&mut doc, edit); // 2 frames, active 0
+        history.apply(&mut doc, edit);
         let edit = add_frame(&doc, 2, blank(3, 3)).unwrap();
-        history.apply(&mut doc, edit); // 3 frames, active 0
+        history.apply(&mut doc, edit); // 3 frames
+        doc.set_active_frame(0);
 
         let edit = reorder_frame(&doc, 0, 2).unwrap().unwrap();
         let Edit::ReorderFrame { active_frame_after, .. } = edit else { panic!("expected ReorderFrame") };
@@ -236,11 +237,12 @@ mod tests {
         let mut doc = Document::new(3, 3);
         let mut history = History::new();
         let edit = add_frame(&doc, 1, blank(3, 3)).unwrap();
-        history.apply(&mut doc, edit); // 2 frames, active 0
+        history.apply(&mut doc, edit);
         let edit = add_frame(&doc, 2, blank(3, 3)).unwrap();
-        history.apply(&mut doc, edit); // 3 frames, active 0
+        history.apply(&mut doc, edit);
         let edit = add_frame(&doc, 3, blank(3, 3)).unwrap();
-        history.apply(&mut doc, edit); // 4 frames, active 0
+        history.apply(&mut doc, edit); // 4 frames
+        doc.set_active_frame(0);
 
         // Move active frame 0 aside first so the active index (now 1, after the moves below) sits
         // strictly between `from` and `to` for the case under test.

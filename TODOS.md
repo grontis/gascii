@@ -14,13 +14,15 @@ DONE 8-3: rendering switched to the stacked "acetate" model — each visible lay
 ~~When a layer is hidden and we try to draw on it, we display an error message in the bottom, but this message never dissappears once it shows. We should display it for a set number of seconds (3 seconds default)~~
 DONE 8-3: status-bar errors now expire 3s after being raised (all error sites, not just the hidden-layer one). Dialog-inline validation messages intentionally do not expire.
 
-For the animation section, we only slightly enlarge the selected frame as UX for signaling which frame is being worked on. I say we also give a border to the selected.
+~~For the animation section, we only slightly enlarge the selected frame as UX for signaling which frame is being worked on. I say we also give a border to the selected.~~
+DONE 8-4: (Note: no enlargement actually existed before — the old marker was just a slightly thicker gray stroke.) The selected frame's thumb now paints enlarged (+2px each side) with a 2px high-contrast border (the theme's inversion color — near-white in dark mode, near-black in light). Layout/scrolling geometry is unchanged; only the paint pops.
 
 Also for animation, for the frames, maybe we display a brief preview rather than just blank square
 
 For fullscreen mode, we remove the Text tool icon from the tool selection, we should leave it in (supported if keyboard connected)
 
-when duplicating a frame or adding  a new one, we should automatically switch to that frame being the frame selected.
+~~when duplicating a frame or adding  a new one, we should automatically switch to that frame being the frame selected.~~
+DONE 8-4: adding or duplicating a frame now selects it, from every entry point (timeline Add/Duplicate buttons, Shift+D, Animation ▸ Add Frame). Implemented in core so undo also returns the cursor to the frame it left — same rule layers already used.
 
 if mouse is last active in the animation section, we should also support ctrl+d, delete key, copy paste keys.
 

@@ -1178,8 +1178,9 @@ mod tests {
         history.apply(&mut doc, add_layer_edit);
         let rename = crate::layer_ops::set_layer_name(&doc, 1, "Shading".to_string()).unwrap().unwrap();
         history.apply(&mut doc, rename);
-        // The active-layer cursor is UI/session state, not round-tripped (mirrors active_frame's
-        // own contract) — reset it to the loader's own unconditional default before comparing.
+        // The active-frame/layer cursors are UI/session state, not round-tripped — reset both to
+        // the loader's own unconditional defaults before comparing.
+        assert!(doc.set_active_frame(0));
         assert!(doc.set_active_layer(0));
 
         let json = save_string(&doc);

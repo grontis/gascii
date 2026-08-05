@@ -262,7 +262,7 @@ mod tests {
         let mut history = crate::edit::History::new();
         history.apply(&mut doc, edit);
         doc.set_cell_at(1, 0, 0, 0, Cell { ch: ' ', fg: Rgba::WHITE, bg: Rgba(2, 2, 2, 255) });
-        assert_eq!(doc.active_frame(), 0, "doc's active frame stays 0; only ctx.frame targets frame 1");
+        doc.set_active_frame(0); // only ctx.frame targets frame 1
 
         let mask = PlaneMask { glyph: true, bg: false };
         let mut tctx = ctx(mask, '#', Rgba(9, 9, 9, 255), Rgba(9, 9, 9, 255));
