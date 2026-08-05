@@ -13,15 +13,20 @@
 //!   differs from what's cached, so an edit to frame 3 doesn't re-upload frames 0-2 and 4-N just
 //!   because they were also visible and also got re-verified.
 //!
-//! 256 frames x up to 1024^2 cells rules out rendering actual glyphs into every thumbnail —
-//! illegible at strip scale and expensive regardless — so this samples/averages `composite_frame`'s
-//! cells into a small fixed grid instead, uploaded the same `egui::TextureHandle` way
+//! 256 frames x up to 1024^2 cells rules out rendering actual glyph *shapes* into every thumbnail
+//! — illegible at strip scale and expensive regardless — so this samples/averages each cell's
+//! effective color into a small fixed grid instead: its bg over the document background, with the
+//! glyph's fg blended on top by a per-character ink-coverage weight (`glyph_coverage`). Glyph-only
+//! art (fg ink on transparent bg — the common case) therefore reads as a real tonal preview of
+//! the drawing, not a blank block. Uploaded the same `egui::TextureHandle` way
 //! `gascii/src/image_bg.rs` already uses for the trace image.
 
 use gascii_core::{Cell, Document};
 
-pub(crate) const THUMB_W: usize = 48;
-pub(crate) const THUMB_H: usize = 30;
+// Matches kiosk's touch thumb size exactly (`kiosk::TOUCH_THUMB`); the windowed strip's smaller
+// thumbs downscale through the LINEAR sampler.
+pub(crate) const THUMB_W: usize = 96;
+pub(crate) const THUMB_H: usize = 60;
 
 struct CachedThumb {
     content_hash: u64,
@@ -118,15 +123,38 @@ fn content_hash(rows: &[Vec<Cell>]) -> u64 {
     h.finish()
 }
 
-/// `cell.bg` alpha-composited over `doc.background` — the thumbnail ignores glyphs entirely (a
-/// fixed-size color block, not a rendered sheet) so only the background channel matters.
+/// How much of a cell a glyph visually fills — the weight `effective_rgb` blends the fg color in
+/// by. A coarse tonal heuristic, not font metrics: the block-shade run gets its actual densities,
+/// tiny punctuation reads faint, and everything else sits at a middle weight that makes ordinary
+/// letterform art clearly visible at strip scale.
+fn glyph_coverage(ch: char) -> f32 {
+    match ch {
+        ' ' => 0.0,
+        '\u{2588}' => 1.0,                                            // █
+        '\u{2593}' => 0.75,                                           // ▓
+        '\u{2592}' => 0.5,                                            // ▒
+        '\u{2591}' => 0.25,                                           // ░
+        '.' | ',' | '\'' | '`' | ':' | ';' | '\u{00B7}' => 0.15,      // sparse punctuation
+        _ => 0.45,
+    }
+}
+
+/// A cell's one effective preview color: `cell.bg` alpha-composited over `doc.background`, then
+/// the glyph's fg blended on top by its ink coverage (scaled by fg alpha) — so both painted
+/// backgrounds and bare glyph ink show up in the thumbnail.
 fn effective_rgb(doc: &Document, cell: &Cell) -> [f32; 3] {
     let a = cell.bg.3 as f32 / 255.0;
     let bg = doc.background;
-    [
+    let base = [
         cell.bg.0 as f32 * a + bg.0 as f32 * (1.0 - a),
         cell.bg.1 as f32 * a + bg.1 as f32 * (1.0 - a),
         cell.bg.2 as f32 * a + bg.2 as f32 * (1.0 - a),
+    ];
+    let ink = glyph_coverage(cell.ch) * (cell.fg.3 as f32 / 255.0);
+    [
+        cell.fg.0 as f32 * ink + base[0] * (1.0 - ink),
+        cell.fg.1 as f32 * ink + base[1] * (1.0 - ink),
+        cell.fg.2 as f32 * ink + base[2] * (1.0 - ink),
     ]
 }
 
@@ -234,6 +262,47 @@ mod tests {
         // The fast path must now be armed against the new id, not the original one.
         let third = cache.get_or_build(&ctx, &doc, 0, Some(2)).unwrap();
         assert_eq!(second.id(), third.id());
+    }
+
+    fn pixels_for(doc: &Document) -> Vec<u8> {
+        let composited = gascii_core::composite_frame(doc, 0).unwrap();
+        build_pixels(doc, &composited)
+    }
+
+    fn glyph_cell(ch: char) -> Cell {
+        Cell { ch, fg: Rgba::WHITE, bg: Rgba::TRANSPARENT }
+    }
+
+    /// The whole point of the ink-coverage blend: glyph-only art (fg ink, no painted backgrounds)
+    /// must be visible in the preview instead of rendering as a blank block.
+    #[test]
+    fn glyph_only_art_is_visible_in_the_preview_not_a_blank_block() {
+        let mut doc = Document::new(2, 2);
+        for y in 0..2u16 {
+            for x in 0..2u16 {
+                doc.set_cell(0, x, y, glyph_cell('\u{2588}'));
+            }
+        }
+        let inked = pixels_for(&doc);
+        let blank = pixels_for(&Document::new(2, 2));
+        assert_ne!(inked, blank, "glyph-only art must change the preview");
+        assert!(inked[0] > blank[0], "white full-block ink must read brighter than the bare background");
+    }
+
+    /// The block-shade run's real densities order the tint strength — a `█` cell reads brighter
+    /// (more white ink) than a `.` cell, which still reads brighter than empty.
+    #[test]
+    fn denser_glyphs_tint_the_preview_more_than_sparse_ones() {
+        let cell_doc = |ch| {
+            let mut doc = Document::new(1, 1);
+            doc.set_cell(0, 0, 0, glyph_cell(ch));
+            doc
+        };
+        let full = pixels_for(&cell_doc('\u{2588}'))[0];
+        let dot = pixels_for(&cell_doc('.'))[0];
+        let empty = pixels_for(&Document::new(1, 1))[0];
+        assert!(full > dot, "█ must carry more ink than '.'");
+        assert!(dot > empty, "'.' must still be visible over the background");
     }
 
     #[test]

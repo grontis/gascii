@@ -17,7 +17,8 @@ DONE 8-3: status-bar errors now expire 3s after being raised (all error sites, n
 ~~For the animation section, we only slightly enlarge the selected frame as UX for signaling which frame is being worked on. I say we also give a border to the selected.~~
 DONE 8-4: (Note: no enlargement actually existed before — the old marker was just a slightly thicker gray stroke.) The selected frame's thumb now paints enlarged (+2px each side) with a 2px high-contrast border (the theme's inversion color — near-white in dark mode, near-black in light). Layout/scrolling geometry is unchanged; only the paint pops.
 
-Also for animation, for the frames, maybe we display a brief preview rather than just blank square
+~~Also for animation, for the frames, maybe we display a brief preview rather than just blank square~~
+DONE 8-5: thumbnails now show the actual art. Each cell's preview color blends the glyph's text color over the background by an ink-coverage weight (█▓▒░ get their real densities, punctuation reads faint, other characters a middle weight) — so glyph-only drawings appear as a tonal preview instead of a blank square. Thumbnail resolution doubled to 96×60 (matches the fullscreen thumb size exactly; windowed thumbs downscale smoothly).
 
 ~~For fullscreen mode, we remove the Text tool icon from the tool selection, we should leave it in (supported if keyboard connected)~~
 DONE 8-5: Text now has a cell in the fullscreen tool grid, and the `T` shortcut works while fullscreen too — both were driven by the same registry flag, so they came back together. Binding badges show on the Text cell like any other tool. Follow-up per feedback: Eyedropper removed from the fullscreen grid instead, keeping it a tidy 4×2 (Alt+click's temporary sample still picks colors there without a tool switch; `I` is gated while fullscreen accordingly).
