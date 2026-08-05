@@ -262,9 +262,10 @@ pub(super) fn build_tools() -> Vec<ToolDef> {
             shows_hover: true,
             stamps_glyph: false,
             suppresses_shortcuts: true,
-            // Kiosk has no keyboard-driven session UI, so Text has no cell in its touch grid —
-            // and therefore its shortcut must not be reachable while fullscreen either.
-            kiosk_visible: false,
+            // In the kiosk grid too: a physical keyboard works fine while fullscreen, and the
+            // cell keeps the `T` shortcut reachable (`tool_shortcut_reachable`) and the binding
+            // badge visible there.
+            kiosk_visible: true,
             plugin_slot: None,
             pressure_sizeable: false,
             wants_ctx_patch: false,
@@ -356,7 +357,10 @@ pub(super) fn build_tools() -> Vec<ToolDef> {
             shows_hover: true,
             stamps_glyph: false,
             suppresses_shortcuts: false,
-            kiosk_visible: true,
+            // Not in the kiosk grid: keeps it a tidy 4×2 after Text joined, and Alt+click's
+            // temporary sample covers color picking there without a tool switch. `I` is gated
+            // while fullscreen for the usual kiosk_visible reason.
+            kiosk_visible: false,
             plugin_slot: None,
             pressure_sizeable: false,
             wants_ctx_patch: false,

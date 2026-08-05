@@ -120,19 +120,19 @@ pub fn top_bar(ui: &mut Ui, app: &mut GasciiApp, ctx: &egui::Context) {
     }
 }
 
-/// The sidebar's tool grid: every registry entry with `kiosk_visible` set (every tool but Text).
-/// Kiosk has no keyboard-driven session UI, so a binding parked on Text here would have no cell to
-/// highlight — see `crate::app::tool_shortcut_reachable`, which keeps the `T` shortcut from
-/// reaching Text while fullscreen for the same reason (the same `kiosk_visible` fact). A binding
-/// already on Text when fullscreen is entered is left alone by both; `tool_grid`'s equality-based
-/// highlight simply shows no cell selected in that case, never panics or paints a phantom badge
-/// (pinned by `kiosk_sidebars_tool_list_excludes_text` and
+/// The sidebar's tool grid: every enabled registry entry with `kiosk_visible` set — every tool
+/// but Eyedropper (Alt+click's temporary sample covers picking, keeping the grid a tidy 4×2 with
+/// Text included; see `crate::app::tool_shortcut_reachable` for the shortcut half of the same
+/// fact). `tool_grid`'s equality-based highlight tolerates a binding whose kind is absent from
+/// the list it's given — a binding parked on Eyedropper when fullscreen is entered shows no cell
+/// selected, never panics or paints a phantom badge (pinned by
 /// `tool_grid_renders_without_panicking_when_a_binding_holds_a_tool_absent_from_its_list`).
 fn kiosk_tools(app: &GasciiApp) -> Vec<crate::app::ToolDef> {
     tools().iter().copied().filter(|d| d.kiosk_visible && app.tool_enabled(d.kind)).collect()
 }
 
-/// The sidebar: a 4×2 tool grid (Text excluded), both bindings' tool options, the glyph palette
+/// The sidebar: a 4×2 tool grid (Eyedropper excluded — Alt+click samples), both bindings' tool
+/// options, the glyph palette
 /// at touch-sized swatches, and colours. The options block's height varies (shape rows, the brush
 /// block), so the glyph scroll gives up height first; short panels shrink the touch geometry via
 /// `scale_for`, and if even that doesn't fit the whole sidebar scrolls rather than clipping the
@@ -280,23 +280,25 @@ mod tests {
         assert_eq!(scale_for(100.0), SCALE_MIN);
     }
 
-    /// Kiosk's sidebar has no cell for Text (no keyboard-driven session UI) — its tool list must
-    /// never include it, and must otherwise stay in sync with the tool registry.
+    /// Kiosk's tool list: Text included (a keyboard user picks it while fullscreen, its binding
+    /// badge has a cell to live on), Eyedropper excluded (Alt+click samples without a tool
+    /// switch) — a tidy eight-cell 4×2 grid.
     #[test]
-    fn kiosk_sidebars_tool_list_excludes_text() {
+    fn kiosk_sidebars_tool_list_includes_text_and_excludes_eyedropper() {
         let app = crate::app::GasciiApp::headless();
         let tools = kiosk_tools(&app);
-        assert_eq!(tools.len(), crate::app::tools().len() - 1, "every registry entry except Text");
-        assert!(!tools.iter().any(|d| d.kind == ToolKind::Text), "Text must not appear in the kiosk grid");
+        assert_eq!(tools.len(), crate::app::tools().len() - 1, "every registry entry except Eyedropper");
+        assert!(tools.iter().any(|d| d.kind == ToolKind::Text), "Text must have a cell in the kiosk grid");
+        assert!(!tools.iter().any(|d| d.kind == ToolKind::Eyedropper), "Eyedropper must not appear in the kiosk grid");
     }
 
-    /// A binding already parked on Text when fullscreen is entered (deliberate user state, left
-    /// alone per design) has no matching cell in kiosk's Text-excluded grid. `tool_grid` must
-    /// render this without panicking and without highlighting any cell as if it matched.
+    /// A binding already parked on Eyedropper when fullscreen is entered (deliberate user state,
+    /// left alone per design) has no matching cell in kiosk's grid. `tool_grid` must render this
+    /// without panicking and without highlighting any cell as if it matched.
     #[test]
     fn tool_grid_renders_without_panicking_when_a_binding_holds_a_tool_absent_from_its_list() {
         let mut app = crate::app::GasciiApp::headless();
-        app.bind(Binding::L, ToolKind::Text);
+        app.bind(Binding::L, ToolKind::Eyedropper);
 
         let ctx = egui::Context::default();
         fonts::install_fonts(&ctx);
@@ -306,11 +308,11 @@ mod tests {
         });
 
         // Structural guarantee, not just "it didn't panic": `tool_grid`'s highlight is an equality
-        // check against each listed tool's kind, so a kind absent from the list (Text) can never
-        // match — no cell shows a phantom L/R badge for it.
+        // check against each listed tool's kind, so a kind absent from the list can never match —
+        // no cell shows a phantom L/R badge for it.
         assert!(
             kiosk_tools(&app).iter().all(|d| d.kind != app.slot(Binding::L).kind),
-            "sanity: L's Text binding has no equal in the kiosk grid's tool list"
+            "sanity: L's Eyedropper binding has no equal in the kiosk grid's tool list"
         );
     }
 

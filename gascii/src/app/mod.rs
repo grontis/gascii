@@ -83,15 +83,11 @@ fn should_handle_escape_for_fullscreen(
     keyboard_owner.is_none() && !stroke_in_progress && !widget_focused
 }
 
-/// Whether `kind`'s single-letter shortcut should be reachable from the keyboard this frame.
-/// Kiosk's sidebar deliberately excludes Text from its tool grid (`kiosk.rs`'s module doc — "no
-/// keyboard-driven session UI"), so reaching it via `T` while fullscreen would silently rebind L
-/// to a tool with no cell in that grid and no other on-screen trace of what changed. Every other
-/// tool's shortcut stays reachable — their tools are visible in the kiosk grid and show L/R
-/// badges, so the shortcut's effect is diagnosable from the touch UI alone. A binding already on
-/// Text when fullscreen is entered is untouched by this — it only gates *switching onto* Text,
-/// never an existing Text binding's normal operation (its caret still shows, its session still
-/// works).
+/// Whether `kind`'s single-letter shortcut should be reachable from the keyboard this frame. A
+/// shortcut is only reachable while fullscreen if its tool has a cell in kiosk's grid
+/// (`kiosk_visible`) — otherwise the keypress would silently rebind L to a tool with no cell and
+/// no other on-screen trace of what changed. Today that gates exactly Eyedropper (`I`), whose
+/// kiosk role Alt+click's temporary sample covers without a tool switch.
 fn tool_shortcut_reachable(kind: ToolKind, is_fullscreen: bool) -> bool {
     !is_fullscreen || tool_def(kind).kiosk_visible
 }

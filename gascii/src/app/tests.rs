@@ -130,7 +130,9 @@
                 ToolKind::Pencil | ToolKind::Fill | ToolKind::Rectangle | ToolKind::Line
             );
             let expected_suppresses_shortcuts = matches!(kind, ToolKind::Text);
-            let expected_kiosk_visible = !matches!(kind, ToolKind::Text);
+            // Text included (a physical keyboard works while fullscreen); Eyedropper excluded
+            // (Alt+click samples, keeping the kiosk grid a tidy 4×2).
+            let expected_kiosk_visible = !matches!(kind, ToolKind::Eyedropper);
             // The two plugin-boundary capability fields: today only Brush's plugin-sourced row
             // sets either.
             let expected_pressure_sizeable = matches!(kind, BRUSH_KIND);
@@ -2324,21 +2326,16 @@
         assert!(!suppresses_tool_shortcuts(None));
     }
 
-    /// Pure-function coverage over every `ToolKind`: only Text's shortcut is gated, and only while
-    /// fullscreen — kiosk's sidebar has no cell for Text, so `T` must not be reachable there, but
-    /// every other tool's shortcut (visible in the kiosk grid, showing L/R badges) stays live in
+    /// Pure-function coverage over every `ToolKind`: only Eyedropper's shortcut is gated, and only
+    /// while fullscreen — its kiosk role is covered by Alt+click's temporary sample, so `I` has no
+    /// cell to land on there. Every other tool's shortcut — Text's `T` included — is reachable in
     /// both chrome modes.
     #[test]
-    fn tool_shortcut_reachable_only_gates_text_and_only_while_fullscreen() {
+    fn tool_shortcut_reachable_only_gates_eyedropper_and_only_while_fullscreen() {
         for kind in ALL_KINDS {
             assert!(tool_shortcut_reachable(kind, false), "{kind:?}: every shortcut works windowed");
-        }
-        for kind in ALL_KINDS {
-            let expected = kind != ToolKind::Text;
-            assert_eq!(
-                tool_shortcut_reachable(kind, true), expected,
-                "{kind:?}: fullscreen gating must affect only Text"
-            );
+            let expected = kind != ToolKind::Eyedropper;
+            assert_eq!(tool_shortcut_reachable(kind, true), expected, "{kind:?}: fullscreen gating must affect only Eyedropper");
         }
     }
 
@@ -3796,14 +3793,14 @@
         assert_eq!(app.doc.cell(0, 2, 0).unwrap().ch, '!', "typing after the F11 toggle must still commit");
     }
 
-    /// End-to-end companion to `tool_shortcut_reachable_only_gates_text_and_only_while_fullscreen`:
-    /// drives the real `handle_keys` rather than the pure predicate alone, confirming `T` is left
-    /// unconsumed (L stays whatever it was) while fullscreen, and that this gating is narrow — every
-    /// other tool's shortcut (e.g. Fill's `F`) still switches L normally in the same chrome mode.
+    /// End-to-end companion to `tool_shortcut_reachable_allows_every_tool_in_both_chrome_modes`:
+    /// drives the real `handle_keys` rather than the pure predicate alone — `T` while fullscreen
+    /// switches L to Text like any other tool shortcut (keyboard-connected kiosk users get the
+    /// full tool set).
     #[test]
-    fn pressing_t_while_fullscreen_leaves_l_unchanged_but_other_tool_shortcuts_still_work() {
+    fn pressing_t_while_fullscreen_switches_l_to_text() {
         let mut app = GasciiApp::headless();
-        let original_l_kind = app.slot(Binding::L).kind;
+        assert_ne!(app.slot(Binding::L).kind, ToolKind::Text, "sanity: L starts on something else");
 
         let ctx = egui::Context::default();
         let mut raw_t = egui::RawInput::default();
@@ -3816,22 +3813,7 @@
             modifiers: egui::Modifiers::NONE,
         });
         let _ = ctx.run_ui(raw_t, |ui| app.handle_keys(ui));
-        assert_eq!(app.slot(Binding::L).kind, original_l_kind, "T must not switch L to Text while fullscreen");
-
-        let mut raw_f = egui::RawInput::default();
-        raw_f.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().fullscreen = Some(true);
-        raw_f.events.push(egui::Event::Key {
-            key: egui::Key::F,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
-        let _ = ctx.run_ui(raw_f, |ui| app.handle_keys(ui));
-        assert_eq!(
-            app.slot(Binding::L).kind, ToolKind::Fill,
-            "every other tool's shortcut must stay reachable while fullscreen"
-        );
+        assert_eq!(app.slot(Binding::L).kind, ToolKind::Text, "T must switch L to Text while fullscreen");
     }
 
     /// Acceptance criterion: "X swaps FG/BG in both chrome modes". K12's own fix (the pre-existing

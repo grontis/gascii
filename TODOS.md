@@ -19,7 +19,8 @@ DONE 8-4: (Note: no enlargement actually existed before — the old marker was j
 
 Also for animation, for the frames, maybe we display a brief preview rather than just blank square
 
-For fullscreen mode, we remove the Text tool icon from the tool selection, we should leave it in (supported if keyboard connected)
+~~For fullscreen mode, we remove the Text tool icon from the tool selection, we should leave it in (supported if keyboard connected)~~
+DONE 8-5: Text now has a cell in the fullscreen tool grid, and the `T` shortcut works while fullscreen too — both were driven by the same registry flag, so they came back together. Binding badges show on the Text cell like any other tool. Follow-up per feedback: Eyedropper removed from the fullscreen grid instead, keeping it a tidy 4×2 (Alt+click's temporary sample still picks colors there without a tool switch; `I` is gated while fullscreen accordingly).
 
 ~~when duplicating a frame or adding  a new one, we should automatically switch to that frame being the frame selected.~~
 DONE 8-4: adding or duplicating a frame now selects it, from every entry point (timeline Add/Duplicate buttons, Shift+D, Animation ▸ Add Frame). Implemented in core so undo also returns the cursor to the frame it left — same rule layers already used.
