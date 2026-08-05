@@ -1593,8 +1593,8 @@
     }
 
     /// Every effective toggle rebuilds the renderer from the enabled plugins only — a disabled
-    /// plugin's `wrap_renderer` must not run, so its canvas decorator (anim's onion skin) drops
-    /// out of the chain immediately and comes back on re-enable.
+    /// plugin's `wrap_renderer` must not run, so its canvas decorator (anim's playback painter)
+    /// drops out of the chain immediately and comes back on re-enable.
     #[test]
     fn toggling_a_plugin_rebuilds_the_renderer_excluding_disabled_wrappers() {
         let mut app = GasciiApp::headless();
@@ -4520,7 +4520,6 @@
         let keys: std::collections::HashSet<egui::Key> = claims.iter().map(|c| c.key).collect();
         for key in [
             egui::Key::Space,
-            egui::Key::O,
             egui::Key::Comma,
             egui::Key::Period,
             egui::Key::D,
@@ -4767,7 +4766,7 @@
         assert!(declared.iter().any(|&(name, _)| name == "Play / Pause"));
         assert!(declared.iter().any(|&(_, label)| label == "Shift+D"));
         assert!(declared.iter().any(|&(_, label)| label == "1-9, 0"));
-        assert_eq!(declared.len(), 6, "5 gascii-anim rows + 1 gascii-density-brush row");
+        assert_eq!(declared.len(), 5, "4 gascii-anim rows + 1 gascii-density-brush row");
     }
 
     /// `Ctrl+=`/`Ctrl+-` request the same one-step zoom the plain `+`/`-` chords and the View menu

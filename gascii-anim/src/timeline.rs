@@ -36,14 +36,6 @@ use crate::widgets;
 
 pub(crate) const PANEL_H: f32 = 164.0;
 
-/// Ceiling on the onion-skin prev/next steppers. `paint_onion` (`decorator.rs`) scans farthest-to-
-/// nearest and no longer stops at the first out-of-range neighbor (painting nearest-last needs the
-/// full configured depth visited every time, not just however many neighbor frames actually
-/// exist), so the per-paint cost per side is exactly this cap, not `frame_count()`-dependent — the
-/// cap is what keeps a stepper clicked far beyond any realistic depth (1-3) from costing
-/// noticeably more per idle paint than intended, regardless of document size.
-const ONION_DEPTH_MAX: u8 = 8;
-
 pub(crate) fn panel_frame(ctx: &egui::Context) -> egui::Frame {
     let t = theme::current(ctx);
     egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::symmetric(12, 8)).stroke(egui::Stroke::new(1.0, t.window_edge))
@@ -401,32 +393,6 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
             }
             if widgets::button(ui, "+10ms", !playing, control_h).clicked() && !playing {
                 outcome.properties.push(DocProperty::DefaultFrameDuration(step_default_duration(doc.frame_duration_ms, 10)));
-            }
-
-            ui.add_space(6.0);
-            ui.separator();
-            let mut onion = state.borrow().onion_enabled;
-            if widgets::checkbox(ui, &mut onion, "Onion") {
-                state.borrow_mut().onion_enabled = onion;
-            }
-            if onion {
-                let mut s = state.borrow_mut();
-                if widgets::button(ui, "prev-", s.onion_prev > 0, control_h).clicked() && s.onion_prev > 0 {
-                    s.onion_prev -= 1;
-                }
-                ui.label(format!("{}", s.onion_prev));
-                let can_grow_prev = s.onion_prev < ONION_DEPTH_MAX;
-                if widgets::button(ui, "prev+", can_grow_prev, control_h).clicked() && can_grow_prev {
-                    s.onion_prev += 1;
-                }
-                if widgets::button(ui, "next-", s.onion_next > 0, control_h).clicked() && s.onion_next > 0 {
-                    s.onion_next -= 1;
-                }
-                ui.label(format!("{}", s.onion_next));
-                let can_grow_next = s.onion_next < ONION_DEPTH_MAX;
-                if widgets::button(ui, "next+", can_grow_next, control_h).clicked() && can_grow_next {
-                    s.onion_next += 1;
-                }
             }
         });
 

@@ -1,7 +1,7 @@
 use egui::Ui;
 use gascii_plugin_api::{CanvasRenderer, DocProperty, PanelOutcome, Plugin, PluginDescriptor, PluginHost, PluginShortcut};
 
-use crate::decorator::OnionRenderer;
+use crate::decorator::PlaybackRenderer;
 use crate::shared::SharedState;
 use crate::thumbnail::ThumbnailCache;
 
@@ -47,7 +47,7 @@ pub fn make() -> Box<dyn Plugin> {
 pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     id: "gascii-anim",
     name: "Animation",
-    description: "Frame-based animation: a timeline panel, playback, and an onion-skin canvas overlay.",
+    description: "Frame-based animation: a timeline panel with frame thumbnails, playback transport, and drag-reorder.",
     version: env!("CARGO_PKG_VERSION"),
     make,
     tools: AnimPlugin::tool_capabilities,
@@ -104,12 +104,11 @@ pub(crate) fn resolve_space_hold(
 // `tick`-driven input, never a canvas gesture — so `tool_capabilities` is left at its default
 // (`Vec::new()`), with no override here.
 impl Plugin for AnimPlugin {
-    /// The five `tick`-driven shortcuts below, in the same order `tick` checks them. `Space` is
+    /// The four `tick`-driven shortcuts below, in the same order `tick` checks them. `Space` is
     /// declared as a hold, matching its `key_down`-driven mechanism rather than a one-shot press.
     fn shortcuts() -> Vec<PluginShortcut> {
         vec![
             PluginShortcut { name: "Play / Pause", label: "Space (hold)", keys: &[egui::Key::Space] },
-            PluginShortcut { name: "Toggle Onion Skin", label: "O", keys: &[egui::Key::O] },
             PluginShortcut { name: "Previous Frame", label: ",", keys: &[egui::Key::Comma] },
             PluginShortcut { name: "Next Frame", label: ".", keys: &[egui::Key::Period] },
             PluginShortcut { name: "Duplicate Frame", label: "Shift+D", keys: &[egui::Key::D] },
@@ -136,12 +135,12 @@ impl Plugin for AnimPlugin {
         }
     }
 
-    /// `Space` play/pause, `O` onion-toggle, `,`/`.` frame navigation, and `Shift+D` duplicate frame
-    /// are all gated on `!focused` — matching `BrushPlugin::tick`'s own digit-key gating precedent,
-    /// so typing into a focused field never fires any of them. The playback clock below them
-    /// ignores `focused` entirely (an animation preview must not freeze just because a text field
-    /// somewhere has focus). `,`/`.`/`Shift+D` are the two shortcuts that need to reach the
-    /// document — everything else here only ever mutates this plugin's own `SharedState`.
+    /// `Space` play/pause, `,`/`.` frame navigation, and `Shift+D` duplicate frame are all gated
+    /// on `!focused` — matching `BrushPlugin::tick`'s own digit-key gating precedent, so typing
+    /// into a focused field never fires any of them. The playback clock below them ignores
+    /// `focused` entirely (an animation preview must not freeze just because a text field
+    /// somewhere has focus). `,`/`.`/`Shift+D` are the shortcuts that need to reach the document —
+    /// everything else here only ever mutates this plugin's own `SharedState`.
     fn tick(&mut self, ui: &mut Ui, focused: bool, resumed_after_suppression: bool, host: &dyn PluginHost) -> PanelOutcome {
         let mut outcome = PanelOutcome::default();
         // OS-level window-focus loss (`i.viewport().focused`) is a different axis from the
@@ -190,11 +189,6 @@ impl Plugin for AnimPlugin {
                     }
                 }
             }
-            let onion_toggle = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::O));
-            if onion_toggle {
-                self.state.borrow_mut().onion_enabled ^= true;
-            }
-
             // `,`/`.` prev/next frame — arrow keys are deliberately avoided (an active Text session
             // owns those). Clamped against `frame_count()`, which can shrink between ticks exactly
             // like the playback clock's own `s.playback_frame = s.playback_frame.min(...)` below.
@@ -266,7 +260,7 @@ impl Plugin for AnimPlugin {
     }
 
     fn wrap_renderer(&self, inner: Box<dyn CanvasRenderer>) -> Box<dyn CanvasRenderer> {
-        Box::new(OnionRenderer::new(inner, self.state.clone()))
+        Box::new(PlaybackRenderer::new(inner, self.state.clone()))
     }
 
     /// While playing, the canvas shows `playback_frame`, not the editing cursor's frame — an edit
@@ -361,13 +355,13 @@ mod tests {
         assert!(!p.blocks_editing(), "pausing must unblock immediately");
     }
 
-    /// `shortcuts()` must declare exactly the five keys `tick`'s own dispatch checks, in the same
+    /// `shortcuts()` must declare exactly the four keys `tick`'s own dispatch checks, in the same
     /// order — the pairing that keeps the declaration from going stale.
     #[test]
     fn shortcuts_declares_every_key_tick_actually_dispatches() {
         let rows = AnimPlugin::shortcuts();
         let keys: Vec<egui::Key> = rows.iter().flat_map(|r| r.keys.iter().copied()).collect();
-        assert_eq!(keys, vec![egui::Key::Space, egui::Key::O, egui::Key::Comma, egui::Key::Period, egui::Key::D]);
+        assert_eq!(keys, vec![egui::Key::Space, egui::Key::Comma, egui::Key::Period, egui::Key::D]);
     }
 
     #[test]
@@ -740,46 +734,6 @@ mod tests {
 
         assert!(!p.state.borrow().space_hold_active, "resuming after suppression must reset the hold");
         assert!(!p.state.borrow().playing, "the reset must win over the release event — no spurious toggle");
-    }
-
-    /// `O` flips `onion_enabled`, gated the same way as Space.
-    #[test]
-    fn tick_toggles_onion_enabled_on_o_while_unfocused() {
-        let doc = doc_with_frames(2);
-        let mut p = AnimPlugin::new();
-        let host = FakeHost(doc);
-        let ctx = egui::Context::default();
-        let mut raw = egui::RawInput::default();
-        raw.events.push(egui::Event::Key {
-            key: egui::Key::O,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
-        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, false, &host); });
-
-        assert!(p.state.borrow().onion_enabled, "O must toggle onion_enabled on");
-    }
-
-    /// `O` must be suppressed while focused, matching Space's own gate.
-    #[test]
-    fn tick_does_not_toggle_onion_enabled_on_o_while_focused() {
-        let doc = doc_with_frames(2);
-        let mut p = AnimPlugin::new();
-        let host = FakeHost(doc);
-        let ctx = egui::Context::default();
-        let mut raw = egui::RawInput::default();
-        raw.events.push(egui::Event::Key {
-            key: egui::Key::O,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
-        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, true, false, &host); });
-
-        assert!(!p.state.borrow().onion_enabled, "O must be suppressed while focused");
     }
 
     fn no_modifier_key_event(key: egui::Key) -> egui::Event {

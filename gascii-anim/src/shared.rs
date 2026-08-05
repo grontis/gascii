@@ -1,6 +1,6 @@
-//! Playback/onion state shared between `AnimPlugin`'s own `panel`/`tick` (called on the retained
-//! plugin instance every frame) and `OnionRenderer` (folded once into `app.renderer` at startup via
-//! `wrap_renderer` — a *different* object after that one-time fold). `wrap_renderer` clones the
+//! Playback/session state shared between `AnimPlugin`'s own `panel`/`tick` (called on the retained
+//! plugin instance every frame) and `PlaybackRenderer` (folded once into `app.renderer` at startup
+//! via `wrap_renderer` — a *different* object after that one-time fold). `wrap_renderer` clones the
 //! `Rc` into the decorator it returns, so both sides read/write the same live state despite never
 //! being the same Rust value again after construction. Single-threaded only (egui itself is
 //! single-threaded) — `Rc<RefCell<..>>`, not `Arc<Mutex<..>>`.
@@ -15,9 +15,6 @@ pub(crate) struct Inner {
     pub playback_frame: usize,
     /// Accumulated time since `playback_frame` last advanced, ms.
     pub elapsed_ms: f32,
-    pub onion_enabled: bool,
-    pub onion_prev: u8,
-    pub onion_next: u8,
     /// Whether a `Space` hold is currently in progress — the state `resolve_space_hold` tracks
     /// across frames to decide, at release, whether the hold was a play/pause tap or a space-pan
     /// drag. See `plugin.rs`'s `resolve_space_hold`.
@@ -74,9 +71,6 @@ impl SharedState {
             playing: false,
             playback_frame: 0,
             elapsed_ms: 0.0,
-            onion_enabled: false,
-            onion_prev: 1,
-            onion_next: 1,
             space_hold_active: false,
             space_hold_saw_primary_press: false,
             was_focused: true,
@@ -134,13 +128,10 @@ mod tests {
     }
 
     #[test]
-    fn new_state_starts_idle_with_default_onion_depth() {
+    fn new_state_starts_idle() {
         let s = SharedState::new();
         let inner = s.borrow();
         assert!(!inner.playing);
-        assert!(!inner.onion_enabled);
-        assert_eq!(inner.onion_prev, 1);
-        assert_eq!(inner.onion_next, 1);
         assert!(!inner.space_hold_active);
         assert!(!inner.space_hold_saw_primary_press);
         assert!(inner.was_focused, "starts focused, matching GasciiApp::was_focused's own default");
