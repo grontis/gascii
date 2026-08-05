@@ -217,6 +217,28 @@ fn resolve_thumb_click(playing: bool, clicked: usize, shown: usize) -> ThumbClic
     }
 }
 
+/// Which inter-thumb gap (0..=count) the pointer is nearest — the drop position a drag-reorder
+/// caret marks and a release commits to. Uniform allocation makes this pure arithmetic: gap `b`
+/// sits at `row_min_x + b * stride`.
+fn insertion_boundary(pointer_x: f32, row_min_x: f32, stride: f32, count: usize) -> usize {
+    if stride <= 0.0 || count == 0 {
+        return 0;
+    }
+    let rel = (pointer_x - row_min_x) / stride + 0.5;
+    (rel.floor().max(0.0) as usize).min(count)
+}
+
+/// Maps an insertion gap to `reorder_frame`'s destination index (remove-then-insert semantics).
+/// Dropping into either gap adjacent to the dragged thumb resolves to its own index — a no-op
+/// `reorder_frame` collapses to `None`.
+fn drop_target(boundary: usize, from: usize) -> usize {
+    if boundary > from {
+        boundary - 1
+    } else {
+        boundary
+    }
+}
+
 /// The shared control-row + thumbnail-strip body both chrome variants render. `thumb_size` and
 /// `control_h` are the only geometry deltas between windowed and kiosk. `top_edit_id` is threaded
 /// straight through to `ThumbnailCache::get_or_build` — see `thumbnail.rs`'s module doc for why the
@@ -407,6 +429,13 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let playing = state.borrow().playing;
                 let shown = shown_frame(playing, state.borrow().playback_frame, doc.active_frame(), doc.frame_count());
+                // Drag-reorder feedback collected across the loop: the live drag (for the caret),
+                // a completed drop (for the edit), and the first thumb's rect (the row geometry
+                // every gap position derives from).
+                let mut live_drag: Option<f32> = None;
+                let mut drop: Option<(usize, f32)> = None;
+                let mut first_rect: Option<Rect> = None;
+                let stride = thumb_size.x + 6.0;
                 for i in 0..doc.frame_count() {
                     // Allocated at the identical size regardless of visibility or active state, so
                     // layout, scroll extent, and drag-reorder geometry never depend on which
@@ -414,7 +443,10 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
                     // the texture paint below it) actually runs does. The active thumb pops by
                     // *painting* into a slightly expanded rect instead; the 6px item spacing keeps
                     // that expansion from touching its neighbors.
-                    let (rect, resp) = ui.allocate_exact_size(thumb_size, Sense::click());
+                    let (rect, resp) = ui.allocate_exact_size(thumb_size, Sense::click_and_drag());
+                    if first_rect.is_none() {
+                        first_rect = Some(rect);
+                    }
                     // The marker tracks `shown`, not the editing cursor: during playback it rides
                     // the frame actually on screen.
                     let active = i == shown;
@@ -435,6 +467,22 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
                         // Keep the playing frame in view — the strip follows the playhead.
                         ui.scroll_to_rect(draw, Some(egui::Align::Center));
                     }
+                    // Reorder is a structural edit — idle while playing, like the Move buttons.
+                    if !playing {
+                        if resp.dragged() {
+                            if let Some(p) = resp.interact_pointer_pos() {
+                                live_drag = Some(p.x);
+                                // Dim the thumb being dragged so the caret reads as "where it
+                                // goes", not a second selection.
+                                ui.painter().rect_filled(draw, 2.0, t.bg_hover);
+                            }
+                        }
+                        if resp.drag_stopped() {
+                            if let Some(p) = resp.interact_pointer_pos().or(ui.input(|inp| inp.pointer.latest_pos())) {
+                                drop = Some((i, p.x));
+                            }
+                        }
+                    }
                     if resp.clicked() {
                         match resolve_thumb_click(playing, i, shown) {
                             ThumbClick::Scrub(frame) => {
@@ -445,6 +493,21 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
                             ThumbClick::Select(frame) => outcome.properties.push(DocProperty::ActiveFrame(frame)),
                             ThumbClick::Nothing => {}
                         }
+                    }
+                }
+                // The insertion caret: a bar in the gap the drag would drop into.
+                if let (Some(px), Some(first)) = (live_drag, first_rect) {
+                    let b = insertion_boundary(px, first.min.x, stride, doc.frame_count());
+                    let x = first.min.x + b as f32 * stride - 3.0;
+                    ui.painter().line_segment(
+                        [Pos2::new(x, first.min.y - 2.0), Pos2::new(x, first.max.y + 2.0)],
+                        Stroke::new(3.0, t.bg_inverse),
+                    );
+                }
+                if let (Some((from, px)), Some(first)) = (drop, first_rect) {
+                    let b = insertion_boundary(px, first.min.x, stride, doc.frame_count());
+                    if let Ok(Some(edit)) = gascii_core::reorder_frame(doc, from, drop_target(b, from)) {
+                        outcome.edits.push(edit);
                     }
                 }
             });
@@ -668,6 +731,25 @@ mod tests {
         assert_eq!(shown_frame(false, 2, 0, 3), 0, "idle: the editing cursor");
         assert_eq!(shown_frame(true, 2, 0, 3), 2, "playing: the playback frame");
         assert_eq!(shown_frame(true, 9, 0, 3), 2, "a stale playback index clamps to the last frame");
+    }
+
+    #[test]
+    fn insertion_boundary_maps_pointer_x_to_the_nearest_gap_and_clamps() {
+        // 3 thumbs at a 54px stride, row starting at x=100.
+        let (min_x, stride, n) = (100.0, 54.0, 3);
+        assert_eq!(insertion_boundary(100.0, min_x, stride, n), 0, "the row's left edge is the leading gap");
+        assert_eq!(insertion_boundary(60.0, min_x, stride, n), 0, "left of the row clamps to 0");
+        assert_eq!(insertion_boundary(120.0, min_x, stride, n), 0, "left half of thumb 0: the gap before it");
+        assert_eq!(insertion_boundary(140.0, min_x, stride, n), 1, "right half of thumb 0: the gap after it");
+        assert_eq!(insertion_boundary(500.0, min_x, stride, n), 3, "far right clamps to the trailing gap");
+    }
+
+    #[test]
+    fn drop_target_adjusts_for_removal_and_adjacent_gaps_are_no_ops() {
+        assert_eq!(drop_target(0, 2), 0, "dropping at the row start lands at index 0");
+        assert_eq!(drop_target(3, 0), 2, "a gap right of the source shifts down by the removal");
+        assert_eq!(drop_target(2, 2), 2, "the gap immediately before the source is a no-op");
+        assert_eq!(drop_target(3, 2), 2, "the gap immediately after the source is a no-op too");
     }
 
     #[test]

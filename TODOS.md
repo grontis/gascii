@@ -28,7 +28,8 @@ DONE 8-4: adding or duplicating a frame now selects it, from every entry point (
 
 if mouse is last active in the animation section, we should also support ctrl+d, delete key, copy paste keys.
 
-We should implement drag and reorder for frames in the animation section
+~~We should implement drag and reorder for frames in the animation section~~
+DONE 8-5: drag a thumbnail to reorder — while dragging, the thumb dims and an insertion caret marks the gap it will drop into; release commits one undoable reorder (the same edit the Move ◀/▶ buttons produce, which remain). Dropping back beside the source is a no-op. Disabled while playing, like every other structural edit. Note: dragging a thumb no longer swipe-scrolls the strip (the drag now means reorder) — the scrollbar still scrolls it.
 
 ~~For animation frame duration, we allow for clicking +- 10ms, but we should also support typing in a specific value.~~
 DONE 8-5: both duration readouts (the active frame's and the DEFAULT) are now editable text fields between their ±10ms steppers. Type a value and press Enter (or click away) to commit; Escape cancels; values clamp to the same 10ms–max range the steppers use; non-numeric text just reverts. Typing into the per-frame field sets that frame's override, same as the steppers. Layout refined per feedback: the two clusters are labeled FRAME and DEFAULT with separators between them, and the override-clear "×" is now a labeled Reset button.
