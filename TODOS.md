@@ -28,7 +28,8 @@ if mouse is last active in the animation section, we should also support ctrl+d,
 
 We should implement drag and reorder for frames in the animation section
 
-For animation frame duration, we allow for clicking +- 10ms, but we should also support typing in a specific value.
+~~For animation frame duration, we allow for clicking +- 10ms, but we should also support typing in a specific value.~~
+DONE 8-5: both duration readouts (the active frame's and the DEFAULT) are now editable text fields between their ±10ms steppers. Type a value and press Enter (or click away) to commit; Escape cancels; values clamp to the same 10ms–max range the steppers use; non-numeric text just reverts. Typing into the per-frame field sets that frame's override, same as the steppers. Layout refined per feedback: the two clusters are labeled FRAME and DEFAULT with separators between them, and the override-clear "×" is now a labeled Reset button.
 
 For animation section: Rather than a single button for play/pause, show classic pause, play, stop(resets to beginning), forward/backward(moves by one frame?)
 

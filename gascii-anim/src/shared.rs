@@ -30,6 +30,15 @@ pub(crate) struct Inner {
     /// no access to the host's copy. See `plugin.rs`'s `AnimPlugin::tick` for why the Space hold
     /// needs this.
     pub was_focused: bool,
+    /// In-progress text for the active frame's duration field — `None` while the field just
+    /// mirrors the live value. Committed (or discarded, on Escape) the moment the field loses
+    /// focus; that always happens on the same paint as whatever click stole the focus, before the
+    /// host drains any frame switch, so the commit can never land on a different frame than the
+    /// one edited.
+    pub duration_text: Option<String>,
+    /// In-progress text for the document-default duration field — same lifecycle as
+    /// `duration_text`.
+    pub default_duration_text: Option<String>,
 }
 
 #[derive(Clone)]
@@ -47,6 +56,8 @@ impl SharedState {
             space_hold_active: false,
             space_hold_saw_primary_press: false,
             was_focused: true,
+            duration_text: None,
+            default_duration_text: None,
         })))
     }
 

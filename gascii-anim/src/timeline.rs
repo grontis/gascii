@@ -133,6 +133,37 @@ fn step_default_duration(current: u32, delta_ms: i32) -> u32 {
     (current as i64 + delta_ms as i64).clamp(10, gascii_core::Document::MAX_FRAME_DURATION_MS as i64) as u32
 }
 
+/// Parses a typed duration field, clamped to the same `[10, MAX_FRAME_DURATION_MS]` range the
+/// steppers enforce. `None` for text that isn't a number at all — the field reverts to the live
+/// value instead of committing.
+fn parse_duration_ms(text: &str) -> Option<u32> {
+    let n: i64 = text.trim().parse().ok()?;
+    Some(n.clamp(10, gascii_core::Document::MAX_FRAME_DURATION_MS as i64) as u32)
+}
+
+/// A compact editable duration readout with an `ms` suffix: mirrors `live` while idle, holds the
+/// in-progress text in `buffer` while focused, and returns a parsed, clamped value exactly once —
+/// on the paint where focus leaves (Enter included, since Enter surrenders focus) — and only when
+/// that value differs from `live`, so merely focusing and leaving the field never commits
+/// anything. Escape discards the edit instead of committing it. Unparseable text also discards.
+fn duration_field(ui: &mut Ui, buffer: &mut Option<String>, live: u32) -> Option<u32> {
+    let t = theme::current(ui.ctx());
+    let mut text = buffer.clone().unwrap_or_else(|| live.to_string());
+    let resp = ui.add(egui::TextEdit::singleline(&mut text).desired_width(48.0).font(widgets::mono_id(widgets::size::LABEL)));
+    ui.label(egui::RichText::new("ms").font(widgets::mono_id(widgets::size::LABEL)).color(t.fg_secondary));
+    if resp.lost_focus() {
+        let committed = buffer.take();
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            return None;
+        }
+        return committed.as_deref().and_then(parse_duration_ms).filter(|v| *v != live);
+    }
+    if resp.has_focus() {
+        *buffer = Some(text);
+    }
+    None
+}
+
 /// Whether a thumb allocated at `[rect_min_x, rect_min_x + thumb_w)` intersects the visible clip
 /// range `[clip_min_x, clip_max_x]` — the pure predicate `body`'s culling loop applies per frame,
 /// kept separate from `Ui`/`egui::Rect` so it's testable headlessly.
@@ -211,39 +242,55 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
                 }
             }
 
+            // The two timing clusters: FRAME (the active frame's own duration, an override once
+            // touched) and DEFAULT (the document-wide fallback) — each labeled and fenced off by a
+            // separator so they read as distinct groups, not one run-on stepper row.
             ui.add_space(10.0);
+            ui.separator();
+            widgets::micro_label(ui, "FRAME");
             let dur = doc.resolved_frame_duration_ms(doc.active_frame()).unwrap_or(gascii_core::Document::DEFAULT_FRAME_DURATION_MS);
             if widgets::button(ui, "-10ms", true, control_h).clicked() {
                 if let Some(edit) = step_duration(doc, -10) {
                     outcome.edits.push(edit);
                 }
             }
-            ui.label(egui::RichText::new(format!("{dur}ms")).font(widgets::mono_id(widgets::size::LABEL)).color(t.fg_secondary));
+            // A typed value always lands as this frame's own override, exactly like the steppers.
+            // The `!= live` filter inside `duration_field` keeps a touch-and-leave from pinning an
+            // override equal to the document default.
+            if let Some(v) = duration_field(ui, &mut state.borrow_mut().duration_text, dur) {
+                if let Ok(Some(edit)) = gascii_core::set_frame_duration(doc, doc.active_frame(), Some(v)) {
+                    outcome.edits.push(edit);
+                }
+            }
             if widgets::button(ui, "+10ms", true, control_h).clicked() {
                 if let Some(edit) = step_duration(doc, 10) {
                     outcome.edits.push(edit);
                 }
             }
-            // Shown only once the active frame actually carries an override — clears it back to
+            // Shown only once the active frame actually carries an override — resets it back to
             // tracking the document default rather than leaving it permanently pinned once set.
             let has_override = doc.frame(doc.active_frame()).is_some_and(|f| f.duration_override.is_some());
-            if has_override && widgets::button(ui, "\u{00D7}", true, control_h).clicked() {
+            if has_override && widgets::button(ui, "Reset", true, control_h).clicked() {
                 if let Some(edit) = clear_duration_override(doc) {
                     outcome.edits.push(edit);
                 }
             }
 
-            ui.add_space(10.0);
+            ui.add_space(6.0);
+            ui.separator();
             widgets::micro_label(ui, "DEFAULT");
             if widgets::button(ui, "-10ms", true, control_h).clicked() {
                 outcome.properties.push(DocProperty::DefaultFrameDuration(step_default_duration(doc.frame_duration_ms, -10)));
             }
-            ui.label(egui::RichText::new(format!("{}ms", doc.frame_duration_ms)).font(widgets::mono_id(widgets::size::LABEL)).color(t.fg_secondary));
+            if let Some(v) = duration_field(ui, &mut state.borrow_mut().default_duration_text, doc.frame_duration_ms) {
+                outcome.properties.push(DocProperty::DefaultFrameDuration(v));
+            }
             if widgets::button(ui, "+10ms", true, control_h).clicked() {
                 outcome.properties.push(DocProperty::DefaultFrameDuration(step_default_duration(doc.frame_duration_ms, 10)));
             }
 
-            ui.add_space(10.0);
+            ui.add_space(6.0);
+            ui.separator();
             let mut onion = state.borrow().onion_enabled;
             if widgets::checkbox(ui, &mut onion, "Onion") {
                 state.borrow_mut().onion_enabled = onion;
@@ -564,6 +611,18 @@ mod tests {
             Edit::SetFrameDuration { after, .. } => assert_eq!(after, None),
             other => panic!("expected SetFrameDuration, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_duration_ms_accepts_numbers_and_clamps_to_the_stepper_range() {
+        assert_eq!(parse_duration_ms("250"), Some(250));
+        assert_eq!(parse_duration_ms(" 250 "), Some(250), "surrounding whitespace is tolerated");
+        assert_eq!(parse_duration_ms("5"), Some(10), "below the floor clamps up");
+        assert_eq!(parse_duration_ms("-40"), Some(10), "negative clamps to the floor");
+        assert_eq!(parse_duration_ms("999999999999"), Some(gascii_core::Document::MAX_FRAME_DURATION_MS));
+        assert_eq!(parse_duration_ms("abc"), None);
+        assert_eq!(parse_duration_ms(""), None);
+        assert_eq!(parse_duration_ms("12.5"), None, "fractional ms is rejected rather than rounded");
     }
 
     #[test]
