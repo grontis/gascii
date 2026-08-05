@@ -64,10 +64,17 @@ pub(crate) fn collapsed_bar(ui: &mut Ui, kiosk: bool, state: &SharedState) {
 
 pub(crate) fn show(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mut ThumbnailCache, top_edit_id: Option<u64>) -> PanelOutcome {
     let mut outcome = PanelOutcome::default();
-    egui::Panel::bottom("gascii_anim_timeline").frame(panel_frame(ui.ctx())).exact_size(PANEL_H).show(ui, |ui| {
+    let resp = egui::Panel::bottom("gascii_anim_timeline").frame(panel_frame(ui.ctx())).exact_size(PANEL_H).show(ui, |ui| {
         outcome = body(ui, doc, state, thumbs, Vec2::new(64.0, 40.0), 26.0, top_edit_id);
     });
+    outcome.pressed_inside = pressed_inside(ui, resp.response.rect);
     outcome
+}
+
+/// Whether this frame's primary press landed inside `rect` — the `PanelOutcome::pressed_inside`
+/// fact both chrome variants report so the host can track which section the mouse last touched.
+pub(crate) fn pressed_inside(ui: &Ui, rect: egui::Rect) -> bool {
+    ui.input(|i| i.pointer.primary_pressed() && i.pointer.interact_pos().is_some_and(|p| rect.contains(p)))
 }
 
 /// Also called directly by `AnimPlugin::tick`'s `Shift+D` shortcut, so both entry points behave
@@ -731,6 +738,34 @@ mod tests {
         assert_eq!(shown_frame(false, 2, 0, 3), 0, "idle: the editing cursor");
         assert_eq!(shown_frame(true, 2, 0, 3), 2, "playing: the playback frame");
         assert_eq!(shown_frame(true, 9, 0, 3), 2, "a stale playback index clamps to the last frame");
+    }
+
+    /// `pressed_inside` is the host's section-tracking fact: a primary press inside the panel's
+    /// own rect reports true, one up in canvas territory reports false.
+    #[test]
+    fn show_reports_a_press_inside_the_panel_and_not_one_outside() {
+        let press_at = |pos: Pos2| {
+            let doc = doc_with_frames(2);
+            let state = SharedState::new();
+            let mut thumbs = ThumbnailCache::new();
+            let ctx = egui::Context::default();
+            let mut raw = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+                ..Default::default()
+            };
+            raw.events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            });
+            let mut outcome = None;
+            let _ = ctx.run_ui(raw, |ui| outcome = Some(show(ui, &doc, &state, &mut thumbs, Some(1))));
+            outcome.unwrap().pressed_inside
+        };
+
+        assert!(press_at(Pos2::new(400.0, 590.0)), "a press inside the bottom panel must report pressed_inside");
+        assert!(!press_at(Pos2::new(400.0, 50.0)), "a press in canvas territory must not");
     }
 
     #[test]

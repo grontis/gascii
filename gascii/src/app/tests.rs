@@ -1075,6 +1075,139 @@
         assert!(app.last_error_text().unwrap().contains("pause"), "the refusal must explain itself: {:?}", app.last_error_text());
     }
 
+    /// Section tracking end to end through the real registered anim plugin: a press inside the
+    /// timeline panel arms the frames-section keys, a press in canvas territory disarms them.
+    #[test]
+    fn a_press_inside_the_animation_panel_arms_the_frames_section_and_one_outside_disarms() {
+        let mut app = GasciiApp::headless();
+        app.add_frame_via_menu(); // 2 frames: the timeline panel is visible
+        assert!(!app.frames_section_armed);
+
+        let press = |pos: egui::Pos2| {
+            let mut raw = raw_input_with_screen(1000.0, 800.0);
+            raw.events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            });
+            raw
+        };
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(press(egui::Pos2::new(500.0, 790.0)), |ui| app.run_plugin_panels(ui, false));
+        assert!(app.frames_section_armed, "a press inside the bottom timeline panel must arm");
+
+        let ctx2 = egui::Context::default();
+        let _ = ctx2.run_ui(press(egui::Pos2::new(500.0, 100.0)), |ui| app.run_plugin_panels(ui, false));
+        assert!(!app.frames_section_armed, "a press up in canvas territory must disarm");
+    }
+
+    /// While the frames section is armed (and nothing owns the keyboard), Ctrl+D duplicates the
+    /// active frame — the same action the Animation menu performs — instead of the selection.
+    #[test]
+    fn ctrl_d_duplicates_the_active_frame_while_the_frames_section_is_armed() {
+        let mut app = GasciiApp::headless();
+        app.frames_section_armed = true;
+        assert_eq!(app.doc.frame_count(), 1);
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput { modifiers: egui::Modifiers::COMMAND, ..Default::default() };
+        raw.events.push(key_event(egui::Key::D, egui::Modifiers::COMMAND));
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert_eq!(app.doc.frame_count(), 2, "Ctrl+D in frames mode must duplicate the frame");
+        assert_eq!(app.active_frame, 1, "the duplicate is selected");
+    }
+
+    /// An explicit keyboard-owning selection outranks the armed frames section: its Ctrl+D still
+    /// duplicates the selection, never a frame.
+    #[test]
+    fn an_active_selection_outranks_the_armed_frames_section_for_ctrl_d() {
+        let mut app = GasciiApp::headless();
+        app.frames_section_armed = true;
+        app.select_all();
+        assert!(app.keyboard_owner().is_some(), "sanity: the marquee owns the keyboard");
+
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput { modifiers: egui::Modifiers::COMMAND, ..Default::default() };
+        raw.events.push(key_event(egui::Key::D, egui::Modifiers::COMMAND));
+        let _ = ctx.run_ui(raw, |ui| app.handle_keys(ui));
+
+        assert_eq!(app.doc.frame_count(), 1, "the selection's duplicate wins — no frame is created");
+        assert!(app.selection_slot().is_some(), "the selection session survives");
+    }
+
+    /// Frames-section Delete removes the active frame; at the last frame it refuses with a
+    /// readable message rather than silently doing nothing.
+    #[test]
+    fn delete_removes_the_active_frame_while_armed_and_refuses_the_last_frame() {
+        let mut app = GasciiApp::headless();
+        app.add_frame_via_menu(); // 2 frames, the new one active
+        app.frames_section_armed = true;
+
+        let delete_press = || {
+            let mut raw = egui::RawInput::default();
+            raw.events.push(key_event(egui::Key::Delete, egui::Modifiers::NONE));
+            raw
+        };
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(delete_press(), |ui| app.handle_keys(ui));
+        assert_eq!(app.doc.frame_count(), 1, "Delete in frames mode must remove the active frame");
+
+        let ctx2 = egui::Context::default();
+        let _ = ctx2.run_ui(delete_press(), |ui| app.handle_keys(ui));
+        assert_eq!(app.doc.frame_count(), 1, "the last frame must survive");
+        assert!(app.last_error_text().unwrap().contains("at least one frame"));
+    }
+
+    /// Frames-section copy/paste: Ctrl+C snapshots the active frame, Ctrl+V inserts the copy after
+    /// the active frame and selects it — and the consumed Paste event never doubles as a canvas
+    /// text paste.
+    #[test]
+    fn copy_then_paste_inserts_a_frame_copy_after_the_active_one_while_armed() {
+        let mut app = GasciiApp::headless();
+        app.doc.set_cell(0, 0, 0, cell('Q'));
+        app.frames_section_armed = true;
+
+        let ctx = egui::Context::default();
+        let mut raw_copy = egui::RawInput::default();
+        raw_copy.events.push(egui::Event::Copy);
+        let out = ctx.run_ui(raw_copy, |ui| app.handle_keys(ui));
+        assert!(app.frame_clipboard.is_some(), "Ctrl+C in frames mode must fill the frame clipboard");
+        // The OS-clipboard write is what makes the later Ctrl+V observable at all: egui-winit
+        // synthesizes `Event::Paste` only when its clipboard read returns non-empty text.
+        assert!(
+            out.platform_output.commands.iter().any(|c| matches!(c, egui::OutputCommand::CopyText(t) if !t.is_empty())),
+            "a frame copy must put non-empty text on the OS clipboard so Ctrl+V can fire"
+        );
+
+        let ctx2 = egui::Context::default();
+        let mut raw_paste = egui::RawInput::default();
+        raw_paste.events.push(egui::Event::Paste(String::new()));
+        let _ = ctx2.run_ui(raw_paste, |ui| app.handle_keys(ui));
+
+        assert_eq!(app.doc.frame_count(), 2, "Ctrl+V in frames mode must insert the copied frame");
+        assert_eq!(app.active_frame, 1, "the pasted frame is selected");
+        assert_eq!(app.doc.cell_at(1, 0, 0, 0).unwrap().ch, 'Q', "the pasted frame carries the copied content");
+    }
+
+    /// `paste_frame`'s two refusals: nothing copied yet, and a frame whose layer structure no
+    /// longer matches the document's (every frame must carry exactly the document's layer count).
+    #[test]
+    fn paste_frame_refuses_an_empty_clipboard_and_a_layer_mismatched_frame() {
+        let mut app = GasciiApp::headless();
+        app.paste_frame();
+        assert!(app.last_error_text().unwrap().contains("no frame has been copied"));
+
+        app.copy_active_frame(&egui::Context::default());
+        let add_layer = gascii_core::add_layer(&app.doc, 1).unwrap();
+        app.apply_edit(add_layer, None);
+        app.paste_frame();
+        assert_eq!(app.doc.frame_count(), 1, "a layer-mismatched frame must not be inserted");
+        assert!(app.last_error_text().unwrap().contains("layer structure"));
+    }
+
     /// `switch_active_frame` (the target of a `DocProperty::ActiveFrame`) flushes via
     /// `flush_all()`, but that only actually commits a `holds_session` tool's (Text/Selection)
     /// pending work — a plain stroke tool like Pencil does not hold a "session" the flush machinery

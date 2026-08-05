@@ -26,12 +26,13 @@ const PANEL_H: f32 = 240.0;
 
 pub(crate) fn show(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mut ThumbnailCache, top_edit_id: Option<u64>) -> PanelOutcome {
     let mut outcome = PanelOutcome::default();
-    egui::Panel::bottom("gascii_anim_timeline_kiosk")
+    let resp = egui::Panel::bottom("gascii_anim_timeline_kiosk")
         .frame(crate::timeline::panel_frame(ui.ctx()))
         .exact_size(PANEL_H)
         .show(ui, |ui| {
             outcome = crate::timeline::body(ui, doc, state, thumbs, TOUCH_THUMB, TOUCH_CONTROL_H, top_edit_id);
         });
+    outcome.pressed_inside = crate::timeline::pressed_inside(ui, resp.response.rect);
     outcome
 }
 

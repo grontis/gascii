@@ -29,7 +29,7 @@ pub use io::export_png::{
     validate_gif_dimensions, validate_png_dimensions, validate_spritesheet_dimensions, PngExportError,
     MAX_PNG_PIXELS,
 };
-pub use io::export_text::{export_text, export_text_frames, export_text_frames_with_trim};
+pub use io::export_text::{export_frame_text, export_text, export_text_frames, export_text_frames_with_trim};
 pub use io::gascii_json::{load_str, save_string, LoadError, CURRENT_VERSION};
 pub use io::{composite, composite_cell, composite_frame, visible_layers};
 pub use join::{arms_of, char_of, join as join_arms, ArmSet};

@@ -23,6 +23,12 @@ pub fn export_text(doc: &Document) -> String {
     flatten(&composite(doc), true)
 }
 
+/// One frame's composited text, flattened and trimmed exactly like [`export_text`] — `None` only
+/// for an out-of-range `frame`.
+pub fn export_frame_text(doc: &Document, frame: usize) -> Option<String> {
+    Some(flatten(&composite_frame(doc, frame)?, true))
+}
+
 /// The `--- frame N (Dms) ---` header shared by every frame body: `index` is 0-based (matching the
 /// timeline UI's own "N/total" display once shown 1-based), `duration_ms` the frame's
 /// `resolved_frame_duration_ms`.

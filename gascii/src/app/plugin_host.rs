@@ -98,6 +98,11 @@ impl GasciiApp {
             }
             outcomes.push(p.panel(ui, kiosk, &host));
         }
+        // Section tracking: on a press frame, the frames-section keys arm iff some panel reported
+        // the press inside itself — a press anywhere else (canvas, sidebar, menu) disarms.
+        if ui.input(|i| i.pointer.primary_pressed()) {
+            self.frames_section_armed = outcomes.iter().any(|o| o.pressed_inside);
+        }
         self.drain_panel_outcomes(outcomes);
     }
 

@@ -39,6 +39,12 @@ pub struct PanelOutcome {
     /// already uses (`add_frame_via_menu`, "Resize Canvas…") — never a raw `{e:?}` dump. `None`
     /// means "nothing failed this frame."
     pub error: Option<String>,
+    /// Whether this frame's primary press landed inside this panel's own rect. The host uses it to
+    /// track which section the mouse last touched — a press inside the animation panel arms the
+    /// frames-section edit keys (Ctrl+D/Delete/Copy/Paste act on frames instead of the canvas
+    /// selection); a press anywhere else disarms them. Panels that don't participate leave the
+    /// default `false`.
+    pub pressed_inside: bool,
 }
 
 #[cfg(test)]
@@ -53,6 +59,7 @@ mod tests {
         assert!(outcome.edits.is_empty());
         assert!(outcome.properties.is_empty());
         assert!(outcome.error.is_none());
+        assert!(!outcome.pressed_inside);
     }
 
     /// Every variant round-trips through construction and an exhaustive match — pins the enum's

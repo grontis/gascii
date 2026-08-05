@@ -213,13 +213,11 @@ impl GasciiApp {
         }
     }
 
-    /// The Animation menu's "Add Frame" bootstrap: the one host-owned, non-plugin-routed frame-creation
-    /// path, since `gascii-anim` has no toolbox/menu presence of its own to
-    /// host this affordance at the `frame_count() == 1` boundary. Calls `frame_ops::duplicate_frame`
-    /// directly through `apply_edit` — the same shape every other menu-triggered structural edit in
-    /// this app already uses. Once `frame_count() > 1`, the plugin's own timeline panel takes over
-    /// for all further add/duplicate/delete/reorder. Flushes first, same trigger-table discipline as
-    /// Clear/Resize/Save.
+    /// Duplicates the active frame — the Animation menu's "Add Frame" action, and the
+    /// frames-section Ctrl+D (both entry points must behave identically at every boundary). Calls
+    /// `frame_ops::duplicate_frame` directly through `apply_edit` — the same shape every other
+    /// menu-triggered structural edit in this app already uses. Flushes first, same trigger-table
+    /// discipline as Clear/Resize/Save.
     pub(crate) fn add_frame_via_menu(&mut self) {
         if self.refuse_edit_during_playback() {
             return;
@@ -247,6 +245,71 @@ impl GasciiApp {
                 // `LastFrame` (that's `remove_frame`'s own error).
                 self.flash_error("add frame: unexpected error");
             }
+        }
+    }
+
+    /// Frames-section Delete: removes the active frame as one undoable step. Refuses the last
+    /// frame with a readable message — unlike the timeline's own Delete button, a keypress has no
+    /// disabled state to communicate the boundary with.
+    pub(crate) fn delete_active_frame(&mut self) {
+        if self.refuse_edit_during_playback() {
+            return;
+        }
+        self.flush_all();
+        match gascii_core::remove_frame(&self.doc, self.doc.active_frame()) {
+            Ok(edit) => self.apply_edit(edit, None),
+            Err(FrameOpError::LastFrame) => self.flash_error("delete frame: a document must keep at least one frame"),
+            Err(_) => self.flash_error("delete frame: unexpected error"),
+        }
+    }
+
+    /// Frames-section Ctrl+C: snapshots the active frame into `frame_clipboard` (the structured
+    /// source `paste_frame` inserts from) AND writes the frame's text export to the OS clipboard.
+    /// The OS write is load-bearing, not a courtesy: egui-winit only synthesizes `Event::Paste`
+    /// when its own clipboard read returns non-empty text (confirmed against `is_paste_command`'s
+    /// branch in egui-winit's `on_keyboard_input`) — without it, a following Ctrl+V would never
+    /// produce any event for `handle_keys` to see at all. Flushes first so a pending burst/float
+    /// is part of what's copied.
+    pub(crate) fn copy_active_frame(&mut self, ctx: &egui::Context) {
+        self.flush_all();
+        let idx = self.doc.active_frame();
+        self.frame_clipboard = self.doc.frame(idx).cloned();
+        let text = gascii_core::export_frame_text(&self.doc, idx).unwrap_or_default();
+        // A fully blank frame trims to an empty string, which egui-winit's paste path would skip
+        // exactly like an empty clipboard — substitute a readable marker so Ctrl+V still fires.
+        let text = if text.trim().is_empty() { format!("[gascii frame {}]", idx + 1) } else { text };
+        ctx.copy_text(text);
+    }
+
+    /// Frames-section Ctrl+V: inserts the copied frame right after the active one (which selects
+    /// it, like every frame add). Refuses when the document's layer structure changed since the
+    /// copy — every frame must carry exactly the document's layer count, the one invariant
+    /// `add_frame`'s own cap checks don't cover.
+    pub(crate) fn paste_frame(&mut self) {
+        if self.refuse_edit_during_playback() {
+            return;
+        }
+        let Some(frame) = self.frame_clipboard.clone() else {
+            self.flash_error("paste frame: no frame has been copied");
+            return;
+        };
+        if frame.layers.len() != self.doc.layer_count() {
+            self.flash_error("paste frame: the document's layer structure changed since the copy");
+            return;
+        }
+        self.flush_all();
+        match gascii_core::add_frame(&self.doc, self.doc.active_frame() + 1, frame) {
+            Ok(edit) => self.apply_edit(edit, None),
+            Err(FrameOpError::TooManyFrames { max, .. }) => {
+                self.flash_error(format!("paste frame: exceeds the {max} maximum"));
+            }
+            Err(FrameOpError::TotalCellBudgetExceeded { .. }) => {
+                self.flash_error("paste frame: exceeds the maximum total cell budget");
+            }
+            Err(FrameOpError::TooManyLayers { max, .. }) => {
+                self.flash_error(format!("paste frame: exceeds the {max} maximum layer count"));
+            }
+            Err(_) => self.flash_error("paste frame: unexpected error"),
         }
     }
 

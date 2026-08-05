@@ -291,6 +291,14 @@ pub struct GasciiApp {
     /// entry rather than leaving a dead path in the list.
     pub(crate) recent_files: Vec<PathBuf>,
     pub(crate) last_error: Option<ErrorFlash>,
+    /// Whether the last primary press landed inside the animation panel (`PanelOutcome::
+    /// pressed_inside`) — while armed (and no session owns the keyboard), Ctrl+D/Delete/Copy/Paste
+    /// act on frames instead of the canvas selection. A press anywhere else disarms.
+    pub(crate) frames_section_armed: bool,
+    /// The frames-section clipboard: `copy_active_frame`'s snapshot, `paste_frame`'s source.
+    /// App-internal — a frame is structured cell data, not text, so the OS clipboard is not
+    /// involved.
+    pub(crate) frame_clipboard: Option<gascii_core::Frame>,
     /// The undo-stack edit id (`History::top_edit_id`) at the moment of the last successful save
     /// or load — `None` matches a fresh `History`'s own sentinel. `is_dirty` is a pure comparison
     /// against `self.history.top_edit_id()`; nothing else needs to know about this field.
@@ -455,6 +463,8 @@ impl GasciiApp {
             current_path: None,
             recent_files: Vec::new(),
             last_error: None,
+            frames_section_armed: false,
+            frame_clipboard: None,
             saved_marker: None,
             saved_loop_playback,
             saved_frame_duration_ms,
@@ -719,7 +729,12 @@ impl GasciiApp {
         let widget_focused = ui.memory(|m| m.focused().is_some());
         let focused = widget_focused || suppresses_tool_shortcuts(owner_kind);
         let is_fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
-        let (redo_shift, undo, redo_y, select_all, copy, copy_all, cut, duplicate, generic_always) =
+        // Which section Ctrl+D/Delete/Copy/Paste act on: the frames section (armed by the last
+        // press landing inside the animation panel) or the canvas. A keyboard-owning session (a
+        // live marquee, a Text burst) always outranks the section — an explicit selection's
+        // duplicate/delete/copy beats the implicit "last clicked here" state.
+        let frames_mode = self.frames_section_armed && self.keyboard_owner().is_none() && !widget_focused;
+        let (redo_shift, undo, redo_y, select_all, copy, copy_all, cut, duplicate, delete_frame, paste_frame, generic_always) =
             ui.input_mut(|i| {
                 // Cmd/Ctrl+Shift+Z must be consumed before the plain Cmd/Ctrl+Z pattern, since
                 // `matches_logically` ignores extra Shift/Alt — checking undo first would swallow
@@ -765,8 +780,26 @@ impl GasciiApp {
                 // layouts rather than `Key::Equals` — folded into `ZoomInAlias`'s own CHORDS row as
                 // a second key pattern (D-7), so the generic loop above already consumes it; no
                 // hand-written second `consume_key` call needed here anymore.
+                // Frames-mode-only keys: Delete removes the active frame, and `Event::Paste` is
+                // consumed (retain), not merely read — canvas.rs reads Paste un-consumed later
+                // this same frame, and without the removal a frames-mode paste would ALSO land as
+                // a floating text stamp on the canvas.
+                let (delete_frame, paste_frame) = if frames_mode {
+                    let del = i.consume_key(egui::Modifiers::NONE, egui::Key::Delete);
+                    let mut pasted = false;
+                    i.events.retain(|e| {
+                        if matches!(e, egui::Event::Paste(_)) {
+                            pasted = true;
+                            return false;
+                        }
+                        true
+                    });
+                    (del, pasted)
+                } else {
+                    (false, false)
+                };
                 let generic_always = chords::consume_generic_chords(i, ChordDispatch::GenericAlways);
-                (redo_shift, undo, redo_y, select_all, copy, copy_all, cut, duplicate, generic_always)
+                (redo_shift, undo, redo_y, select_all, copy, copy_all, cut, duplicate, delete_frame, paste_frame, generic_always)
             });
         let save = generic_always.contains(&ChordId::Save);
         let export_dialog = generic_always.contains(&ChordId::ExportDialog);
@@ -875,7 +908,11 @@ impl GasciiApp {
             self.flush_all();
             ui.ctx().copy_text(export_text(&self.doc));
         } else if copy {
-            self.copy_selection(ui.ctx());
+            if frames_mode {
+                self.copy_active_frame(ui.ctx());
+            } else {
+                self.copy_selection(ui.ctx());
+            }
         }
         if cut {
             self.cut_selection(ui.ctx());
@@ -884,7 +921,18 @@ impl GasciiApp {
             self.select_all();
         }
         if duplicate {
-            self.duplicate_selection();
+            if frames_mode {
+                // The exact duplicate-active-frame action the Animation menu's Add Frame performs.
+                self.add_frame_via_menu();
+            } else {
+                self.duplicate_selection();
+            }
+        }
+        if delete_frame {
+            self.delete_active_frame();
+        }
+        if paste_frame {
+            self.paste_frame();
         }
         // `+`/`=`/`-`, no modifiers: the same zoom step the status bar's buttons and the View menu
         // use. Guarded like the tool-select keys so typing into a focused field never zooms.
