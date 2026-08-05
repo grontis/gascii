@@ -38,3 +38,6 @@ The onion feature doesn't feel like a useful feature or good UX, should remove t
 
 ~~(8-5 follow-up) design a way to give UI/UX for what frame is currently on the screen when playing — maybe set the currently played as selected~~
 DONE 8-5: while playing, the frame strip's selection marker rides the playback frame (the frame actually on screen), the counter shows "▶ n/N", and the strip auto-scrolls to keep the playing frame in view. Clicking a thumb during playback scrubs playback to that frame (instead of invisibly moving the editing cursor). On Pause the editing cursor parks on the shown frame, so marker and real selection converge.
+
+~~(8-5 follow-up) the animation pane should be toggleable to open easier — currently the only way to open it is Animation ▸ Add Frame~~
+DONE 8-5 (reworked per feedback — toggle lives where the panel pops up, not in the menu; pane labeled ANIMATION): a slim "▲ ANIMATION" bar sits at the bottom edge whenever the pane is hidden; clicking it opens the full panel, and a "▼" button in the panel header collapses it back. Works at any frame count (hiding a multi-frame timeline is fine — the bar is always one click from reopening). Auto behavior unchanged until you choose: fresh single-frame documents start collapsed, multi-frame documents start open. Add Frame stays in the menu as a second path.

@@ -20,6 +20,20 @@ impl AnimPlugin {
     pub fn new() -> Self {
         Self { state: SharedState::new(), thumbnails: ThumbnailCache::new() }
     }
+
+    /// Whether the timeline panel currently shows for a document with `frame_count` frames: the
+    /// user's explicit ▲/▼ choice when they've made one, otherwise auto — shown once a second
+    /// frame exists.
+    pub fn timeline_visible(&self, frame_count: usize) -> bool {
+        self.state.borrow().timeline_open.unwrap_or(frame_count > 1)
+    }
+
+    /// The explicit override half of `timeline_visible` — what the panel's ▼ hide button and the
+    /// collapsed bar's ▲ reopen button write. `pub` as a test seam (host tests reach it via
+    /// `as_any_mut`).
+    pub fn set_timeline_open(&mut self, open: bool) {
+        self.state.borrow_mut().timeline_open = Some(open);
+    }
 }
 
 /// Constructs the one real, per-app `AnimPlugin` instance — the `PluginDescriptor.make` fn
@@ -102,13 +116,16 @@ impl Plugin for AnimPlugin {
         ]
     }
 
-    /// A true no-op — claims zero screen space — while `frame_count() <= 1`, so a single-frame
-    /// document's layout stays byte-identical to before this plugin existed. The *first* extra
-    /// frame is bootstrapped by the host's own "Add Frame" menu entry, not by this panel (it has no
-    /// toolbox/menu presence of its own to host that affordance at the one-frame boundary).
+    /// While hidden (`timeline_visible` — auto-hidden for a fresh single-frame document, or
+    /// explicitly collapsed via the panel's ▼ button), only a slim bottom bar with the ▲ reopen
+    /// button is drawn. That bar is the timeline's whole discoverability story: it's always at the
+    /// spot where the panel appears, so opening never requires the menu. Once open, the panel's
+    /// own Add/Duplicate buttons bootstrap the first extra frame in plain sight; the host's
+    /// "Add Frame" menu entry remains as the second path.
     fn panel(&mut self, ui: &mut Ui, kiosk: bool, host: &dyn PluginHost) -> PanelOutcome {
         let doc = host.document();
-        if doc.frame_count() <= 1 {
+        if !self.timeline_visible(doc.frame_count()) {
+            crate::timeline::collapsed_bar(ui, kiosk, &self.state);
             return PanelOutcome::default();
         }
         let top_edit_id = host.top_edit_id();
@@ -296,6 +313,40 @@ mod tests {
     #[test]
     fn tool_capabilities_is_empty() {
         assert!(AnimPlugin::tool_capabilities().is_empty());
+    }
+
+    /// The visibility rule: auto (frame-count-driven) until the user's explicit ▲/▼ choice, which
+    /// then wins in both directions — including hiding a multi-frame document's panel.
+    #[test]
+    fn timeline_visible_is_auto_by_frame_count_until_an_explicit_override() {
+        let mut p = AnimPlugin::new();
+        assert!(!p.timeline_visible(1), "auto: a fresh single-frame document shows no panel");
+        assert!(p.timeline_visible(2), "auto: a multi-frame document shows the panel");
+        p.set_timeline_open(true);
+        assert!(p.timeline_visible(1), "explicit open wins at one frame");
+        p.set_timeline_open(false);
+        assert!(!p.timeline_visible(1));
+        assert!(!p.timeline_visible(2), "explicit hide wins over the multi-frame auto-show");
+    }
+
+    /// The hidden state is not a no-op anymore: it draws the slim ▲ reopen bar (the timeline's
+    /// discoverability affordance), and opening draws strictly more — the full panel.
+    #[test]
+    fn hidden_panel_draws_the_collapsed_bar_and_opening_draws_the_full_panel() {
+        let mut p = AnimPlugin::new();
+        let host = FakeHost(Document::default_document());
+        let ctx = egui::Context::default();
+        let collapsed = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = p.panel(ui, false, &host);
+        });
+        assert!(!collapsed.shapes.is_empty(), "the hidden state must still draw the reopen bar");
+
+        p.set_timeline_open(true);
+        let ctx2 = egui::Context::default();
+        let open = ctx2.run_ui(egui::RawInput::default(), |ui| {
+            let _ = p.panel(ui, false, &host);
+        });
+        assert!(open.shapes.len() > collapsed.shapes.len(), "the opened timeline must draw strictly more than the bar");
     }
 
     /// `blocks_editing` follows `playing` exactly — the signal the host's edit-initiation gates

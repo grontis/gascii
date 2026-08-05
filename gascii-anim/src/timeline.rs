@@ -49,6 +49,19 @@ pub(crate) fn panel_frame(ctx: &egui::Context) -> egui::Frame {
     egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::symmetric(12, 8)).stroke(egui::Stroke::new(1.0, t.window_edge))
 }
 
+/// The hidden-timeline affordance: a slim always-present bottom bar at the exact spot the panel
+/// opens into, holding only the ▲ reopen button — so showing the timeline never requires the menu.
+pub(crate) fn collapsed_bar(ui: &mut Ui, kiosk: bool, state: &SharedState) {
+    let (h, control_h) = if kiosk { (64.0, 48.0) } else { (36.0, 20.0) };
+    egui::Panel::bottom("gascii_anim_collapsed").frame(panel_frame(ui.ctx())).exact_size(h).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            if widgets::button(ui, "\u{25B2} ANIMATION", true, control_h).clicked() {
+                state.borrow_mut().timeline_open = Some(true);
+            }
+        });
+    });
+}
+
 pub(crate) fn show(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mut ThumbnailCache, top_edit_id: Option<u64>) -> PanelOutcome {
     let mut outcome = PanelOutcome::default();
     egui::Panel::bottom("gascii_anim_timeline").frame(panel_frame(ui.ctx())).exact_size(PANEL_H).show(ui, |ui| {
@@ -215,7 +228,12 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            widgets::micro_label(ui, "TIMELINE");
+            // ▼ collapses to the slim bar `collapsed_bar` draws — the explicit override wins over
+            // the multi-frame auto-show, and the bar is always there to reopen from.
+            if widgets::button(ui, "\u{25BC}", true, control_h).clicked() {
+                state.borrow_mut().timeline_open = Some(false);
+            }
+            widgets::micro_label(ui, "ANIMATION");
             ui.add_space(6.0);
 
             // The transport: step-back, Play, Pause, Stop, step-forward. Play and Pause are

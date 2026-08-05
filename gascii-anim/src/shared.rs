@@ -39,6 +39,12 @@ pub(crate) struct Inner {
     /// In-progress text for the document-default duration field — same lifecycle as
     /// `duration_text`.
     pub default_duration_text: Option<String>,
+    /// The timeline panel's visibility override: `None` = auto (shown once the document has more
+    /// than one frame), `Some(v)` = the user's explicit choice via the panel's own ▼ hide button /
+    /// the collapsed bar's ▲ reopen button, which wins in both directions. When hidden, the slim
+    /// collapsed bar always remains as the reopen affordance, so frame management is never more
+    /// than one click away.
+    pub timeline_open: Option<bool>,
 }
 
 impl Inner {
@@ -76,6 +82,7 @@ impl SharedState {
             was_focused: true,
             duration_text: None,
             default_duration_text: None,
+            timeline_open: None,
         })))
     }
 

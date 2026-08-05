@@ -401,14 +401,13 @@
         );
     }
 
-    /// `AnimPlugin`'s own single-frame gate, exercised through the real registered plugin list (not
-    /// a double): a fresh document has exactly one frame, so its panel must claim zero space and
-    /// must not shrink the central panel at all. `gascii-layers`' own panel has no such gate — it
-    /// has no host menu bootstrap for its first extra layer the way "Add Frame" does, so it must
-    /// always be visible — disabled here so this test isolates `AnimPlugin`'s gate specifically,
-    /// not the compound layout of every registered plugin.
+    /// `AnimPlugin`'s single-frame state, exercised through the real registered plugin list (not
+    /// a double): a fresh one-frame document shows only the slim ▲ ANIMATION reopen bar — it claims
+    /// a strip well under the full panel's height, never the whole timeline. `gascii-layers` is
+    /// disabled so this isolates `AnimPlugin`'s own bar, not the compound layout of every
+    /// registered plugin.
     #[test]
-    fn anim_panel_claims_no_space_while_frame_count_is_one() {
+    fn anim_panel_shows_only_the_slim_reopen_bar_while_frame_count_is_one() {
         let mut app = GasciiApp::headless();
         assert_eq!(app.doc.frame_count(), 1);
         let layers = PLUGINS.iter().position(|d| d.id == gascii_layers::DESCRIPTOR.id).expect("gascii-layers is registered");
@@ -429,7 +428,9 @@
             central_rect_no_plugins = Some(resp.response.rect);
         });
 
-        assert_eq!(central_rect.unwrap(), central_rect_no_plugins.unwrap(), "a single-frame document's layout must be byte-identical with or without the plugin panel loop running");
+        let shrink = central_rect_no_plugins.unwrap().height() - central_rect.unwrap().height();
+        assert!(shrink > 0.0, "the reopen bar must claim real space — it's the timeline's discoverability affordance");
+        assert!(shrink < 100.0, "a single-frame document must get the slim bar, never the full timeline panel (shrunk by {shrink}px)");
     }
 
     /// The real, registered `gascii-anim` plugin (not a double) must claim real screen space the
@@ -461,6 +462,40 @@
         assert!(
             with_second_frame.unwrap().height() < single_frame.unwrap().height(),
             "the timeline panel must claim real space once frame_count() > 1"
+        );
+    }
+
+    /// The ▲ reopen path end to end: flipping the real registered plugin's `timeline_open` (via
+    /// `as_any_mut`, standing in for the collapsed bar's own button click) must make the full
+    /// panel claim space for a single-frame document — the bootstrap the affordance exists for.
+    #[test]
+    fn show_timeline_toggle_opens_the_panel_for_a_single_frame_document() {
+        let mut app = GasciiApp::headless();
+        assert_eq!(app.doc.frame_count(), 1);
+        app.plugins
+            .iter_mut()
+            .find_map(|p| p.as_any_mut().downcast_mut::<gascii_anim::AnimPlugin>())
+            .expect("gascii-anim is registered")
+            .set_timeline_open(true);
+
+        let ctx = egui::Context::default();
+        let mut with_toggle = None;
+        let _ = ctx.run_ui(raw_input_with_screen(1000.0, 800.0), |ui| {
+            app.run_plugin_panels(ui, false);
+            let resp = egui::CentralPanel::default().show(ui, |_ui| {});
+            with_toggle = Some(resp.response.rect);
+        });
+
+        let ctx2 = egui::Context::default();
+        let mut without = None;
+        let _ = ctx2.run_ui(raw_input_with_screen(1000.0, 800.0), |ui| {
+            let resp = egui::CentralPanel::default().show(ui, |_ui| {});
+            without = Some(resp.response.rect);
+        });
+
+        assert!(
+            with_toggle.unwrap().height() < without.unwrap().height(),
+            "the toggled-open timeline must claim real space even at frame_count() == 1"
         );
     }
 
