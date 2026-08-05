@@ -378,6 +378,13 @@ pub(crate) fn begin_gesture(app: &mut GasciiApp, b: Binding, x: u16, y: u16, alt
         return false;
     }
 
+    // Playback owns the canvas display: a stroke would land on the editing cursor's frame, not
+    // the frame on screen. Refuse outright, same shape as the hidden-layer gate below. (The
+    // alt-sample eyedropper above stays available — reading a color mutates nothing.)
+    if app.refuse_edit_during_playback() {
+        return false;
+    }
+
     // A hidden active layer refuses strokes outright — Photoshop/Aseprite convention: no gesture
     // starts, so there is nothing to flush or undo, only a readable status-bar message.
     if !app.doc.layer_visible(app.active_layer) {
@@ -1523,6 +1530,33 @@ mod tests {
         assert_eq!(app.doc.cell(0, 2, 2).copied(), before, "the document must be completely untouched");
         assert!(app.last_error.is_some(), "a readable error must be surfaced");
         assert!(app.last_error_text().unwrap().contains("hidden"), "the message must explain why: {:?}", app.last_error_text());
+    }
+
+    /// A plugin reporting `blocks_editing` (animation playback) must refuse a press at
+    /// `begin_gesture`: the canvas is showing playback, not the editing cursor's frame, so no
+    /// session may start — the same refuse-and-explain shape as the hidden-layer gate above.
+    #[test]
+    fn begin_gesture_is_refused_while_a_plugin_blocks_editing() {
+        struct PlaybackDouble;
+        impl gascii_plugin_api::Plugin for PlaybackDouble {
+            fn blocks_editing(&self) -> bool {
+                true
+            }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+        let mut app = GasciiApp::headless();
+        app.bind(Binding::L, ToolKind::Pencil);
+        app.plugins.push(Box::new(PlaybackDouble));
+
+        let before = app.doc.cell(0, 2, 2).copied();
+        let started = begin_gesture(&mut app, Binding::L, 2, 2, false, false);
+
+        assert!(!started, "a press during playback must not start a gesture");
+        assert_eq!(app.stroke_owner, None, "no session may be started");
+        assert_eq!(app.doc.cell(0, 2, 2).copied(), before, "the document must be completely untouched");
+        assert!(app.last_error_text().unwrap().contains("pause"), "the message must explain why: {:?}", app.last_error_text());
     }
 
     /// The eyedropper's one-shot pick reads, never writes — it must still succeed against a hidden

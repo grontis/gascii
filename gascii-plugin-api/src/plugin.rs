@@ -101,6 +101,14 @@ pub trait Plugin: 'static {
         false
     }
 
+    /// True while this plugin owns what the canvas is currently showing (animation playback) and
+    /// document edits should therefore be refused — otherwise a stroke would land on the editing
+    /// cursor's frame, not the frame on screen. Polled live by the host at every edit-initiation
+    /// seam; the default never blocks.
+    fn blocks_editing(&self) -> bool {
+        false
+    }
+
     /// Downcast escape hatch for a live instance held behind `Box<dyn Plugin>`. Used by tests that
     /// need to inspect or mutate one specific plugin's own state (e.g. confirming it survives
     /// being rendered through two different chrome geometries unchanged) rather than only what the
@@ -183,6 +191,7 @@ mod tests {
         assert!(NullPlugin::shortcuts().is_empty());
         assert!(p.tool_ctx_patch("anything").is_none());
         assert!(!p.pressure_override_enabled("anything"));
+        assert!(!p.blocks_editing(), "the default must never block editing");
 
         let inner: Box<dyn CanvasRenderer> = Box::new(MarkerRenderer);
         let inner_addr = (inner.as_ref() as *const dyn CanvasRenderer).cast::<()>();

@@ -41,6 +41,24 @@ pub(crate) struct Inner {
     pub default_duration_text: Option<String>,
 }
 
+impl Inner {
+    /// Starts the playback clock at `at_frame` (the editing cursor at press time) — the one shape
+    /// every play entry point (the Play button, the Space tap) uses.
+    pub fn start_playback(&mut self, at_frame: usize) {
+        self.playing = true;
+        self.playback_frame = at_frame;
+        self.elapsed_ms = 0.0;
+    }
+
+    /// Freezes playback and returns the frame it froze on, for the caller to park the editing
+    /// cursor there — the canvas shows the active frame while idle, so without the park a pause
+    /// would visually snap back to wherever the cursor was when Play was pressed.
+    pub fn pause_playback(&mut self) -> usize {
+        self.playing = false;
+        self.playback_frame
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct SharedState(Rc<RefCell<Inner>>);
 
@@ -88,6 +106,24 @@ mod tests {
         let b = a.clone();
         b.borrow_mut().playing = true;
         assert!(a.borrow().playing, "a clone must observe the other clone's write");
+    }
+
+    #[test]
+    fn start_playback_resets_the_clock_and_pause_reports_the_frozen_frame() {
+        let s = SharedState::new();
+        {
+            let mut inner = s.borrow_mut();
+            inner.elapsed_ms = 42.0;
+            inner.start_playback(3);
+        }
+        assert!(s.borrow().playing);
+        assert_eq!(s.borrow().playback_frame, 3);
+        assert_eq!(s.borrow().elapsed_ms, 0.0, "starting must reset the elapsed clock");
+
+        s.borrow_mut().playback_frame = 5; // playback advanced
+        let frozen = s.borrow_mut().pause_playback();
+        assert!(!s.borrow().playing);
+        assert_eq!(frozen, 5, "pause must report the frame it froze on, for the cursor park");
     }
 
     #[test]

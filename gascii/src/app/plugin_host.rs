@@ -54,6 +54,28 @@ pub(crate) fn host_context(app: &GasciiApp) -> (bool, [&'static str; 2]) {
 }
 
 impl GasciiApp {
+    /// True while any enabled plugin reports `Plugin::blocks_editing` (animation playback): the
+    /// canvas is showing something other than the editing cursor's frame, so edit-initiation
+    /// seams refuse rather than landing changes on a frame the user can't currently see. Polled
+    /// live — no cached flag to go stale between frames.
+    pub(crate) fn editing_blocked(&self) -> bool {
+        self.plugins
+            .iter()
+            .enumerate()
+            .any(|(i, p)| self.plugin_runtime.get(i).is_none_or(|r| r.enabled) && p.blocks_editing())
+    }
+
+    /// The standard refusal at an edit-initiation seam: flashes the shared message and reports
+    /// whether the caller must bail — mirrors the hidden-layer stroke gate's flash-and-refuse
+    /// shape.
+    pub(crate) fn refuse_edit_during_playback(&mut self) -> bool {
+        if self.editing_blocked() {
+            self.flash_error("Playback is running — pause to edit");
+            return true;
+        }
+        false
+    }
+
     /// Draws every plugin's panel, then applies whatever `PanelOutcome`s they returned. Two passes
     /// — draw-and-collect, then drain — because `apply_edit` needs the whole of `&mut self`, which
     /// would conflict with `self.plugins`'s mutable borrow while the draw loop is still running.

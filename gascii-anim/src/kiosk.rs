@@ -19,7 +19,10 @@ const TOUCH_CONTROL_H: f32 = 68.0;
 /// Mirrors `gascii::ui::kiosk::SWATCH` (48.0), doubled on the wide axis so a thumbnail stays
 /// legible at touch scale.
 const TOUCH_THUMB: Vec2 = Vec2::new(96.0, 60.0);
-const PANEL_H: f32 = crate::timeline::PANEL_H + 40.0;
+/// Sized for `body`'s two control rows at `TOUCH_CONTROL_H` plus the touch-scale thumbnail strip —
+/// absolute rather than derived from `timeline::PANEL_H`, whose windowed control rows are far
+/// shorter than the 68px touch ones.
+const PANEL_H: f32 = 240.0;
 
 pub(crate) fn show(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mut ThumbnailCache, top_edit_id: Option<u64>) -> PanelOutcome {
     let mut outcome = PanelOutcome::default();

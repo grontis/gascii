@@ -7,6 +7,9 @@ use crate::app::GasciiApp;
 use crate::chords::{self, ChordId};
 
 pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
+    // Mutating menu items disable while a plugin owns the canvas display (animation playback) —
+    // the same seams' method-level gates would refuse anyway; disabling states it up front.
+    let blocked = app.editing_blocked();
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("File", |ui| {
             if ui.add(egui::Button::new("New…").shortcut_text(chords::chord_label(ChordId::New))).clicked() {
@@ -57,14 +60,14 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
             // an undo under an in-flight stroke's pinned `before` values commits stale cells.
             let no_stroke = !app.stroke_in_progress();
             let undo = egui::Button::new("Undo").shortcut_text(chords::chord_label(ChordId::Undo));
-            if ui.add_enabled(app.history.can_undo() && no_stroke, undo).clicked() {
+            if ui.add_enabled(app.history.can_undo() && no_stroke && !blocked, undo).clicked() {
                 app.request_undo();
             }
             // Both Ctrl+Shift+Z and Ctrl+Y trigger a redo — `ChordId::Redo`'s label documents
             // both, closing a label-drift gap (Ctrl+Shift+Z was previously undocumented here
             // even though it already worked).
             let redo = egui::Button::new("Redo").shortcut_text(chords::chord_label(ChordId::Redo));
-            if ui.add_enabled(app.history.can_redo() && no_stroke, redo).clicked() {
+            if ui.add_enabled(app.history.can_redo() && no_stroke && !blocked, redo).clicked() {
                 app.request_redo();
             }
             ui.separator();
@@ -88,7 +91,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
                 ui.ctx().copy_text(gascii_core::export_text(&app.doc));
             }
             let paste = egui::Button::new("Paste").shortcut_text(chords::chord_label(ChordId::Paste));
-            if ui.add(paste).clicked() {
+            if ui.add_enabled(!blocked, paste).clicked() {
                 // Reads the OS clipboard on demand via `arboard`. A real Ctrl+V keypress pastes
                 // through `egui::Event::Paste` instead (`canvas.rs`) — this menu item exists
                 // because a menu click is not itself a key event egui surfaces the clipboard on.
@@ -98,13 +101,13 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
                 }
             }
             let cut = egui::Button::new("Cut").shortcut_text(chords::chord_label(ChordId::Cut));
-            if ui.add_enabled(can_copy, cut).clicked() {
+            if ui.add_enabled(can_copy && !blocked, cut).clicked() {
                 let ctx = ui.ctx().clone();
                 app.cut_selection(&ctx);
             }
             let duplicate =
                 egui::Button::new("Duplicate Selection").shortcut_text(chords::chord_label(ChordId::Duplicate));
-            if ui.add_enabled(can_copy, duplicate).clicked() {
+            if ui.add_enabled(can_copy && !blocked, duplicate).clicked() {
                 app.duplicate_selection();
             }
             ui.separator();
@@ -120,7 +123,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
                 app.deselect();
             }
             ui.separator();
-            if ui.button("Resize Canvas…").clicked() {
+            if ui.add_enabled(!blocked, egui::Button::new("Resize Canvas…")).clicked() {
                 app.open_resize_dialog();
             }
         });
@@ -129,7 +132,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp) {
         // — frames are a document property, not the plugin's.
         if app.anim_plugin_enabled() {
             ui.menu_button("Animation", |ui| {
-                if ui.button("Add Frame").clicked() {
+                if ui.add_enabled(!blocked, egui::Button::new("Add Frame")).clicked() {
                     app.add_frame_via_menu();
                 }
             });

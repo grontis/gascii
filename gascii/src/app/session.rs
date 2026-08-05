@@ -204,6 +204,9 @@ impl GasciiApp {
     /// rather than being silently discarded. No confirm dialog: Clear is undoable like every other
     /// edit, so it doesn't need one.
     pub(crate) fn clear_document(&mut self) {
+        if self.refuse_edit_during_playback() {
+            return;
+        }
         self.flush_all();
         if let Some(edit) = clear_document(&self.doc) {
             self.apply_edit(edit, None);
@@ -218,6 +221,9 @@ impl GasciiApp {
     /// for all further add/duplicate/delete/reorder. Flushes first, same trigger-table discipline as
     /// Clear/Resize/Save.
     pub(crate) fn add_frame_via_menu(&mut self) {
+        if self.refuse_edit_during_playback() {
+            return;
+        }
         self.flush_all();
         match duplicate_frame(&self.doc, self.doc.active_frame()) {
             Ok(edit) => {
@@ -255,6 +261,9 @@ impl GasciiApp {
     /// keep a live stroke out), but stating it locally means this path's safety no longer hangs
     /// on two guards defined elsewhere staying exactly as they are.
     pub(crate) fn request_undo(&mut self) {
+        if self.refuse_edit_during_playback() {
+            return;
+        }
         self.flush_all();
         if self.history.undo(&mut self.doc) {
             // doc -> app: undo restores doc's active cursors from the undone Edit's own
@@ -281,6 +290,9 @@ impl GasciiApp {
     /// re-pins it. `SelectionTool` inherits the trait's default no-op `resync` — its drop reads
     /// `before` from the document at drop time, not lift time, so there is nothing to re-pin.
     pub(crate) fn request_redo(&mut self) {
+        if self.refuse_edit_during_playback() {
+            return;
+        }
         if self.history.can_redo() {
             self.history.redo(&mut self.doc);
             // doc -> app: same resync as `request_undo` — see `active_frame`'s field doc comment.
@@ -324,6 +336,9 @@ impl GasciiApp {
     /// per-frame key routing. A no-op unless a Selection binding has a region defined, same as
     /// `copy_selection`.
     pub(crate) fn cut_selection(&mut self, ctx: &egui::Context) {
+        if self.refuse_edit_during_playback() {
+            return;
+        }
         let Some(b) = self.selection_slot() else {
             return;
         };
@@ -371,6 +386,9 @@ impl GasciiApp {
     /// (`accept_stamp` with no source region, so dropping never blanks the original). A no-op
     /// unless a Selection binding has a region defined, same as `copy_selection`.
     pub(crate) fn duplicate_selection(&mut self) {
+        if self.refuse_edit_during_playback() {
+            return;
+        }
         let Some(b) = self.selection_slot() else {
             return;
         };
@@ -398,6 +416,9 @@ impl GasciiApp {
     /// background", since transparent is the well's untouched default. Blank cells stay blank —
     /// recolor changes what's painted, it never fills empty space.
     pub(crate) fn recolor_selection(&mut self) {
+        if self.refuse_edit_during_playback() {
+            return;
+        }
         let Some(b) = self.selection_slot() else {
             return;
         };
@@ -439,6 +460,9 @@ impl GasciiApp {
     /// width-validated per character. Either way, the result lands as a floating Selection stamp
     /// anchored at the hovered cell (or the origin if nothing is hovered).
     pub(crate) fn paste_text(&mut self, text: &str) {
+        if self.refuse_edit_during_playback() {
+            return;
+        }
         if self.stroke_in_progress() {
             // Another tool's pointer gesture (drag) owns the canvas right now. `set_tool` below
             // would refuse to switch to Selection while `stroke_active` is true, silently leaving

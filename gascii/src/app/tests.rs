@@ -1003,6 +1003,41 @@
         assert_eq!(app.doc, before_delete, "undo must byte-exactly restore the prior 2-frame document");
     }
 
+    /// Undo is an edit too: while a plugin blocks editing (animation playback), `request_undo`
+    /// must refuse and explain — the mutation would land invisibly under the playback display.
+    /// Covers the whole gated family by proxy (redo/cut/paste/duplicate/recolor/clear all share
+    /// `refuse_edit_during_playback`).
+    #[test]
+    fn request_undo_is_refused_while_a_plugin_blocks_editing() {
+        struct PlaybackDouble;
+        impl Plugin for PlaybackDouble {
+            fn blocks_editing(&self) -> bool {
+                true
+            }
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+        let mut app = GasciiApp::headless();
+        let edit = gascii_core::Edit::Cells(vec![gascii_core::CellEdit {
+            frame: 0,
+            layer: 0,
+            x: 0,
+            y: 0,
+            before: gascii_core::Cell::BLANK,
+            after: cell('Z'),
+        }]);
+        app.apply_edit(edit, None);
+        assert!(app.history.can_undo());
+        app.plugins.push(Box::new(PlaybackDouble));
+
+        app.request_undo();
+
+        assert_eq!(app.doc.cell_at(0, 0, 0, 0).unwrap().ch, 'Z', "the refused undo must leave the edit in place");
+        assert!(app.history.can_undo(), "the history must be untouched");
+        assert!(app.last_error_text().unwrap().contains("pause"), "the refusal must explain itself: {:?}", app.last_error_text());
+    }
+
     /// `switch_active_frame` (the target of a `DocProperty::ActiveFrame`) flushes via
     /// `flush_all()`, but that only actually commits a `holds_session` tool's (Text/Selection)
     /// pending work — a plain stroke tool like Pencil does not hold a "session" the flush machinery

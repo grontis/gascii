@@ -162,12 +162,14 @@ impl Plugin for AnimPlugin {
                 s.space_hold_active = hold.active;
                 s.space_hold_saw_primary_press = hold.saw_primary_press;
                 if hold.toggle_playback {
-                    // Mirrors `timeline.rs`'s own Play/Pause button exactly: entering play resets
-                    // the playback cursor to the editing cursor and its elapsed-time accumulator.
-                    s.playing = !s.playing;
+                    // Mirrors `timeline.rs`'s own Play/Pause buttons exactly: play starts the
+                    // clock at the editing cursor; pause parks the cursor on the frozen frame
+                    // (see `Inner::pause_playback`).
                     if s.playing {
-                        s.playback_frame = host.document().active_frame();
-                        s.elapsed_ms = 0.0;
+                        let frozen = s.pause_playback();
+                        outcome.properties.push(DocProperty::ActiveFrame(frozen));
+                    } else {
+                        s.start_playback(host.document().active_frame());
                     }
                 }
             }
@@ -179,14 +181,16 @@ impl Plugin for AnimPlugin {
             // `,`/`.` prev/next frame — arrow keys are deliberately avoided (an active Text session
             // owns those). Clamped against `frame_count()`, which can shrink between ticks exactly
             // like the playback clock's own `s.playback_frame = s.playback_frame.min(...)` below.
+            // Idle while playing, matching the transport's own disabled step buttons.
+            let playing_now = self.state.borrow().playing;
             let (prev, next) =
                 ui.input_mut(|i| (i.consume_key(egui::Modifiers::NONE, egui::Key::Comma), i.consume_key(egui::Modifiers::NONE, egui::Key::Period)));
             let doc = host.document();
-            if prev {
+            if prev && !playing_now {
                 if let Some(idx) = doc.active_frame().checked_sub(1) {
                     outcome.properties.push(DocProperty::ActiveFrame(idx));
                 }
-            } else if next {
+            } else if next && !playing_now {
                 let active = doc.active_frame();
                 if active + 1 < doc.frame_count() {
                     outcome.properties.push(DocProperty::ActiveFrame(active + 1));
@@ -195,9 +199,9 @@ impl Plugin for AnimPlugin {
 
             // Shift+D duplicate frame — the exact same pure helper `timeline.rs`'s own Duplicate
             // button uses, so both entry points behave identically at every boundary (MAX_FRAMES,
-            // the cell budget).
+            // the cell budget). Idle while playing, like every other structural control.
             let duplicate = ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::D));
-            if duplicate {
+            if duplicate && !playing_now {
                 match crate::timeline::duplicate_active(doc) {
                     Ok(edit) => outcome.edits.push(edit),
                     Err(e) => outcome.error = Some(crate::timeline::frame_op_error_message("duplicate frame", e)),
@@ -248,6 +252,12 @@ impl Plugin for AnimPlugin {
         Box::new(OnionRenderer::new(inner, self.state.clone()))
     }
 
+    /// While playing, the canvas shows `playback_frame`, not the editing cursor's frame — an edit
+    /// landed then would silently target a frame the user can't see.
+    fn blocks_editing(&self) -> bool {
+        self.state.borrow().playing
+    }
+
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
@@ -286,6 +296,18 @@ mod tests {
     #[test]
     fn tool_capabilities_is_empty() {
         assert!(AnimPlugin::tool_capabilities().is_empty());
+    }
+
+    /// `blocks_editing` follows `playing` exactly — the signal the host's edit-initiation gates
+    /// poll.
+    #[test]
+    fn blocks_editing_exactly_while_playing() {
+        let p = AnimPlugin::new();
+        assert!(!p.blocks_editing(), "idle must not block");
+        p.state.borrow_mut().playing = true;
+        assert!(p.blocks_editing(), "playing must block");
+        p.state.borrow_mut().playing = false;
+        assert!(!p.blocks_editing(), "pausing must unblock immediately");
     }
 
     /// `shortcuts()` must declare exactly the five keys `tick`'s own dispatch checks, in the same
@@ -531,6 +553,31 @@ mod tests {
         raw_up.events.push(space_key_event(false));
         let _ = ctx.run_ui(raw_up, |ui| { p.tick(ui, false, false, &host); });
         assert!(p.state.borrow().playing, "releasing a plain Space tap must toggle playback on");
+    }
+
+    /// The pause half of the Space tap: tapping while playing must freeze playback AND hand the
+    /// frozen playback frame to the host as the new editing cursor — identical to the Pause
+    /// button, so both pause entry points land the user on the frame they were looking at.
+    #[test]
+    fn a_space_tap_while_playing_pauses_and_parks_the_cursor_on_the_frozen_frame() {
+        let doc = doc_with_frames(3);
+        let mut p = AnimPlugin::new();
+        p.state.borrow_mut().playing = true;
+        p.state.borrow_mut().playback_frame = 2;
+        let host = FakeHost(doc);
+        let ctx = egui::Context::default();
+
+        let mut raw_down = egui::RawInput::default();
+        raw_down.events.push(space_key_event(true));
+        let _ = ctx.run_ui(raw_down, |ui| { p.tick(ui, false, false, &host); });
+
+        let mut raw_up = egui::RawInput::default();
+        raw_up.events.push(space_key_event(false));
+        let mut outcome = None;
+        let _ = ctx.run_ui(raw_up, |ui| outcome = Some(p.tick(ui, false, false, &host)));
+
+        assert!(!p.state.borrow().playing, "the tap must pause");
+        assert_eq!(active_frame_of(&outcome.unwrap()), Some(2), "pausing must park the cursor on the frozen frame");
     }
 
     /// The pan-aware half, end to end: a primary press during the Space hold must suppress the

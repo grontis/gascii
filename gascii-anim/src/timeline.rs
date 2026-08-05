@@ -34,7 +34,7 @@ use crate::theme;
 use crate::thumbnail::ThumbnailCache;
 use crate::widgets;
 
-pub(crate) const PANEL_H: f32 = 132.0;
+pub(crate) const PANEL_H: f32 = 164.0;
 
 /// Ceiling on the onion-skin prev/next steppers. `paint_onion` (`decorator.rs`) scans farthest-to-
 /// nearest and no longer stops at the first out-of-range neighbor (painting nearest-last needs the
@@ -146,10 +146,11 @@ fn parse_duration_ms(text: &str) -> Option<u32> {
 /// on the paint where focus leaves (Enter included, since Enter surrenders focus) — and only when
 /// that value differs from `live`, so merely focusing and leaving the field never commits
 /// anything. Escape discards the edit instead of committing it. Unparseable text also discards.
-fn duration_field(ui: &mut Ui, buffer: &mut Option<String>, live: u32) -> Option<u32> {
+/// `!enabled` renders read-only (playback in progress).
+fn duration_field(ui: &mut Ui, buffer: &mut Option<String>, live: u32, enabled: bool) -> Option<u32> {
     let t = theme::current(ui.ctx());
     let mut text = buffer.clone().unwrap_or_else(|| live.to_string());
-    let resp = ui.add(egui::TextEdit::singleline(&mut text).desired_width(48.0).font(widgets::mono_id(widgets::size::LABEL)));
+    let resp = ui.add_enabled(enabled, egui::TextEdit::singleline(&mut text).desired_width(48.0).font(widgets::mono_id(widgets::size::LABEL)));
     ui.label(egui::RichText::new("ms").font(widgets::mono_id(widgets::size::LABEL)).color(t.fg_secondary));
     if resp.lost_focus() {
         let committed = buffer.take();
@@ -171,6 +172,38 @@ fn thumb_is_visible(rect_min_x: f32, thumb_w: f32, clip_min_x: f32, clip_max_x: 
     rect_min_x < clip_max_x && rect_min_x + thumb_w > clip_min_x
 }
 
+/// The frame the canvas is showing right now — the playback frame while playing (clamped, since
+/// the document can shrink under a running clock), the editing cursor otherwise. This is what the
+/// strip's selection marker and the frame counter track, so during playback they follow what's
+/// actually on screen.
+fn shown_frame(playing: bool, playback_frame: usize, active_frame: usize, frame_count: usize) -> usize {
+    if playing {
+        playback_frame.min(frame_count.saturating_sub(1))
+    } else {
+        active_frame
+    }
+}
+
+#[derive(PartialEq, Eq, Debug)]
+enum ThumbClick {
+    /// While playing: retarget the playback clock, never the editing cursor — a cursor move would
+    /// be invisible under the playback display.
+    Scrub(usize),
+    /// While idle: move the editing cursor (a `DocProperty` the host applies).
+    Select(usize),
+    Nothing,
+}
+
+fn resolve_thumb_click(playing: bool, clicked: usize, shown: usize) -> ThumbClick {
+    if playing {
+        ThumbClick::Scrub(clicked)
+    } else if clicked != shown {
+        ThumbClick::Select(clicked)
+    } else {
+        ThumbClick::Nothing
+    }
+}
+
 /// The shared control-row + thumbnail-strip body both chrome variants render. `thumb_size` and
 /// `control_h` are the only geometry deltas between windowed and kiosk. `top_edit_id` is threaded
 /// straight through to `ThumbnailCache::get_or_build` — see `thumbnail.rs`'s module doc for why the
@@ -185,15 +218,36 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
             widgets::micro_label(ui, "TIMELINE");
             ui.add_space(6.0);
 
+            // The transport: step-back, Play, Pause, Stop, step-forward. Play and Pause are
+            // separate, state-gated buttons rather than one relabeling toggle. The step buttons
+            // move the editing cursor itself (like `,`/`.`), so they idle while playback owns the
+            // shown frame.
             let playing = state.borrow().playing;
-            let play_label = if playing { "Pause" } else { "Play" };
-            if widgets::button(ui, play_label, true, control_h).clicked() {
+            let active = doc.active_frame();
+            let can_step_back = !playing && active > 0;
+            if widgets::button(ui, "\u{25C0}", can_step_back, control_h).clicked() && can_step_back {
+                outcome.properties.push(DocProperty::ActiveFrame(active - 1));
+            }
+            if widgets::button(ui, "Play", !playing, control_h).clicked() && !playing {
+                state.borrow_mut().start_playback(active);
+            }
+            // Pausing parks the editing cursor on the frame playback froze at — see
+            // `Inner::pause_playback` for why the park matters.
+            if widgets::button(ui, "Pause", playing, control_h).clicked() && playing {
+                let frozen = state.borrow_mut().pause_playback();
+                outcome.properties.push(DocProperty::ActiveFrame(frozen));
+            }
+            // Stop rewinds to the first frame, whether playing or already parked mid-sequence.
+            let can_stop = playing || active != 0;
+            if widgets::button(ui, "Stop", can_stop, control_h).clicked() && can_stop {
                 let mut s = state.borrow_mut();
-                s.playing = !s.playing;
-                if s.playing {
-                    s.playback_frame = doc.active_frame();
-                    s.elapsed_ms = 0.0;
-                }
+                s.playing = false;
+                s.elapsed_ms = 0.0;
+                outcome.properties.push(DocProperty::ActiveFrame(0));
+            }
+            let can_step_fwd = !playing && active + 1 < doc.frame_count();
+            if widgets::button(ui, "\u{25B6}", can_step_fwd, control_h).clicked() && can_step_fwd {
+                outcome.properties.push(DocProperty::ActiveFrame(active + 1));
             }
 
             // `Document.loop_playback` itself, not plugin-session state — a plain field write via
@@ -204,52 +258,65 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
                 outcome.properties.push(DocProperty::LoopPlayback(loop_playback));
             }
 
-            ui.label(
-                egui::RichText::new(format!("{}/{}", doc.active_frame() + 1, doc.frame_count()))
-                    .font(widgets::mono_id(widgets::size::LABEL))
-                    .color(t.fg_text),
-            );
+            // The counter tracks what's on screen: the playback frame while playing (with a ▶
+            // marker so the number visibly means "now showing"), the editing cursor otherwise.
+            let shown = shown_frame(playing, state.borrow().playback_frame, active, doc.frame_count());
+            let counter =
+                if playing { format!("\u{25B6} {}/{}", shown + 1, doc.frame_count()) } else { format!("{}/{}", shown + 1, doc.frame_count()) };
+            ui.label(egui::RichText::new(counter).font(widgets::mono_id(widgets::size::LABEL)).color(t.fg_text));
 
-            ui.add_space(10.0);
-            if widgets::button(ui, "Add", true, control_h).clicked() {
+            // Structural edits idle while playing — the canvas is showing playback, not the
+            // editing cursor's frame, so nothing should mutate the document underneath it.
+            ui.add_space(6.0);
+            ui.separator();
+            let can_add = !playing;
+            if widgets::button(ui, "Add", can_add, control_h).clicked() && can_add {
                 match add_blank_after_active(doc) {
                     Ok(edit) => outcome.edits.push(edit),
                     Err(e) => outcome.error = Some(frame_op_error_message("add frame", e)),
                 }
             }
-            if widgets::button(ui, "Duplicate", true, control_h).clicked() {
+            if widgets::button(ui, "Duplicate", can_add, control_h).clicked() && can_add {
                 match duplicate_active(doc) {
                     Ok(edit) => outcome.edits.push(edit),
                     Err(e) => outcome.error = Some(frame_op_error_message("duplicate frame", e)),
                 }
             }
-            let can_delete = doc.frame_count() > 1;
+            let can_delete = !playing && doc.frame_count() > 1;
             if widgets::button(ui, "Delete", can_delete, control_h).clicked() && can_delete {
                 if let Some(edit) = delete_active(doc) {
                     outcome.edits.push(edit);
                 }
             }
-            let can_left = doc.active_frame() > 0;
-            if widgets::button(ui, "\u{25C0}", can_left, control_h).clicked() && can_left {
+            // "Move", not bare arrows — those belong to the transport's step buttons now.
+            let can_left = !playing && doc.active_frame() > 0;
+            if widgets::button(ui, "Move \u{25C0}", can_left, control_h).clicked() && can_left {
                 if let Some(edit) = move_active_left(doc) {
                     outcome.edits.push(edit);
                 }
             }
-            let can_right = doc.active_frame() + 1 < doc.frame_count();
-            if widgets::button(ui, "\u{25B6}", can_right, control_h).clicked() && can_right {
+            let can_right = !playing && doc.active_frame() + 1 < doc.frame_count();
+            if widgets::button(ui, "Move \u{25B6}", can_right, control_h).clicked() && can_right {
                 if let Some(edit) = move_active_right(doc) {
                     outcome.edits.push(edit);
                 }
             }
+        });
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            // Fresh read rather than row 1's captured value: a Play/Pause click above has already
+            // flipped the state by the time this row paints.
+            let playing = state.borrow().playing;
 
             // The two timing clusters: FRAME (the active frame's own duration, an override once
             // touched) and DEFAULT (the document-wide fallback) — each labeled and fenced off by a
-            // separator so they read as distinct groups, not one run-on stepper row.
-            ui.add_space(10.0);
-            ui.separator();
+            // separator so they read as distinct groups, not one run-on stepper row. Timing edits
+            // idle while playing, like the structural row above.
             widgets::micro_label(ui, "FRAME");
             let dur = doc.resolved_frame_duration_ms(doc.active_frame()).unwrap_or(gascii_core::Document::DEFAULT_FRAME_DURATION_MS);
-            if widgets::button(ui, "-10ms", true, control_h).clicked() {
+            if widgets::button(ui, "-10ms", !playing, control_h).clicked() && !playing {
                 if let Some(edit) = step_duration(doc, -10) {
                     outcome.edits.push(edit);
                 }
@@ -257,12 +324,12 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
             // A typed value always lands as this frame's own override, exactly like the steppers.
             // The `!= live` filter inside `duration_field` keeps a touch-and-leave from pinning an
             // override equal to the document default.
-            if let Some(v) = duration_field(ui, &mut state.borrow_mut().duration_text, dur) {
+            if let Some(v) = duration_field(ui, &mut state.borrow_mut().duration_text, dur, !playing) {
                 if let Ok(Some(edit)) = gascii_core::set_frame_duration(doc, doc.active_frame(), Some(v)) {
                     outcome.edits.push(edit);
                 }
             }
-            if widgets::button(ui, "+10ms", true, control_h).clicked() {
+            if widgets::button(ui, "+10ms", !playing, control_h).clicked() && !playing {
                 if let Some(edit) = step_duration(doc, 10) {
                     outcome.edits.push(edit);
                 }
@@ -270,7 +337,7 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
             // Shown only once the active frame actually carries an override — resets it back to
             // tracking the document default rather than leaving it permanently pinned once set.
             let has_override = doc.frame(doc.active_frame()).is_some_and(|f| f.duration_override.is_some());
-            if has_override && widgets::button(ui, "Reset", true, control_h).clicked() {
+            if has_override && widgets::button(ui, "Reset", !playing, control_h).clicked() && !playing {
                 if let Some(edit) = clear_duration_override(doc) {
                     outcome.edits.push(edit);
                 }
@@ -279,13 +346,13 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
             ui.add_space(6.0);
             ui.separator();
             widgets::micro_label(ui, "DEFAULT");
-            if widgets::button(ui, "-10ms", true, control_h).clicked() {
+            if widgets::button(ui, "-10ms", !playing, control_h).clicked() && !playing {
                 outcome.properties.push(DocProperty::DefaultFrameDuration(step_default_duration(doc.frame_duration_ms, -10)));
             }
-            if let Some(v) = duration_field(ui, &mut state.borrow_mut().default_duration_text, doc.frame_duration_ms) {
+            if let Some(v) = duration_field(ui, &mut state.borrow_mut().default_duration_text, doc.frame_duration_ms, !playing) {
                 outcome.properties.push(DocProperty::DefaultFrameDuration(v));
             }
-            if widgets::button(ui, "+10ms", true, control_h).clicked() {
+            if widgets::button(ui, "+10ms", !playing, control_h).clicked() && !playing {
                 outcome.properties.push(DocProperty::DefaultFrameDuration(step_default_duration(doc.frame_duration_ms, 10)));
             }
 
@@ -320,6 +387,8 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
         egui::ScrollArea::horizontal().id_salt("gascii_anim_strip").auto_shrink([false, true]).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
+                let playing = state.borrow().playing;
+                let shown = shown_frame(playing, state.borrow().playback_frame, doc.active_frame(), doc.frame_count());
                 for i in 0..doc.frame_count() {
                     // Allocated at the identical size regardless of visibility or active state, so
                     // layout, scroll extent, and drag-reorder geometry never depend on which
@@ -328,7 +397,9 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
                     // *painting* into a slightly expanded rect instead; the 6px item spacing keeps
                     // that expansion from touching its neighbors.
                     let (rect, resp) = ui.allocate_exact_size(thumb_size, Sense::click());
-                    let active = i == doc.active_frame();
+                    // The marker tracks `shown`, not the editing cursor: during playback it rides
+                    // the frame actually on screen.
+                    let active = i == shown;
                     let draw = if active { rect.expand(2.0) } else { rect };
                     let clip = ui.clip_rect();
                     if thumb_is_visible(rect.min.x, thumb_size.x, clip.min.x, clip.max.x) {
@@ -342,8 +413,20 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mu
                     // low-contrast gray in the dark theme.
                     let (border, width) = if active { (t.bg_inverse, 2.0) } else { (t.border_soft, 1.0) };
                     ui.painter().rect_stroke(draw, 2.0, Stroke::new(width, border), StrokeKind::Inside);
-                    if resp.clicked() && !active {
-                        outcome.properties.push(DocProperty::ActiveFrame(i));
+                    if playing && active {
+                        // Keep the playing frame in view — the strip follows the playhead.
+                        ui.scroll_to_rect(draw, Some(egui::Align::Center));
+                    }
+                    if resp.clicked() {
+                        match resolve_thumb_click(playing, i, shown) {
+                            ThumbClick::Scrub(frame) => {
+                                let mut s = state.borrow_mut();
+                                s.playback_frame = frame;
+                                s.elapsed_ms = 0.0;
+                            }
+                            ThumbClick::Select(frame) => outcome.properties.push(DocProperty::ActiveFrame(frame)),
+                            ThumbClick::Nothing => {}
+                        }
                     }
                 }
             });
@@ -560,6 +643,64 @@ mod tests {
             .filter(|r| r.stroke.width == 1.0 && r.stroke.color == t.border_soft && (r.rect.size() - thumb).length() < 0.5)
             .count();
         assert_eq!(inactive, 2, "the two inactive thumbs keep the soft outline at the allocated size");
+    }
+
+    #[test]
+    fn shown_frame_tracks_playback_only_while_playing_and_clamps() {
+        assert_eq!(shown_frame(false, 2, 0, 3), 0, "idle: the editing cursor");
+        assert_eq!(shown_frame(true, 2, 0, 3), 2, "playing: the playback frame");
+        assert_eq!(shown_frame(true, 9, 0, 3), 2, "a stale playback index clamps to the last frame");
+    }
+
+    #[test]
+    fn resolve_thumb_click_scrubs_while_playing_and_selects_while_idle() {
+        assert_eq!(resolve_thumb_click(true, 1, 0), ThumbClick::Scrub(1));
+        assert_eq!(resolve_thumb_click(true, 0, 0), ThumbClick::Scrub(0), "re-clicking the shown frame restarts it from its start");
+        assert_eq!(resolve_thumb_click(false, 1, 0), ThumbClick::Select(1));
+        assert_eq!(resolve_thumb_click(false, 0, 0), ThumbClick::Nothing);
+    }
+
+    /// While playing, the strip's enlarged inversion marker rides the playback frame, not the
+    /// editing cursor — pinned through the emitted shapes exactly like the idle-marker test above.
+    #[test]
+    fn body_marks_the_playback_frame_while_playing_instead_of_the_editing_cursor() {
+        let doc = doc_with_frames(3); // the editing cursor is parked at 0
+        let state = SharedState::new();
+        state.borrow_mut().playing = true;
+        state.borrow_mut().playback_frame = 2;
+        let mut thumbs = ThumbnailCache::new();
+        let ctx = egui::Context::default();
+        let thumb = Vec2::new(48.0, 30.0);
+        let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let _ = body(ui, &doc, &state, &mut thumbs, thumb, 24.0, Some(1));
+        });
+        let t = theme::current(&ctx);
+
+        let markers: Vec<_> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Rect(r) if r.stroke.width == 2.0 && r.stroke.color == t.bg_inverse => Some(r.rect),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(markers.len(), 1, "exactly one thumb carries the marker");
+
+        let idle: Vec<_> = out
+            .shapes
+            .iter()
+            .filter_map(|cs| match &cs.shape {
+                egui::Shape::Rect(r) if r.stroke.width == 1.0 && r.stroke.color == t.border_soft && (r.rect.size() - thumb).length() < 0.5 => {
+                    Some(r.rect)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(idle.len(), 2);
+        assert!(
+            idle.iter().all(|r| markers[0].center().x > r.center().x),
+            "the marker must sit on the last (playback) thumb, right of both idle thumbs — not on cursor frame 0"
+        );
     }
 
     /// The Loop checkbox reads `Document.loop_playback` as its source of truth and, on a no-input
