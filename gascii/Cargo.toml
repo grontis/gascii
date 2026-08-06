@@ -3,6 +3,9 @@ name = "gascii"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ASCII art editor and animation studio"
 
 [dependencies]
 gascii-core = { path = "../gascii-core" }

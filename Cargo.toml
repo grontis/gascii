@@ -6,6 +6,8 @@ members = ["gascii-core", "gascii", "gascii-plugin-api", "gascii-density-brush",
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/grontis/gascii"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -24,6 +26,13 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # this workload.
 [profile.release]
 overflow-checks = true
+lto = "thin"
+strip = true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

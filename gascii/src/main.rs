@@ -1,3 +1,7 @@
+// In release builds Windows would otherwise open a console window behind the app; debug builds
+// keep the console so log output stays visible.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod anim_export;
 mod app;
 mod canvas;
