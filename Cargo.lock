@@ -1239,7 +1239,7 @@ dependencies = [
 
 [[package]]
 name = "gascii"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arboard",
  "ctrlc",
@@ -1260,7 +1260,7 @@ dependencies = [
 
 [[package]]
 name = "gascii-anim"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "egui",
  "gascii-core",
@@ -1269,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "gascii-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1278,7 +1278,7 @@ dependencies = [
 
 [[package]]
 name = "gascii-density-brush"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "egui",
  "gascii-core",
@@ -1287,7 +1287,7 @@ dependencies = [
 
 [[package]]
 name = "gascii-layers"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "egui",
  "gascii-core",
@@ -1296,7 +1296,7 @@ dependencies = [
 
 [[package]]
 name = "gascii-plugin-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "egui",
  "gascii-core",
@@ -1304,7 +1304,7 @@ dependencies = [
 
 [[package]]
 name = "gascii-stylus"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "windows-sys 0.52.0",
  "winit",
