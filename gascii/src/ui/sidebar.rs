@@ -146,8 +146,12 @@ pub(crate) fn tool_grid(
             l: app.slot(Binding::L).kind == def.kind,
             r: app.slot(Binding::R).kind == def.kind,
         };
-        let resp = widgets::tool_cell(&mut child, def.icon, def.name, bound, cell)
-            .on_hover_text(format!("{} ({})  —  {}", def.name, def.key.name(), def.tip));
+        // `on_hover_ui` so the tip string is only built for the cell actually hovered —
+        // `on_hover_text`'s argument is eager, one `format!` per cell per frame.
+        let resp =
+            widgets::tool_cell(&mut child, def.icon, def.name, bound, cell).on_hover_ui(|ui| {
+                ui.label(format!("{} ({})  —  {}", def.name, def.key.name(), def.tip));
+            });
         // Click binds L, right-click binds R — the only place R is set by pointer.
         if resp.clicked() {
             rebind = Some((Binding::L, def.kind));
@@ -395,6 +399,11 @@ fn swatch_cols(avail: f32, swatch: f32) -> usize {
 /// A wrapped grid of glyph swatches, reflowing to the sidebar's current width. Returns the glyph
 /// clicked this frame, if any — the caller applies the pick, so rows can render off shared
 /// borrows of the app's own glyph lists.
+///
+/// Rows scrolled outside the clip rect keep their exact space (`allocate_space`, so scroll extent
+/// and the headers' jump-to-section geometry never depend on what's culled) but skip widget
+/// construction entirely — a `ScrollArea` clips drawing, not layout work, and the full palette is
+/// ~231 swatches of galley + interaction bookkeeping per frame otherwise.
 fn swatch_row(
     ui: &mut Ui,
     active_glyph: char,
@@ -405,14 +414,22 @@ fn swatch_row(
     let mut picked: Option<char> = None;
     let cols = swatch_cols(ui.available_width(), swatch);
     ui.spacing_mut().item_spacing = Vec2::splat(SWATCH_GAP);
-    ui.horizontal_wrapped(|ui| {
-        ui.set_max_width(swatch * cols as f32 + SWATCH_GAP * (cols - 1) as f32);
-        for &ch in glyphs {
-            if widgets::glyph_swatch(ui, ch, active_glyph == ch, swatch, glyph_px).clicked() {
-                picked = Some(ch);
-            }
+    let clip = ui.clip_rect();
+    let row_w = swatch * cols as f32 + SWATCH_GAP * (cols - 1) as f32;
+    for chunk in glyphs.chunks(cols) {
+        let row_top = ui.cursor().min.y;
+        if row_top > clip.max.y || row_top + swatch < clip.min.y {
+            ui.allocate_space(Vec2::new(row_w, swatch));
+            continue;
         }
-    });
+        ui.horizontal(|ui| {
+            for &ch in chunk {
+                if widgets::glyph_swatch(ui, ch, active_glyph == ch, swatch, glyph_px).clicked() {
+                    picked = Some(ch);
+                }
+            }
+        });
+    }
     picked
 }
 

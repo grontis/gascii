@@ -216,8 +216,17 @@ impl Tokens {
 pub fn install(ctx: &egui::Context) {
     for theme in [Theme::Light, Theme::Dark] {
         let visuals = Tokens::of(theme).visuals(theme);
-        ctx.style_mut_of(theme, |style| style.visuals = visuals);
+        ctx.style_mut_of(theme, |style| {
+            style.visuals = visuals;
+            // The design has no motion language: hover/open transitions are instant washes, so
+            // egui's default 83ms `animate_bool` fades only buy multi-frame repaint bursts.
+            style.animation_time = 0.0;
+        });
     }
+    // Everything this design draws is hard-edged and pixel-aligned (square corners, 1px inside
+    // strokes); feathering would add an anti-aliasing skirt to every rect and glyph quad —
+    // roughly doubling vertex count — for edges that are meant to land exactly on pixels.
+    ctx.tessellation_options_mut(|t| t.feathering = false);
 }
 
 /// The palette matching whatever theme egui currently resolves to.

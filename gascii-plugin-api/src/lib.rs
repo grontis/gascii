@@ -23,6 +23,7 @@
 //! has a concrete, public core type, and an opaque channel would trade one honest coupling for a
 //! runtime-typed one for no plugin this workspace ships.
 
+mod batch;
 mod descriptor;
 mod host;
 mod icon;
@@ -34,6 +35,7 @@ mod shortcut;
 mod tool;
 mod tool_ctx_patch;
 
+pub use batch::CellBatch;
 pub use descriptor::PluginDescriptor;
 pub use host::PluginHost;
 pub use icon::IconPath;

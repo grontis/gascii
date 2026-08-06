@@ -10,9 +10,9 @@
 //! canvas font. A deliberate trade-off: closing the gap would need a new `PluginHost`/`CellGrid`
 //! surface that nothing else requires yet.
 
-use egui::{Align2, Color32, Painter, Pos2, Rect, Vec2};
-use gascii_core::{Cell, Document, PendingCell, SelectionView};
-use gascii_plugin_api::{CanvasRenderer, CellGrid};
+use egui::{Color32, Painter, Pos2, Rect, Vec2};
+use gascii_core::{Document, PendingCell, SelectionView};
+use gascii_plugin_api::{CanvasRenderer, CellBatch, CellGrid};
 
 use crate::shared::SharedState;
 
@@ -107,43 +107,34 @@ impl CanvasRenderer for PlaybackRenderer {
 
 /// Paints frame `frame`'s committed cells only — no pending/hover/caret/selection overlay. Mirrors
 /// `NaiveRenderer::paint`'s own stacked ("acetate") layer walk, against an explicit frame instead
-/// of the active one, so playback shows exactly what editing that frame shows.
+/// of the active one, so playback shows exactly what editing that frame shows — including the
+/// same `CellBatch` submission, flushed per layer to keep the stacking exact.
 fn paint_frame_cells(painter: &Painter, doc: &Document, frame: usize, ctx: &PaintCtx) {
     let (x0, y0, x1, y1) = ctx.visible;
+    let mut batch = CellBatch::new(ctx.font.clone());
     for layer in gascii_core::visible_layers(doc, frame) {
         for y in y0..y1 {
             for x in x0..x1 {
                 let Some(&c) = doc.cell_at(frame, layer, x, y) else {
                     continue;
                 };
-                paint_cell(painter, &c, ctx, x, y);
+                let rect_min = ctx.vp.cell_to_screen(x, y, ctx.cell, ctx.origin);
+                if c.bg.3 > 0 {
+                    batch.bg(Rect::from_min_size(rect_min, ctx.cell), color32(c.bg));
+                }
+                if c.ch != ' ' {
+                    batch.glyph(painter, rect_min, c.ch, color32(c.fg));
+                }
             }
         }
-    }
-}
-
-/// Single-cell paint for the playback path: bg fill (when opaque at all) then glyph.
-fn paint_cell(painter: &Painter, c: &Cell, ctx: &PaintCtx, x: u16, y: u16) {
-    let rect_min = ctx.vp.cell_to_screen(x, y, ctx.cell, ctx.origin);
-    let rect = Rect::from_min_size(rect_min, ctx.cell);
-    if c.bg.3 > 0 {
-        painter.rect_filled(rect, 0.0, color32(c.bg));
-    }
-    if c.ch != ' ' {
-        painter.text(
-            rect_min,
-            Align2::LEFT_TOP,
-            c.ch,
-            ctx.font.clone(),
-            color32(c.fg),
-        );
+        batch.flush_layer(painter);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gascii_core::Document;
+    use gascii_core::{Cell, Document};
 
     struct FakeGrid;
     impl CellGrid for FakeGrid {

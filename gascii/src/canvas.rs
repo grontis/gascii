@@ -1,9 +1,9 @@
-use eframe::egui::{self, Align2, Color32, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2};
+use eframe::egui::{self, Color32, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Vec2};
 use gascii_core::{
     CellRect, DensityMode, Direction, DocExtent, Document, Edit, Fixed, PendingCell, Rgba,
     SelectionView, Tool, ToolCtx, ToolEvent, ToolResponse,
 };
-use gascii_plugin_api::{cell_rect_to_screen, CanvasRenderer, CellGrid};
+use gascii_plugin_api::{cell_rect_to_screen, CanvasRenderer, CellBatch, CellGrid};
 
 use crate::app::{tool_def, Binding, GasciiApp, ToolKind};
 use crate::fonts::canvas_font_id;
@@ -32,7 +32,8 @@ pub const DESK_MARGIN: f32 = 28.0;
 /// The marquee's dash pattern, in points.
 const MARQUEE_DASH: (f32, f32) = (4.0, 3.0);
 
-/// Default renderer: per-cell `Painter::text`/`rect_filled`, no caching.
+/// Default renderer: cell painting batched per layer through `CellBatch` — one galley layout per
+/// distinct `(glyph, color)` pair, two `Painter::extend` calls per layer.
 pub struct NaiveRenderer;
 
 impl CanvasRenderer for NaiveRenderer {
@@ -64,14 +65,21 @@ impl CanvasRenderer for NaiveRenderer {
         // through every other layer's ink.)
         let font_id = canvas_font_id(vp.font_px());
         let frame = doc.active_frame();
-        let pending_set: std::collections::HashSet<(u16, u16)> =
-            pending.iter().map(|p| (p.x, p.y)).collect();
+        // Built only while a stroke or lift is live — at idle the replacement test below is a
+        // single per-layer bool, not a per-cell hash probe.
+        let pending_set: std::collections::HashSet<(u16, u16)> = if pending.is_empty() {
+            Default::default()
+        } else {
+            pending.iter().map(|p| (p.x, p.y)).collect()
+        };
         let lifted = selection.and_then(|s| s.lifted_source);
+        let mut batch = CellBatch::new(font_id);
         for layer in gascii_core::visible_layers(doc, frame) {
             let is_active = layer == doc.active_layer();
+            let has_replacement = is_active && (!pending_set.is_empty() || lifted.is_some());
             for y in y0..y1 {
                 for x in x0..x1 {
-                    if is_active
+                    if has_replacement
                         && (pending_set.contains(&(x, y))
                             || lifted.as_ref().is_some_and(|r| r.contains(x, y)))
                     {
@@ -82,48 +90,30 @@ impl CanvasRenderer for NaiveRenderer {
                     };
                     let rect_min = vp.cell_to_screen(x, y, cell, origin);
                     if c.bg.3 > 0 {
-                        painter.rect_filled(
-                            Rect::from_min_size(rect_min, cell),
-                            0.0,
-                            color32(c.bg),
-                        );
+                        batch.bg(Rect::from_min_size(rect_min, cell), color32(c.bg));
                     }
                     if c.ch != ' ' {
-                        painter.text(
-                            rect_min,
-                            Align2::LEFT_TOP,
-                            c.ch,
-                            font_id.clone(),
-                            color32(c.fg),
-                        );
+                        batch.glyph(painter, rect_min, c.ch, color32(c.fg));
                     }
                 }
             }
-            if !is_active {
-                continue;
-            }
-            for p in pending {
-                if p.x < x0 || p.x >= x1 || p.y < y0 || p.y >= y1 {
-                    continue;
-                }
-                let rect_min = vp.cell_to_screen(p.x, p.y, cell, origin);
-                if p.cell.bg.3 > 0 {
-                    painter.rect_filled(
-                        Rect::from_min_size(rect_min, cell),
-                        0.0,
-                        color32(p.cell.bg),
-                    );
-                }
-                if p.cell.ch != ' ' {
-                    painter.text(
-                        rect_min,
-                        Align2::LEFT_TOP,
-                        p.cell.ch,
-                        font_id.clone(),
-                        color32(p.cell.fg),
-                    );
+            if is_active {
+                for p in pending {
+                    if p.x < x0 || p.x >= x1 || p.y < y0 || p.y >= y1 {
+                        continue;
+                    }
+                    let rect_min = vp.cell_to_screen(p.x, p.y, cell, origin);
+                    if p.cell.bg.3 > 0 {
+                        batch.bg(Rect::from_min_size(rect_min, cell), color32(p.cell.bg));
+                    }
+                    if p.cell.ch != ' ' {
+                        batch.glyph(painter, rect_min, p.cell.ch, color32(p.cell.fg));
+                    }
                 }
             }
+            // Flushing per layer keeps the acetate stacking exact: this layer's shapes are all
+            // submitted before the next layer's begin.
+            batch.flush_layer(painter);
         }
 
         // Cell cursor: a 1px accent outline on every cell the next application would land on.
@@ -1022,7 +1012,13 @@ fn paint_canvas(
             )
         });
     if caret.is_some() {
-        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        // Wake at the next half-second blink boundary, not a flat 500ms from an arbitrary phase:
+        // the flat delay drifts against `cursor_blink_on`'s clock (jittering the duty cycle), and
+        // every wake is a full-window repaint, so early ones are pure waste. The 5ms margin lands
+        // the wake just past the boundary rather than a timer tick short of it.
+        let t = ui.input(|i| i.time);
+        let to_boundary = ((t * 2.0).floor() + 1.0) / 2.0 - t;
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(to_boundary + 0.005));
     }
     let caret_cell = caret.map(|(x, y)| (x, y, cursor_blink_on(ui)));
 
@@ -1217,14 +1213,17 @@ fn paint_grid(
 ) {
     let color = Color32::WHITE.gamma_multiply(0.04);
     let (x0, y0, x1, y1) = visible;
+    let stroke = Stroke::new(1.0, color);
+    let mut lines: Vec<Shape> = Vec::new();
     for x in x0.max(1)..x1.min(extent.width) {
         let sx = vp.cell_to_screen(x, 0, cell, origin).x;
-        painter.vline(sx, doc_rect.y_range(), Stroke::new(1.0, color));
+        lines.push(Shape::vline(sx, doc_rect.y_range(), stroke));
     }
     for y in y0.max(1)..y1.min(extent.height) {
         let sy = vp.cell_to_screen(0, y, cell, origin).y;
-        painter.hline(doc_rect.x_range(), sy, Stroke::new(1.0, color));
+        lines.push(Shape::hline(doc_rect.x_range(), sy, stroke));
     }
+    painter.extend(lines);
 }
 
 /// Paints `kind`'s tool icon centered on `pos`: white over a 1px black hard-offset copy, legible

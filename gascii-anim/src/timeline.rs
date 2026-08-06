@@ -238,6 +238,16 @@ fn thumb_is_visible(rect_min_x: f32, thumb_w: f32, clip_min_x: f32, clip_max_x: 
     rect_min_x < clip_max_x && rect_min_x + thumb_w > clip_min_x
 }
 
+/// Whether the playing thumb needs a follow-scroll: only when it is not fully inside the visible
+/// clip range. Scrolling unconditionally would re-install the ScrollArea's centering animation
+/// every frame — with `Align::Center` a thumb that can never reach dead center (the strip fits on
+/// screen, or the playhead sits near either end) keeps a non-zero scroll delta alive forever, and
+/// each such frame requests another repaint, pinning playback at display refresh rate instead of
+/// the frame-duration clock.
+fn playhead_needs_scroll(rect_min_x: f32, thumb_w: f32, clip_min_x: f32, clip_max_x: f32) -> bool {
+    rect_min_x < clip_min_x || rect_min_x + thumb_w > clip_max_x
+}
+
 /// The frame the canvas is showing right now — the playback frame while playing (clamped, since
 /// the document can shrink under a running clock), the editing cursor otherwise. This is what the
 /// strip's selection marker and the frame counter track, so during playback they follow what's
@@ -558,22 +568,30 @@ pub(crate) fn body(
                                     Color32::WHITE,
                                 );
                             }
+                            // `bg_inverse`, not `border_strong`: inversion is the chrome's
+                            // selection signal (see `gascii::ui::theme`'s module doc), and
+                            // `border_strong` is a low-contrast gray in the dark theme.
+                            let (border, width) = if active {
+                                (t.bg_inverse, 2.0)
+                            } else {
+                                (t.border_soft, 1.0)
+                            };
+                            ui.painter().rect_stroke(
+                                draw,
+                                2.0,
+                                Stroke::new(width, border),
+                                StrokeKind::Inside,
+                            );
                         }
-                        // `bg_inverse`, not `border_strong`: inversion is the chrome's selection
-                        // signal (see `gascii::ui::theme`'s module doc), and `border_strong` is a
-                        // low-contrast gray in the dark theme.
-                        let (border, width) = if active {
-                            (t.bg_inverse, 2.0)
-                        } else {
-                            (t.border_soft, 1.0)
-                        };
-                        ui.painter().rect_stroke(
-                            draw,
-                            2.0,
-                            Stroke::new(width, border),
-                            StrokeKind::Inside,
-                        );
-                        if playing && active {
+                        if playing
+                            && active
+                            && playhead_needs_scroll(
+                                rect.min.x,
+                                thumb_size.x,
+                                clip.min.x,
+                                clip.max.x,
+                            )
+                        {
                             // Keep the playing frame in view — the strip follows the playhead.
                             ui.scroll_to_rect(draw, Some(egui::Align::Center));
                         }
@@ -1257,5 +1275,29 @@ mod tests {
         assert!(!thumb_is_visible(150.0, 48.0, 0.0, 100.0));
         // Exactly touching the right edge (open interval: touching, not overlapping, is invisible).
         assert!(!thumb_is_visible(100.0, 48.0, 0.0, 100.0));
+    }
+
+    /// A fully visible playing thumb must never ask the ScrollArea to follow it: with
+    /// `Align::Center`, an unconditional per-frame `scroll_to_rect` keeps a non-zero centering
+    /// delta alive whenever perfect centering is unreachable, and every such frame requests
+    /// another repaint — playback then runs at display refresh rate instead of the frame-duration
+    /// clock.
+    #[test]
+    fn playhead_needs_scroll_false_while_the_thumb_is_fully_inside_the_clip_range() {
+        // Fully inside, off-center — centering is unnecessary, following would spin repaints.
+        assert!(!playhead_needs_scroll(10.0, 48.0, 0.0, 100.0));
+        // Exactly flush with both edges still counts as fully visible.
+        assert!(!playhead_needs_scroll(0.0, 48.0, 0.0, 100.0));
+        assert!(!playhead_needs_scroll(52.0, 48.0, 0.0, 100.0));
+    }
+
+    #[test]
+    fn playhead_needs_scroll_true_once_any_part_of_the_thumb_leaves_the_clip_range() {
+        // Straddling the left edge.
+        assert!(playhead_needs_scroll(-1.0, 48.0, 0.0, 100.0));
+        // Straddling the right edge.
+        assert!(playhead_needs_scroll(60.0, 48.0, 0.0, 100.0));
+        // Entirely offscreen.
+        assert!(playhead_needs_scroll(200.0, 48.0, 0.0, 100.0));
     }
 }

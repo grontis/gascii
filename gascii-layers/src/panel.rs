@@ -140,6 +140,7 @@ fn rename_id() -> egui::Id {
     egui::Id::new("gascii_layers_rename_buf")
 }
 
+#[cfg(test)]
 fn renaming_row(ui: &Ui, index: usize) -> Option<RenameBuf> {
     ui.ctx()
         .data_mut(|d| d.get_temp::<RenameBuf>(rename_id()))
@@ -176,11 +177,18 @@ fn is_structural_layer_edit(edit: &Edit) -> bool {
 }
 
 /// One layer's row: visibility toggle, name (or its inline rename editor when mid-rename), and a
-/// rename button.
-fn row(ui: &mut Ui, doc: &Document, index: usize, row_h: f32, outcome: &mut PanelOutcome) {
+/// rename button. `renaming` is this row's own rename buffer, if any — read once per frame by
+/// `body` rather than per row, since the temp-storage lookup clones the buffer's `String`.
+fn row(
+    ui: &mut Ui,
+    doc: &Document,
+    index: usize,
+    row_h: f32,
+    renaming: Option<RenameBuf>,
+    outcome: &mut PanelOutcome,
+) {
     let t = theme::current(ui.ctx());
     let active = index == doc.active_layer();
-    let renaming = renaming_row(ui, index);
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -261,9 +269,22 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, row_h: f32, control_h: f32) -> P
             .auto_shrink([false, true])
             .max_height((ui.available_height() - controls_reserve).max(row_h))
             .show(ui, |ui| {
+                let clip = ui.clip_rect();
+                let rename = ui.ctx().data_mut(|d| d.get_temp::<RenameBuf>(rename_id()));
                 // Top-of-stack first: the highest layer index is drawn at the top of the list.
                 for i in (0..doc.layer_count()).rev() {
-                    row(ui, doc, i, row_h, &mut outcome);
+                    let renaming = rename.as_ref().filter(|b| b.index == i).cloned();
+                    // Rows scrolled out of view keep their exact space but skip widget
+                    // construction — except a mid-rename row, whose `TextEdit` must stay live or
+                    // its focus (and the lost-focus commit) silently drops while offscreen.
+                    let row_top = ui.cursor().min.y;
+                    if renaming.is_none() && (row_top > clip.max.y || row_top + row_h < clip.min.y)
+                    {
+                        ui.allocate_space(Vec2::new(ui.available_width(), row_h));
+                        ui.add_space(2.0);
+                        continue;
+                    }
+                    row(ui, doc, i, row_h, renaming, &mut outcome);
                     ui.add_space(2.0);
                 }
             });

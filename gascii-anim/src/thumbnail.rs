@@ -105,7 +105,19 @@ impl ThumbnailCache {
             }
         }
         let pixels = build_pixels(doc, &composited);
-        let image = egui::ColorImage::from_rgba_unmultiplied([THUMB_W, THUMB_H], &pixels);
+        let image = egui::ColorImage {
+            size: [THUMB_W, THUMB_H],
+            source_size: egui::Vec2::new(THUMB_W as f32, THUMB_H as f32),
+            pixels,
+        };
+        if let Some(cached) = &mut self.entries[frame] {
+            // Same texture object, updated in place — a fresh `load_texture` per rebuild would
+            // churn GPU texture allocation (gen/upload/delete) on every edited frame.
+            cached.texture.set(image, egui::TextureOptions::LINEAR);
+            cached.content_hash = hash;
+            cached.built_at_edit_id = top_edit_id;
+            return Some(cached.texture.clone());
+        }
         let texture = ctx.load_texture(
             format!("gascii_anim_thumb_{frame}"),
             image,
@@ -175,10 +187,12 @@ fn effective_rgb(doc: &Document, cell: &Cell) -> [f32; 3] {
 }
 
 /// Block-averages `composited` (the document's real cell dimensions) down into a fixed
-/// `THUMB_W x THUMB_H` RGBA buffer.
-fn build_pixels(doc: &Document, composited: &[Vec<Cell>]) -> Vec<u8> {
+/// `THUMB_W x THUMB_H` pixel buffer — `Color32` directly (every thumb pixel is opaque, so
+/// straight-alpha and premultiplied agree), ready to move into a `ColorImage` without a second
+/// buffer or a per-pixel conversion pass.
+fn build_pixels(doc: &Document, composited: &[Vec<Cell>]) -> Vec<egui::Color32> {
     let (src_w, src_h) = (doc.width as usize, doc.height as usize);
-    let mut out = vec![0u8; THUMB_W * THUMB_H * 4];
+    let mut out = vec![egui::Color32::BLACK; THUMB_W * THUMB_H];
     for ty in 0..THUMB_H {
         let y0 = ty * src_h / THUMB_H;
         let y1 = ((ty + 1) * src_h / THUMB_H).max(y0 + 1).min(src_h);
@@ -196,17 +210,16 @@ fn build_pixels(doc: &Document, composited: &[Vec<Cell>]) -> Vec<u8> {
                     count += 1.0;
                 }
             }
-            let idx = (ty * THUMB_W + tx) * 4;
-            if count > 0.0 {
-                out[idx] = (sum[0] / count).round() as u8;
-                out[idx + 1] = (sum[1] / count).round() as u8;
-                out[idx + 2] = (sum[2] / count).round() as u8;
+            let idx = ty * THUMB_W + tx;
+            out[idx] = if count > 0.0 {
+                egui::Color32::from_rgb(
+                    (sum[0] / count).round() as u8,
+                    (sum[1] / count).round() as u8,
+                    (sum[2] / count).round() as u8,
+                )
             } else {
-                out[idx] = doc.background.0;
-                out[idx + 1] = doc.background.1;
-                out[idx + 2] = doc.background.2;
-            }
-            out[idx + 3] = 255;
+                egui::Color32::from_rgb(doc.background.0, doc.background.1, doc.background.2)
+            };
         }
     }
     out
@@ -247,11 +260,12 @@ mod tests {
     }
 
     #[test]
-    fn get_or_build_regenerates_after_a_cell_edit_changes_the_frames_content() {
+    fn get_or_build_updates_the_texture_in_place_after_a_cell_edit_changes_the_frames_content() {
         let ctx = egui::Context::default();
         let mut doc = doc_with_cell(4, 4, 'x', Rgba(200, 0, 0, 255));
         let mut cache = ThumbnailCache::new();
         let first = cache.get_or_build(&ctx, &doc, 0, Some(1)).unwrap();
+        let hash_before = cache.entries[0].as_ref().unwrap().content_hash;
         doc.set_cell(
             0,
             1,
@@ -265,10 +279,15 @@ mod tests {
         // A real edit always advances `top_edit_id` too — this pins the ordinary "something in the
         // document actually changed" path, distinct from the edit-id-gate-specific tests below.
         let second = cache.get_or_build(&ctx, &doc, 0, Some(2)).unwrap();
-        assert_ne!(
+        assert_eq!(
             first.id(),
             second.id(),
-            "changed content must regenerate the texture"
+            "changed content updates the existing texture in place — never a fresh GPU allocation"
+        );
+        let hash_after = cache.entries[0].as_ref().unwrap().content_hash;
+        assert_ne!(
+            hash_before, hash_after,
+            "the entry must actually have been re-verified and re-uploaded"
         );
     }
 
@@ -319,7 +338,7 @@ mod tests {
         assert_eq!(second.id(), third.id());
     }
 
-    fn pixels_for(doc: &Document) -> Vec<u8> {
+    fn pixels_for(doc: &Document) -> Vec<egui::Color32> {
         let composited = gascii_core::composite_frame(doc, 0).unwrap();
         build_pixels(doc, &composited)
     }
@@ -346,7 +365,7 @@ mod tests {
         let blank = pixels_for(&Document::new(2, 2));
         assert_ne!(inked, blank, "glyph-only art must change the preview");
         assert!(
-            inked[0] > blank[0],
+            inked[0].r() > blank[0].r(),
             "white full-block ink must read brighter than the bare background"
         );
     }
@@ -360,9 +379,9 @@ mod tests {
             doc.set_cell(0, 0, 0, glyph_cell(ch));
             doc
         };
-        let full = pixels_for(&cell_doc('\u{2588}'))[0];
-        let dot = pixels_for(&cell_doc('.'))[0];
-        let empty = pixels_for(&Document::new(1, 1))[0];
+        let full = pixels_for(&cell_doc('\u{2588}'))[0].r();
+        let dot = pixels_for(&cell_doc('.'))[0].r();
+        let empty = pixels_for(&Document::new(1, 1))[0].r();
         assert!(full > dot, "█ must carry more ink than '.'");
         assert!(dot > empty, "'.' must still be visible over the background");
     }
