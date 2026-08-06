@@ -45,7 +45,12 @@ pub(crate) struct ExportSettings {
 
 impl Default for ExportSettings {
     fn default() -> Self {
-        ExportSettings { format: ExportFormat::Text, scale: 1, transparent: true, trim: true }
+        ExportSettings {
+            format: ExportFormat::Text,
+            scale: 1,
+            transparent: true,
+            trim: true,
+        }
     }
 }
 
@@ -105,7 +110,10 @@ fn run_export_dialog(
     write_err_verb: &str,
     produce: impl FnOnce() -> Result<Vec<u8>, String>,
 ) -> ExportOutcome {
-    let Some(path) = rfd::FileDialog::new().add_filter(filter_name, extensions).save_file() else {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter(filter_name, extensions)
+        .save_file()
+    else {
         return ExportOutcome::Cancelled;
     };
     let bytes = match produce() {
@@ -114,15 +122,26 @@ fn run_export_dialog(
     };
     match super::write_atomic(&path, &bytes) {
         Ok(()) => ExportOutcome::Written,
-        Err(e) => ExportOutcome::Failed(format!("failed to {write_err_verb} {}: {e}", path.display())),
+        Err(e) => ExportOutcome::Failed(format!(
+            "failed to {write_err_verb} {}: {e}",
+            path.display()
+        )),
     }
 }
 
 /// A document that dropped to one frame while the dialog was closed (or between opens) must not
 /// reopen on a multi-frame-only format that's no longer offered — snaps back to `Text` in that
 /// case, a no-op otherwise. Pure, mirroring `export_dialog_formats`'s own testability rationale.
-pub(super) fn snap_unavailable_export_format(format: ExportFormat, frame_count: usize) -> ExportFormat {
-    if frame_count == 1 && matches!(format, ExportFormat::Gif | ExportFormat::SpriteSheet | ExportFormat::TextFrames) {
+pub(super) fn snap_unavailable_export_format(
+    format: ExportFormat,
+    frame_count: usize,
+) -> ExportFormat {
+    if frame_count == 1
+        && matches!(
+            format,
+            ExportFormat::Gif | ExportFormat::SpriteSheet | ExportFormat::TextFrames
+        )
+    {
         ExportFormat::Text
     } else {
         format
@@ -135,7 +154,10 @@ pub(super) fn snap_unavailable_export_format(format: ExportFormat, frame_count: 
 /// Pulled out as a pure function, mirroring `is_own_clipboard_text`/`edit_marker_differs`, so the
 /// gating is unit-testable without driving the dialog's own `egui::Context`-backed UI.
 pub(super) fn export_dialog_formats(doc: &Document) -> Vec<(ExportFormat, &'static str)> {
-    let mut formats = vec![(ExportFormat::Text, "Text (.txt)"), (ExportFormat::Png, "PNG")];
+    let mut formats = vec![
+        (ExportFormat::Text, "Text (.txt)"),
+        (ExportFormat::Png, "PNG"),
+    ];
     if doc.frame_count() > 1 {
         formats.push((ExportFormat::Gif, "Animated GIF"));
         formats.push((ExportFormat::SpriteSheet, "PNG Spritesheet"));
@@ -162,7 +184,11 @@ fn anchor_grid(ui: &mut egui::Ui, anchor: &mut ResizeAnchor) {
                 Vec2::splat(CELL),
             );
             let selected = anchor.h == h && anchor.v == v;
-            let resp = ui.interact(cell_rect, ui.id().with(("anchor", row, col)), Sense::click());
+            let resp = ui.interact(
+                cell_rect,
+                ui.id().with(("anchor", row, col)),
+                Sense::click(),
+            );
             let (fill, fg) = if selected {
                 (t.bg_inverse, t.fg_inverse)
             } else if resp.hovered() {
@@ -171,15 +197,31 @@ fn anchor_grid(ui: &mut egui::Ui, anchor: &mut ResizeAnchor) {
                 (eframe::egui::Color32::TRANSPARENT, t.fg_text)
             };
             painter.rect_filled(cell_rect, 0.0, fill);
-            painter.rect_stroke(cell_rect, 0.0, eframe::egui::Stroke::new(1.0, t.border_soft), eframe::egui::StrokeKind::Inside);
-            painter.text(cell_rect.center(), Align2::CENTER_CENTER, glyphs[row][col], fonts::mono_id(fonts::size::CONTROL), fg);
+            painter.rect_stroke(
+                cell_rect,
+                0.0,
+                eframe::egui::Stroke::new(1.0, t.border_soft),
+                eframe::egui::StrokeKind::Inside,
+            );
+            painter.text(
+                cell_rect.center(),
+                Align2::CENTER_CENTER,
+                glyphs[row][col],
+                fonts::mono_id(fonts::size::CONTROL),
+                fg,
+            );
             if resp.clicked() {
                 anchor.h = h;
                 anchor.v = v;
             }
         }
     }
-    painter.rect_stroke(rect, 0.0, eframe::egui::Stroke::new(1.0, t.border_strong), eframe::egui::StrokeKind::Inside);
+    painter.rect_stroke(
+        rect,
+        0.0,
+        eframe::egui::Stroke::new(1.0, t.border_strong),
+        eframe::egui::StrokeKind::Inside,
+    );
 }
 
 /// One row of the `?` overlay: a fixed-width key label, then the action it fires.
@@ -187,9 +229,17 @@ fn help_overlay_row(ui: &mut egui::Ui, t: &crate::ui::theme::Tokens, key_label: 
     ui.horizontal(|ui| {
         ui.add_sized(
             egui::Vec2::new(90.0, 16.0),
-            egui::Label::new(egui::RichText::new(key_label).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_text)),
+            egui::Label::new(
+                egui::RichText::new(key_label)
+                    .font(fonts::mono_id(fonts::size::LABEL))
+                    .color(t.fg_text),
+            ),
         );
-        ui.label(egui::RichText::new(name).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary));
+        ui.label(
+            egui::RichText::new(name)
+                .font(fonts::mono_id(fonts::size::LABEL))
+                .color(t.fg_secondary),
+        );
     });
 }
 
@@ -206,40 +256,48 @@ impl GasciiApp {
         }
         let t = crate::ui::theme::current(ctx);
         let resp = dialog::modal(ctx, "help_overlay", "Keyboard Shortcuts", |ui| {
-            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new("TOOLS").font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary),
-                );
-                for def in tools() {
-                    if !self.tool_enabled(def.kind) {
-                        continue;
-                    }
-                    help_overlay_row(ui, &t, def.key.name(), def.name);
-                }
-                ui.add_space(10.0);
-                ui.label(
-                    egui::RichText::new("COMMANDS").font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary),
-                );
-                for (name, label) in chords::chord_rows() {
-                    help_overlay_row(ui, &t, label, name);
-                }
-                // A disabled plugin's shortcuts don't fire (its tick is skipped), so they don't
-                // show; with every plugin disabled the whole section disappears, header included.
-                if (0..PLUGINS.len()).any(|i| self.plugin_enabled(i)) {
-                    ui.add_space(10.0);
+            egui::ScrollArea::vertical()
+                .max_height(360.0)
+                .show(ui, |ui| {
                     ui.label(
-                        egui::RichText::new("PLUGINS").font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary),
+                        egui::RichText::new("TOOLS")
+                            .font(fonts::mono_id(fonts::size::LABEL))
+                            .color(t.fg_secondary),
                     );
-                    for (i, descriptor) in PLUGINS.iter().enumerate() {
-                        if !self.plugin_enabled(i) {
+                    for def in tools() {
+                        if !self.tool_enabled(def.kind) {
                             continue;
                         }
-                        for shortcut in (descriptor.shortcuts)() {
-                            help_overlay_row(ui, &t, shortcut.label, shortcut.name);
+                        help_overlay_row(ui, &t, def.key.name(), def.name);
+                    }
+                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new("COMMANDS")
+                            .font(fonts::mono_id(fonts::size::LABEL))
+                            .color(t.fg_secondary),
+                    );
+                    for (name, label) in chords::chord_rows() {
+                        help_overlay_row(ui, &t, label, name);
+                    }
+                    // A disabled plugin's shortcuts don't fire (its tick is skipped), so they don't
+                    // show; with every plugin disabled the whole section disappears, header included.
+                    if (0..PLUGINS.len()).any(|i| self.plugin_enabled(i)) {
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new("PLUGINS")
+                                .font(fonts::mono_id(fonts::size::LABEL))
+                                .color(t.fg_secondary),
+                        );
+                        for (i, descriptor) in PLUGINS.iter().enumerate() {
+                            if !self.plugin_enabled(i) {
+                                continue;
+                            }
+                            for shortcut in (descriptor.shortcuts)() {
+                                help_overlay_row(ui, &t, shortcut.label, shortcut.name);
+                            }
                         }
                     }
-                }
-            });
+                });
         });
         if resp.dismissed {
             self.open_dialog = None;
@@ -266,7 +324,9 @@ impl GasciiApp {
                 if ui
                     .checkbox(
                         &mut enabled,
-                        egui::RichText::new(title).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_text),
+                        egui::RichText::new(title)
+                            .font(fonts::mono_id(fonts::size::LABEL))
+                            .color(t.fg_text),
                     )
                     .changed()
                 {
@@ -315,7 +375,11 @@ impl GasciiApp {
             } else {
                 Preset::Custom
             };
-            let opts = [(Preset::Small, "80×25"), (Preset::Large, "120×40"), (Preset::Custom, "Custom")];
+            let opts = [
+                (Preset::Small, "80×25"),
+                (Preset::Large, "120×40"),
+                (Preset::Custom, "Custom"),
+            ];
             if crate::ui::widgets::segmented(ui, &mut preset, &opts, false) {
                 match preset {
                     Preset::Small => (self.new_w, self.new_h) = (80, 25),
@@ -326,10 +390,22 @@ impl GasciiApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label("Width");
-                crate::ui::widgets::stepper(ui, &mut self.new_w, 1, Document::MAX_WIDTH, crate::ui::widgets::STEPPER_H);
+                crate::ui::widgets::stepper(
+                    ui,
+                    &mut self.new_w,
+                    1,
+                    Document::MAX_WIDTH,
+                    crate::ui::widgets::STEPPER_H,
+                );
                 ui.add_space(12.0);
                 ui.label("Height");
-                crate::ui::widgets::stepper(ui, &mut self.new_h, 1, Document::MAX_HEIGHT, crate::ui::widgets::STEPPER_H);
+                crate::ui::widgets::stepper(
+                    ui,
+                    &mut self.new_h,
+                    1,
+                    Document::MAX_HEIGHT,
+                    crate::ui::widgets::STEPPER_H,
+                );
             });
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -364,18 +440,32 @@ impl GasciiApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label("Width");
-                crate::ui::widgets::stepper(ui, &mut self.resize_w, 1, Document::MAX_WIDTH, crate::ui::widgets::STEPPER_H);
+                crate::ui::widgets::stepper(
+                    ui,
+                    &mut self.resize_w,
+                    1,
+                    Document::MAX_WIDTH,
+                    crate::ui::widgets::STEPPER_H,
+                );
                 ui.add_space(12.0);
                 ui.label("Height");
-                crate::ui::widgets::stepper(ui, &mut self.resize_h, 1, Document::MAX_HEIGHT, crate::ui::widgets::STEPPER_H);
+                crate::ui::widgets::stepper(
+                    ui,
+                    &mut self.resize_h,
+                    1,
+                    Document::MAX_HEIGHT,
+                    crate::ui::widgets::STEPPER_H,
+                );
             });
             ui.add_space(8.0);
             anchor_grid(ui, &mut self.resize_anchor);
             let t = crate::ui::theme::current(ui.ctx());
             ui.label(
-                egui::RichText::new("Existing art keeps this position; new cells fill with background.")
-                    .font(fonts::mono_id(fonts::size::LABEL))
-                    .color(t.fg_secondary),
+                egui::RichText::new(
+                    "Existing art keeps this position; new cells fill with background.",
+                )
+                .font(fonts::mono_id(fonts::size::LABEL))
+                .color(t.fg_secondary),
             );
             if let Some(err) = &self.last_error {
                 ui.label(egui::RichText::new(err.text.clone()).color(t.fg_error));
@@ -399,8 +489,14 @@ impl GasciiApp {
                     Err(ResizeError::ZeroExtent) => {
                         self.flash_error("resize: width and height must be at least 1");
                     }
-                    Err(ResizeError::TooLarge { max_width, max_height, .. }) => {
-                        self.flash_error(format!("resize: exceeds the {max_width}x{max_height} maximum"));
+                    Err(ResizeError::TooLarge {
+                        max_width,
+                        max_height,
+                        ..
+                    }) => {
+                        self.flash_error(format!(
+                            "resize: exceeds the {max_width}x{max_height} maximum"
+                        ));
                     }
                     Err(ResizeError::TotalCellBudgetExceeded { .. }) => {
                         self.flash_error("resize: exceeds the maximum total cell budget");
@@ -420,17 +516,27 @@ impl GasciiApp {
     /// already current. Dropped (not just left stale) whenever the dialog is closed, so the
     /// texture's GPU memory isn't held open between uses.
     pub(super) fn refresh_export_preview(&mut self, ctx: &egui::Context) {
-        if !matches!(self.export.format, ExportFormat::Png | ExportFormat::Gif | ExportFormat::SpriteSheet) {
+        if !matches!(
+            self.export.format,
+            ExportFormat::Png | ExportFormat::Gif | ExportFormat::SpriteSheet
+        ) {
             self.export_preview = None;
             self.export_preview_key = None;
             return;
         }
-        let key = ExportPreviewKey { settings: self.export, image_gen: self.image_bg_gen };
+        let key = ExportPreviewKey {
+            settings: self.export,
+            image_gen: self.image_bg_gen,
+        };
         if self.export_preview_key == Some(key) {
             return;
         }
         let opaque_bg = (!self.export.transparent).then_some(self.doc.background);
-        let bg_image = self.image_bg.as_ref().filter(|b| b.use_in_export).map(|b| (&b.pixels, b.export_opacity));
+        let bg_image = self
+            .image_bg
+            .as_ref()
+            .filter(|b| b.use_in_export)
+            .map(|b| (&b.pixels, b.export_opacity));
         // A small, fixed preview scale — independent of the export's own cell_px, which can be up
         // to 4x the base and would make an oversized in-dialog thumbnail.
         if let Ok((w, h, pixels)) = png_export::rasterize_rgba8(&self.doc, 4, opaque_bg, bg_image) {
@@ -448,7 +554,8 @@ impl GasciiApp {
         if self.open_dialog != Some(OpenDialog::Export) {
             return;
         }
-        self.export.format = snap_unavailable_export_format(self.export.format, self.doc.frame_count());
+        self.export.format =
+            snap_unavailable_export_format(self.export.format, self.doc.frame_count());
         self.refresh_export_preview(ctx);
         let doc = &self.doc;
         let preview = self.export_preview.clone();
@@ -471,7 +578,11 @@ impl GasciiApp {
                         crate::ui::widgets::segmented(ui, &mut self.export.scale, &scales, false);
                     });
                     ui.add_space(6.0);
-                    crate::ui::widgets::checkbox(ui, &mut self.export.transparent, "Transparent background");
+                    crate::ui::widgets::checkbox(
+                        ui,
+                        &mut self.export.transparent,
+                        "Transparent background",
+                    );
                     ui.add_space(10.0);
 
                     // Background image: the same loaded ImageBackground the TRACE section uses,
@@ -489,18 +600,24 @@ impl GasciiApp {
                         if crate::ui::widgets::button(ui, "Load…", false, true).clicked() {
                             bg_action = BgAction::Load;
                         }
-                        if crate::ui::widgets::button(ui, "Clear", false, self.image_bg.is_some()).clicked() {
+                        if crate::ui::widgets::button(ui, "Clear", false, self.image_bg.is_some())
+                            .clicked()
+                        {
                             bg_action = BgAction::Clear;
                         }
                     });
                     if let Some(bg) = self.image_bg.as_mut() {
-                        let mut changed =
-                            crate::ui::widgets::checkbox(ui, &mut bg.use_in_export, "Use as background");
+                        let mut changed = crate::ui::widgets::checkbox(
+                            ui,
+                            &mut bg.use_in_export,
+                            "Use as background",
+                        );
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 8.0;
                             let slider = ui.add_sized(
                                 egui::Vec2::new(100.0, 20.0),
-                                egui::Slider::new(&mut bg.export_opacity, 0.0..=1.0).show_value(false),
+                                egui::Slider::new(&mut bg.export_opacity, 0.0..=1.0)
+                                    .show_value(false),
                             );
                             // Not `slider.changed()` alone: every bump invalidates
                             // `ExportPreviewKey`, which re-rasterizes the whole document and
@@ -508,7 +625,8 @@ impl GasciiApp {
                             // on large documents. The preview refreshes when the drag ends; a
                             // discrete click/keyboard change refreshes immediately; the % readout
                             // tracks live either way.
-                            changed |= slider.drag_stopped() || (slider.changed() && !slider.dragged());
+                            changed |=
+                                slider.drag_stopped() || (slider.changed() && !slider.dragged());
                             ui.label(
                                 egui::RichText::new(format!("{:.0}%", bg.export_opacity * 100.0))
                                     .font(fonts::mono_id(fonts::size::LABEL))
@@ -526,11 +644,18 @@ impl GasciiApp {
             }
             ui.add_space(10.0);
 
-            let (preview_rect, _) =
-                ui.allocate_exact_size(egui::Vec2::new(ui.available_width(), 120.0), egui::Sense::hover());
+            let (preview_rect, _) = ui.allocate_exact_size(
+                egui::Vec2::new(ui.available_width(), 120.0),
+                egui::Sense::hover(),
+            );
             let t = crate::ui::theme::current(ui.ctx());
             ui.painter().rect_filled(preview_rect, 0.0, t.bg_chrome);
-            ui.painter().rect_stroke(preview_rect, 0.0, egui::Stroke::new(1.0, t.border_soft), egui::StrokeKind::Inside);
+            ui.painter().rect_stroke(
+                preview_rect,
+                0.0,
+                egui::Stroke::new(1.0, t.border_soft),
+                egui::StrokeKind::Inside,
+            );
             match self.export.format {
                 // Gif/SpriteSheet reuse the same active-frame raster preview PNG builds — a
                 // deliberate simplification, not an oversight: no live GIF playback or tiled
@@ -549,7 +674,11 @@ impl GasciiApp {
                     }
                 }
                 ExportFormat::Text | ExportFormat::TextFrames => {
-                    let text = if self.export.format == ExportFormat::Text { export_text(doc) } else { export_text_frames(doc) };
+                    let text = if self.export.format == ExportFormat::Text {
+                        export_text(doc)
+                    } else {
+                        export_text_frames(doc)
+                    };
                     let preview_text: String = text.lines().take(6).collect::<Vec<_>>().join("\n");
                     ui.painter().text(
                         preview_rect.left_top() + egui::Vec2::new(6.0, 4.0),
@@ -574,10 +703,19 @@ impl GasciiApp {
                 }
                 ExportFormat::Text => format!("{}×{} chars", doc.width, doc.height),
                 ExportFormat::TextFrames => {
-                    format!("{}×{} chars × {} frames", doc.width, doc.height, doc.frame_count())
+                    format!(
+                        "{}×{} chars × {} frames",
+                        doc.width,
+                        doc.height,
+                        doc.frame_count()
+                    )
                 }
             };
-            ui.label(egui::RichText::new(readout).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary));
+            ui.label(
+                egui::RichText::new(readout)
+                    .font(fonts::mono_id(fonts::size::LABEL))
+                    .color(t.fg_secondary),
+            );
 
             if let Some(err) = &self.last_error {
                 ui.label(egui::RichText::new(err.text.clone()).color(t.fg_error));
@@ -613,7 +751,10 @@ impl GasciiApp {
     /// silent no-op (matches `open_file`); a failed read/decode is non-fatal (`last_error`, current
     /// image left unchanged), never a panic.
     pub(crate) fn load_trace_image(&mut self, ctx: &egui::Context) {
-        let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg"]).pick_file() else {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Image", &["png", "jpg", "jpeg"])
+            .pick_file()
+        else {
             return;
         };
         let bytes = match std::fs::read(&path) {
@@ -627,8 +768,13 @@ impl GasciiApp {
             Ok(rgba) => {
                 let (w, h) = (rgba.width() as usize, rgba.height() as usize);
                 let color_image = egui::ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw());
-                let texture = ctx.load_texture("trace_bg", color_image, egui::TextureOptions::LINEAR);
-                self.image_bg = Some(image_bg::ImageBackground::new(rgba, Some(texture), Some(path)));
+                let texture =
+                    ctx.load_texture("trace_bg", color_image, egui::TextureOptions::LINEAR);
+                self.image_bg = Some(image_bg::ImageBackground::new(
+                    rgba,
+                    Some(texture),
+                    Some(path),
+                ));
                 self.image_bg_gen += 1;
                 self.last_error = None;
             }
@@ -650,12 +796,20 @@ impl GasciiApp {
         // Shared raster inputs for the three image-based formats below (Png/Gif/SpriteSheet); each
         // format's own export fn rasterizes from these exactly once per call.
         let opaque_bg = (!self.export.transparent).then_some(self.doc.background);
-        let bg_image = self.image_bg.as_ref().filter(|b| b.use_in_export).map(|b| (&b.pixels, b.export_opacity));
+        let bg_image = self
+            .image_bg
+            .as_ref()
+            .filter(|b| b.use_in_export)
+            .map(|b| (&b.pixels, b.export_opacity));
         let outcome = match self.export.format {
             ExportFormat::Text => {
                 let trim = self.export.trim;
                 run_export_dialog("Text", &["txt"], "export", || {
-                    let text = if trim { export_text(&self.doc) } else { export_text_untrimmed(&self.doc) };
+                    let text = if trim {
+                        export_text(&self.doc)
+                    } else {
+                        export_text_untrimmed(&self.doc)
+                    };
                     Ok(text.into_bytes())
                 })
             }
@@ -668,13 +822,22 @@ impl GasciiApp {
                     .map_err(|e| format!("GIF export failed: {e}"))
             }),
             ExportFormat::SpriteSheet => run_export_dialog("PNG", &["png"], "write", || {
-                anim_export::export_spritesheet(&self.doc, self.export.cell_px(), opaque_bg, bg_image)
-                    .map_err(|e| format!("spritesheet export failed: {e}"))
+                anim_export::export_spritesheet(
+                    &self.doc,
+                    self.export.cell_px(),
+                    opaque_bg,
+                    bg_image,
+                )
+                .map_err(|e| format!("spritesheet export failed: {e}"))
             }),
             ExportFormat::TextFrames => {
                 let trim = self.export.trim;
                 run_export_dialog("Text", &["txt"], "export", || {
-                    let text = if trim { export_text_frames(&self.doc) } else { export_text_frames_untrimmed(&self.doc) };
+                    let text = if trim {
+                        export_text_frames(&self.doc)
+                    } else {
+                        export_text_frames_untrimmed(&self.doc)
+                    };
                     Ok(text.into_bytes())
                 })
             }

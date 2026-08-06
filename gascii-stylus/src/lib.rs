@@ -83,7 +83,10 @@ mod tests {
     #[test]
     fn barrel_press_and_plain_press_read_from_the_high_word_flags() {
         assert_eq!(
-            pointer_barrel_state(WM_POINTERDOWN, w_param(1, POINTER_MESSAGE_FLAG_SECONDBUTTON)),
+            pointer_barrel_state(
+                WM_POINTERDOWN,
+                w_param(1, POINTER_MESSAGE_FLAG_SECONDBUTTON)
+            ),
             Some(true),
             "a contact with the barrel held must read as down"
         );
@@ -98,7 +101,10 @@ mod tests {
             "WM_POINTERUP carries no button flags — the state must drop with it"
         );
         assert_eq!(
-            pointer_barrel_state(WM_POINTERUPDATE, w_param(1, POINTER_MESSAGE_FLAG_SECONDBUTTON)),
+            pointer_barrel_state(
+                WM_POINTERUPDATE,
+                w_param(1, POINTER_MESSAGE_FLAG_SECONDBUTTON)
+            ),
             Some(true),
             "mid-stroke updates keep the state current"
         );
@@ -117,7 +123,10 @@ mod tests {
     fn the_pointer_id_low_word_never_leaks_into_the_flags() {
         // A pointer id whose bits coincide with SECONDBUTTON must not read as a barrel press.
         assert_eq!(
-            pointer_barrel_state(WM_POINTERDOWN, w_param(POINTER_MESSAGE_FLAG_SECONDBUTTON as u16, 0)),
+            pointer_barrel_state(
+                WM_POINTERDOWN,
+                w_param(POINTER_MESSAGE_FLAG_SECONDBUTTON as u16, 0)
+            ),
             Some(false)
         );
     }

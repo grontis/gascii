@@ -97,7 +97,10 @@ mod tests {
             size: 1,
             shape: gascii_core::BrushShape::default(),
         };
-        assert!(matches!(tool.update(ToolEvent::Press { x: 0, y: 0 }, &ctx, &doc), ToolResponse::Idle));
+        assert!(matches!(
+            tool.update(ToolEvent::Press { x: 0, y: 0 }, &ctx, &doc),
+            ToolResponse::Idle
+        ));
         assert!(tool.pending().is_empty());
     }
 }

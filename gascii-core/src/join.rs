@@ -102,7 +102,10 @@ mod tests {
     fn exhaustive_16_arm_combinations_map_to_the_expected_box_glyph_or_none() {
         for bits in 0u8..16 {
             let arms = ArmSet(bits);
-            let expected = BOX_GLYPHS.iter().find(|&&(_, a)| a == arms).map(|&(ch, _)| ch);
+            let expected = BOX_GLYPHS
+                .iter()
+                .find(|&&(_, a)| a == arms)
+                .map(|&(ch, _)| ch);
             assert_eq!(char_of(arms), expected, "mismatch for bits={bits:04b}");
         }
     }
@@ -110,7 +113,11 @@ mod tests {
     #[test]
     fn arms_of_returns_none_for_non_box_characters() {
         for ch in ['x', ' ', '#', '░', '@'] {
-            assert_eq!(arms_of(ch), None, "{ch:?} must not be treated as a box glyph");
+            assert_eq!(
+                arms_of(ch),
+                None,
+                "{ch:?} must not be treated as a box glyph"
+            );
         }
     }
 
@@ -145,7 +152,10 @@ mod tests {
     #[test]
     fn join_over_a_non_box_glyph_overwrites_it_using_only_the_incoming_arms() {
         let ch = join('x', ArmSet::E.union(ArmSet::W), '#');
-        assert_eq!(ch, '─', "a non-box existing glyph contributes no arms of its own");
+        assert_eq!(
+            ch, '─',
+            "a non-box existing glyph contributes no arms of its own"
+        );
     }
 
     #[test]

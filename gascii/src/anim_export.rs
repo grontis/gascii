@@ -7,11 +7,16 @@
 
 use std::time::Duration;
 
-use gascii_core::{validate_gif_dimensions, validate_png_dimensions, validate_spritesheet_dimensions, Document, Rgba};
+use gascii_core::{
+    validate_gif_dimensions, validate_png_dimensions, validate_spritesheet_dimensions, Document,
+    Rgba,
+};
 use image::codecs::gif::{GifEncoder, Repeat};
 use image::{Delay, Frame};
 
-use crate::png_export::{build_raster_assets, rasterize_frame_rgba8_with_assets, PngExportAppError};
+use crate::png_export::{
+    build_raster_assets, rasterize_frame_rgba8_with_assets, PngExportAppError,
+};
 
 /// Rounds a millisecond duration to the nearest 10ms, floored at 10ms (never 0) — matches GIF's
 /// own on-disk delay unit (centiseconds) and the timeline UI's existing 10ms step floor
@@ -36,22 +41,28 @@ pub fn export_gif(
     opaque_bg: Option<Rgba>,
     bg_image: Option<(&image::RgbaImage, f32)>,
 ) -> Result<Vec<u8>, PngExportAppError> {
-    let (px_w, px_h) =
-        validate_gif_dimensions(doc.width, doc.height, cell_px, doc.frame_count()).map_err(PngExportAppError::Dimensions)?;
+    let (px_w, px_h) = validate_gif_dimensions(doc.width, doc.height, cell_px, doc.frame_count())
+        .map_err(PngExportAppError::Dimensions)?;
     // Built once for the whole export, not per frame — see `RasterAssets`'s own doc comment.
     let assets = build_raster_assets(doc, cell_px, bg_image)?;
     let mut bytes = Vec::new();
     {
         let mut encoder = GifEncoder::new(&mut bytes);
         if doc.loop_playback {
-            encoder.set_repeat(Repeat::Infinite).map_err(|e| PngExportAppError::Encode(e.to_string()))?;
+            encoder
+                .set_repeat(Repeat::Infinite)
+                .map_err(|e| PngExportAppError::Encode(e.to_string()))?;
         }
         for i in 0..doc.frame_count() {
-            let (_, _, pixels) = rasterize_frame_rgba8_with_assets(doc, i, cell_px, opaque_bg, &assets)?;
+            let (_, _, pixels) =
+                rasterize_frame_rgba8_with_assets(doc, i, cell_px, opaque_bg, &assets)?;
             let img = image::RgbaImage::from_raw(px_w, px_h, pixels)
                 .expect("rasterize_frame_rgba8 returns a buffer sized exactly px_w * px_h * 4");
-            let dur_ms = doc.resolved_frame_duration_ms(i).expect("i is always in 0..doc.frame_count()");
-            let delay = Delay::from_saturating_duration(Duration::from_millis(round_delay_ms(dur_ms)));
+            let dur_ms = doc
+                .resolved_frame_duration_ms(i)
+                .expect("i is always in 0..doc.frame_count()");
+            let delay =
+                Delay::from_saturating_duration(Duration::from_millis(round_delay_ms(dur_ms)));
             encoder
                 .encode_frame(Frame::from_parts(img, 0, 0, delay))
                 .map_err(|e| PngExportAppError::Encode(e.to_string()))?;
@@ -72,19 +83,26 @@ pub fn export_spritesheet(
     let n = doc.frame_count();
     let cols = (n as f64).sqrt().ceil().max(1.0) as u32;
     let rows = (n as u32).div_ceil(cols);
-    let (frame_px_w, frame_px_h) =
-        validate_png_dimensions(doc.width, doc.height, cell_px).map_err(PngExportAppError::Dimensions)?;
-    let (sheet_w, sheet_h) =
-        validate_spritesheet_dimensions(frame_px_w, frame_px_h, cols, rows).map_err(PngExportAppError::Dimensions)?;
+    let (frame_px_w, frame_px_h) = validate_png_dimensions(doc.width, doc.height, cell_px)
+        .map_err(PngExportAppError::Dimensions)?;
+    let (sheet_w, sheet_h) = validate_spritesheet_dimensions(frame_px_w, frame_px_h, cols, rows)
+        .map_err(PngExportAppError::Dimensions)?;
     // Built once for the whole export, not per frame — see `RasterAssets`'s own doc comment.
     let assets = build_raster_assets(doc, cell_px, bg_image)?;
     let mut sheet = image::RgbaImage::new(sheet_w, sheet_h);
     for i in 0..n {
-        let (_, _, pixels) = rasterize_frame_rgba8_with_assets(doc, i, cell_px, opaque_bg, &assets)?;
-        let tile = image::RgbaImage::from_raw(frame_px_w, frame_px_h, pixels)
-            .expect("rasterize_frame_rgba8 returns a buffer sized exactly frame_px_w * frame_px_h * 4");
+        let (_, _, pixels) =
+            rasterize_frame_rgba8_with_assets(doc, i, cell_px, opaque_bg, &assets)?;
+        let tile = image::RgbaImage::from_raw(frame_px_w, frame_px_h, pixels).expect(
+            "rasterize_frame_rgba8 returns a buffer sized exactly frame_px_w * frame_px_h * 4",
+        );
         let (col, row) = (i as u32 % cols, i as u32 / cols);
-        image::imageops::overlay(&mut sheet, &tile, (col * frame_px_w) as i64, (row * frame_px_h) as i64);
+        image::imageops::overlay(
+            &mut sheet,
+            &tile,
+            (col * frame_px_w) as i64,
+            (row * frame_px_h) as i64,
+        );
     }
     let mut out = Vec::new();
     sheet
@@ -113,7 +131,16 @@ mod tests {
             doc.set_active_frame(i);
             for y in 0..2u16 {
                 for x in 0..2u16 {
-                    doc.set_cell(0, x, y, Cell { ch: '#', fg: color, bg: color });
+                    doc.set_cell(
+                        0,
+                        x,
+                        y,
+                        Cell {
+                            ch: '#',
+                            fg: color,
+                            bg: color,
+                        },
+                    );
                 }
             }
         }
@@ -133,7 +160,10 @@ mod tests {
         }
         assert_eq!(doc.frame_count(), 196);
         let err = export_gif(&doc, 16, None, None).unwrap_err();
-        assert!(matches!(err, PngExportAppError::Dimensions(gascii_core::PngExportError::TooManyFrames { .. })));
+        assert!(matches!(
+            err,
+            PngExportAppError::Dimensions(gascii_core::PngExportError::TooManyFrames { .. })
+        ));
     }
 
     /// A small 3-frame, 3-distinct-color document round-trips through `image`'s own GIF decoder:
@@ -141,7 +171,11 @@ mod tests {
     /// reasonably close to its source frame's color (GIF quantizes — not asserted byte-exact).
     #[test]
     fn a_small_multi_color_document_round_trips_through_the_real_gif_decoder() {
-        let colors = [Rgba(255, 0, 0, 255), Rgba(0, 255, 0, 255), Rgba(0, 0, 255, 255)];
+        let colors = [
+            Rgba(255, 0, 0, 255),
+            Rgba(0, 255, 0, 255),
+            Rgba(0, 0, 255, 255),
+        ];
         let doc = doc_with_colored_frames(&colors);
         let bytes = export_gif(&doc, 8, None, None).unwrap();
 
@@ -152,7 +186,9 @@ mod tests {
         for (frame, &color) in frames.iter().zip(colors.iter()) {
             let close = |a: u8, b: u8| (a as i16 - b as i16).abs() <= 16;
             assert!(
-                frame.buffer().pixels().any(|p| close(p.0[0], color.0) && close(p.0[1], color.1) && close(p.0[2], color.2)),
+                frame.buffer().pixels().any(|p| close(p.0[0], color.0)
+                    && close(p.0[1], color.1)
+                    && close(p.0[2], color.2)),
                 "decoded frame must contain a pixel close to its source color {color:?}"
             );
         }
@@ -195,14 +231,20 @@ mod tests {
         let mut history = History::new();
         let edit = add_frame(&doc, 1, DocFrame::blank(2, 2)).unwrap();
         history.apply(&mut doc, edit);
-        let edit = gascii_core::set_frame_duration(&doc, 1, Some(37)).unwrap().unwrap();
+        let edit = gascii_core::set_frame_duration(&doc, 1, Some(37))
+            .unwrap()
+            .unwrap();
         history.apply(&mut doc, edit);
 
         let bytes = export_gif(&doc, 4, None, None).unwrap();
         let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).unwrap();
         let frames = decoder.into_frames().collect_frames().unwrap();
         let (numer, denom) = frames[1].delay().numer_denom_ms();
-        assert_eq!(numer / denom, 40, "37ms must round to the nearest 10ms (40)");
+        assert_eq!(
+            numer / denom,
+            40,
+            "37ms must round to the nearest 10ms (40)"
+        );
     }
 
     #[test]
@@ -218,7 +260,16 @@ mod tests {
     #[test]
     fn a_single_frame_documents_spritesheet_is_a_1x1_grid() {
         let mut doc = Document::new(2, 2);
-        doc.set_cell(0, 0, 0, Cell { ch: '#', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: '#',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         let bytes = export_spritesheet(&doc, 8, None, None).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
         assert_eq!((decoded.width(), decoded.height()), (16, 16));
@@ -229,13 +280,18 @@ mod tests {
     /// color, proving the actual blit math rather than just "some PNG came out."
     #[test]
     fn a_known_pixel_inside_frame_1s_tile_matches_that_frames_color() {
-        let colors = [Rgba(255, 0, 0, 255), Rgba(0, 255, 0, 255), Rgba(0, 0, 255, 255)];
+        let colors = [
+            Rgba(255, 0, 0, 255),
+            Rgba(0, 255, 0, 255),
+            Rgba(0, 0, 255, 255),
+        ];
         let doc = doc_with_colored_frames(&colors);
         let bytes = export_spritesheet(&doc, 8, None, None).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
 
         let (frame_px_w, frame_px_h) = validate_png_dimensions(doc.width, doc.height, 8).unwrap();
-        let (sheet_w, sheet_h) = validate_spritesheet_dimensions(frame_px_w, frame_px_h, 2, 2).unwrap();
+        let (sheet_w, sheet_h) =
+            validate_spritesheet_dimensions(frame_px_w, frame_px_h, 2, 2).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (sheet_w, sheet_h));
 
         // Frame 1 lands at grid (col=1, row=0): pixel deep inside that tile.
@@ -258,9 +314,13 @@ mod tests {
             let edit = add_frame(&doc, doc.frame_count(), DocFrame::blank(2, 2)).unwrap();
             history.apply(&mut doc, edit);
         }
-        let edit = gascii_core::set_frame_duration(&doc, 0, Some(0)).unwrap().unwrap();
+        let edit = gascii_core::set_frame_duration(&doc, 0, Some(0))
+            .unwrap()
+            .unwrap();
         history.apply(&mut doc, edit);
-        let edit = gascii_core::set_frame_duration(&doc, 2, Some(9999)).unwrap().unwrap();
+        let edit = gascii_core::set_frame_duration(&doc, 2, Some(9999))
+            .unwrap()
+            .unwrap();
         history.apply(&mut doc, edit);
 
         let bytes = export_gif(&doc, 4, None, None).unwrap();
@@ -271,8 +331,16 @@ mod tests {
             let (numer, denom) = f.delay().numer_denom_ms();
             numer / denom
         };
-        assert_eq!(ms(&frames[0]), 10, "0ms floors up to the 10ms minimum, never encodes as 0");
-        assert_eq!(ms(&frames[2]), 10000, "9999ms rounds to the nearest 10ms (10000)");
+        assert_eq!(
+            ms(&frames[0]),
+            10,
+            "0ms floors up to the 10ms minimum, never encodes as 0"
+        );
+        assert_eq!(
+            ms(&frames[2]),
+            10000,
+            "9999ms rounds to the nearest 10ms (10000)"
+        );
     }
 
     /// Documents the known `image`-crate-level limitation `export_gif`'s own doc comment describes:
@@ -289,13 +357,15 @@ mod tests {
         let mut looping = Document::new(2, 2);
         looping.loop_playback = true;
         let looping_bytes = export_gif(&looping, 4, None, None).unwrap();
-        let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(looping_bytes)).unwrap();
+        let decoder =
+            image::codecs::gif::GifDecoder::new(std::io::Cursor::new(looping_bytes)).unwrap();
         assert!(matches!(decoder.loop_count(), LoopCount::Infinite));
 
         let mut once = Document::new(2, 2);
         once.loop_playback = false;
         let once_bytes = export_gif(&once, 4, None, None).unwrap();
-        let decoder = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(once_bytes)).unwrap();
+        let decoder =
+            image::codecs::gif::GifDecoder::new(std::io::Cursor::new(once_bytes)).unwrap();
         assert!(matches!(decoder.loop_count(), LoopCount::Infinite));
     }
 
@@ -319,10 +389,28 @@ mod tests {
         // Frame 0: the shape sits at (0, 0), opaque. Everywhere else (including frame 1's (0, 0))
         // stays `Cell::BLANK` — fully transparent.
         doc.set_active_frame(0);
-        doc.set_cell(0, 0, 0, Cell { ch: '#', fg: opaque, bg: opaque });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: '#',
+                fg: opaque,
+                bg: opaque,
+            },
+        );
         // Frame 1: the shape moved to (1, 1); (0, 0) is untouched, still blank/transparent.
         doc.set_active_frame(1);
-        doc.set_cell(0, 1, 1, Cell { ch: '#', fg: opaque, bg: opaque });
+        doc.set_cell(
+            0,
+            1,
+            1,
+            Cell {
+                ch: '#',
+                fg: opaque,
+                bg: opaque,
+            },
+        );
         doc.set_active_frame(0);
 
         let bytes = export_gif(&doc, 4, None, None).unwrap();
@@ -342,12 +430,18 @@ mod tests {
         // trivially-passing test (e.g. everything decoding transparent) would not catch a real bug.
         // Cell (1, 1)'s pixel block is (4,4)-(7,7).
         let frame1_at_new_position = frames[1].buffer().get_pixel(5, 5);
-        assert!(frame1_at_new_position.0[3] > 0, "sanity: the shape's new position must actually be opaque");
+        assert!(
+            frame1_at_new_position.0[3] > 0,
+            "sanity: the shape's new position must actually be opaque"
+        );
 
         // And frame 0's own shape must still be present at (0, 0) -- confirms the source content
         // itself round-tripped, not just that transparency happens to be the default everywhere.
         let frame0_at_position = frames[0].buffer().get_pixel(1, 1);
-        assert!(frame0_at_position.0[3] > 0, "sanity: frame 0's own shape must be opaque at (0, 0)");
+        assert!(
+            frame0_at_position.0[3] > 0,
+            "sanity: frame 0's own shape must be opaque at (0, 0)"
+        );
     }
 
     /// GIF's palette is capped at 256 colors per frame; a document using more than that many
@@ -356,22 +450,44 @@ mod tests {
     /// that intact (dimensions, frame count), not byte-exact color fidelity (an accepted,
     /// documented GIF limitation, not a GASCII bug -- see the architect plan's D-gif note).
     #[test]
-    fn a_document_with_more_than_256_distinct_colors_in_one_frame_exports_a_valid_gif_without_crashing() {
+    fn a_document_with_more_than_256_distinct_colors_in_one_frame_exports_a_valid_gif_without_crashing(
+    ) {
         let (w, h) = (17u16, 16u16);
         let n = w as usize * h as usize; // 272 cells, each given its own color below.
-        // `r` alone distinguishes every index within a 256-wide band; `g` distinguishes which band
-        // (`i / 256`) an index falls in -- together the `(r, g)` pair is unique for every `i` in
-        // `0..272`, so all 272 colors are guaranteed distinct (a naive `i % 256`-only scheme would
-        // alias indices 256 places apart onto the same color, silently falling short of >256).
-        let colors: Vec<Rgba> =
-            (0..n).map(|i| Rgba((i % 256) as u8, (i / 256) as u8 * 200, ((i * 13) % 256) as u8, 255)).collect();
-        let distinct: std::collections::HashSet<_> = colors.iter().map(|c| (c.0, c.1, c.2)).collect();
-        assert!(distinct.len() > 256, "sanity: the test fixture itself must exceed GIF's 256-color palette");
+                                         // `r` alone distinguishes every index within a 256-wide band; `g` distinguishes which band
+                                         // (`i / 256`) an index falls in -- together the `(r, g)` pair is unique for every `i` in
+                                         // `0..272`, so all 272 colors are guaranteed distinct (a naive `i % 256`-only scheme would
+                                         // alias indices 256 places apart onto the same color, silently falling short of >256).
+        let colors: Vec<Rgba> = (0..n)
+            .map(|i| {
+                Rgba(
+                    (i % 256) as u8,
+                    (i / 256) as u8 * 200,
+                    ((i * 13) % 256) as u8,
+                    255,
+                )
+            })
+            .collect();
+        let distinct: std::collections::HashSet<_> =
+            colors.iter().map(|c| (c.0, c.1, c.2)).collect();
+        assert!(
+            distinct.len() > 256,
+            "sanity: the test fixture itself must exceed GIF's 256-color palette"
+        );
 
         let mut doc = Document::new(w, h);
         for (i, &color) in colors.iter().enumerate() {
             let (x, y) = ((i % w as usize) as u16, (i / w as usize) as u16);
-            doc.set_cell(0, x, y, Cell { ch: '#', fg: color, bg: color });
+            doc.set_cell(
+                0,
+                x,
+                y,
+                Cell {
+                    ch: '#',
+                    fg: color,
+                    bg: color,
+                },
+            );
         }
 
         let bytes = export_gif(&doc, 2, None, None).unwrap();
@@ -379,7 +495,10 @@ mod tests {
         let frames = decoder.into_frames().collect_frames().unwrap();
         assert_eq!(frames.len(), 1);
         let (expected_w, expected_h) = validate_png_dimensions(w, h, 2).unwrap();
-        assert_eq!((frames[0].buffer().width(), frames[0].buffer().height()), (expected_w, expected_h));
+        assert_eq!(
+            (frames[0].buffer().width(), frames[0].buffer().height()),
+            (expected_w, expected_h)
+        );
     }
 
     /// Spritesheet grid math (`cols = ceil(sqrt(n))`, `rows = n.div_ceil(cols)`) for every frame
@@ -388,17 +507,35 @@ mod tests {
     /// the blit math for the remainder case (5 frames: a 3x2 grid with one empty tile) too.
     #[test]
     fn spritesheet_grid_layout_is_correct_for_2_3_4_and_5_frame_documents() {
-        const POOL: [Rgba; 5] =
-            [Rgba(255, 0, 0, 255), Rgba(0, 255, 0, 255), Rgba(0, 0, 255, 255), Rgba(255, 255, 0, 255), Rgba(0, 255, 255, 255)];
-        for (n, expected_cols, expected_rows) in [(2usize, 2u32, 1u32), (3, 2, 2), (4, 2, 2), (5, 3, 2)] {
+        const POOL: [Rgba; 5] = [
+            Rgba(255, 0, 0, 255),
+            Rgba(0, 255, 0, 255),
+            Rgba(0, 0, 255, 255),
+            Rgba(255, 255, 0, 255),
+            Rgba(0, 255, 255, 255),
+        ];
+        for (n, expected_cols, expected_rows) in
+            [(2usize, 2u32, 1u32), (3, 2, 2), (4, 2, 2), (5, 3, 2)]
+        {
             let colors = &POOL[..n];
             let doc = doc_with_colored_frames(colors);
             let bytes = export_spritesheet(&doc, 6, None, None).unwrap();
             let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
 
-            let (frame_px_w, frame_px_h) = validate_png_dimensions(doc.width, doc.height, 6).unwrap();
-            let (sheet_w, sheet_h) = validate_spritesheet_dimensions(frame_px_w, frame_px_h, expected_cols, expected_rows).unwrap();
-            assert_eq!((decoded.width(), decoded.height()), (sheet_w, sheet_h), "{n}-frame grid dimensions");
+            let (frame_px_w, frame_px_h) =
+                validate_png_dimensions(doc.width, doc.height, 6).unwrap();
+            let (sheet_w, sheet_h) = validate_spritesheet_dimensions(
+                frame_px_w,
+                frame_px_h,
+                expected_cols,
+                expected_rows,
+            )
+            .unwrap();
+            assert_eq!(
+                (decoded.width(), decoded.height()),
+                (sheet_w, sheet_h),
+                "{n}-frame grid dimensions"
+            );
 
             for (i, &color) in colors.iter().enumerate() {
                 let (col, row) = (i as u32 % expected_cols, i as u32 / expected_cols);

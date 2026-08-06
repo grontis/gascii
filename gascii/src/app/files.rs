@@ -24,11 +24,19 @@ pub(super) enum CtrlCResponse {
 /// Pure escalation rule for `handle_ctrl_c`: `count` is the process-lifetime press total, `seen`
 /// how many have already been acted on, `close_confirm_up` whether the close veto dialog is
 /// currently showing.
-pub(super) fn ctrl_c_response(count: u32, seen: u32, close_confirm_up: bool) -> Option<CtrlCResponse> {
+pub(super) fn ctrl_c_response(
+    count: u32,
+    seen: u32,
+    close_confirm_up: bool,
+) -> Option<CtrlCResponse> {
     if count == seen {
         return None;
     }
-    Some(if close_confirm_up { CtrlCResponse::ForceClose } else { CtrlCResponse::RequestClose })
+    Some(if close_confirm_up {
+        CtrlCResponse::ForceClose
+    } else {
+        CtrlCResponse::RequestClose
+    })
 }
 
 /// Writes `contents` to `path` via write-to-a-sibling-temp-file-then-rename, rather than a direct
@@ -39,10 +47,13 @@ pub(super) fn ctrl_c_response(count: u32, seen: u32, close_confirm_up: bool) -> 
 /// in-between. The temp file lives next to `path` (same directory) so the final rename is a
 /// same-filesystem move, not a copy.
 pub(super) fn write_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
-    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name"))?;
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
+    })?;
     let mut tmp_name = file_name.to_os_string();
     tmp_name.push(".tmp");
     let tmp_path = dir.join(tmp_name);
@@ -61,7 +72,10 @@ impl GasciiApp {
 
     /// Reads and parses a `.gascii` file picked via a native dialog.
     pub(crate) fn open_file(&mut self) {
-        let Some(path) = rfd::FileDialog::new().add_filter("GASCII", &["gascii"]).pick_file() else {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("GASCII", &["gascii"])
+            .pick_file()
+        else {
             return;
         };
         self.open_path(&path);
@@ -121,7 +135,10 @@ impl GasciiApp {
         // Flush first — see `save_file`'s comment. Also reachable directly via the "Save As"
         // toolbar button, not only through `save_file`'s delegation.
         self.flush_all();
-        let Some(path) = rfd::FileDialog::new().add_filter("GASCII", &["gascii"]).save_file() else {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("GASCII", &["gascii"])
+            .save_file()
+        else {
             return;
         };
         self.write_gascii(&path);
@@ -148,7 +165,9 @@ impl GasciiApp {
     pub(super) fn handle_ctrl_c(&mut self, ctx: &egui::Context) {
         let count = CTRL_C_PRESSES.load(Ordering::Relaxed);
         let confirming = self.confirm == Some(PendingConfirm::CloseApp);
-        let Some(resp) = ctrl_c_response(count, self.ctrl_c_seen, confirming) else { return };
+        let Some(resp) = ctrl_c_response(count, self.ctrl_c_seen, confirming) else {
+            return;
+        };
         self.ctrl_c_seen = count;
         match resp {
             CtrlCResponse::RequestClose => ctx.send_viewport_cmd(egui::ViewportCommand::Close),

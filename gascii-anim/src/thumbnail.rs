@@ -51,7 +51,9 @@ pub(crate) struct ThumbnailCache {
 
 impl ThumbnailCache {
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// The number of frame indices this cache has actually built a texture for — exists as a
@@ -68,7 +70,13 @@ impl ThumbnailCache {
     /// this cache has no viewport awareness of its own. `top_edit_id` is `PluginHost::
     /// top_edit_id()`'s value for the current repaint — see the module doc for the two-gate
     /// strategy this drives.
-    pub fn get_or_build(&mut self, ctx: &egui::Context, doc: &Document, frame: usize, top_edit_id: Option<u64>) -> Option<egui::TextureHandle> {
+    pub fn get_or_build(
+        &mut self,
+        ctx: &egui::Context,
+        doc: &Document,
+        frame: usize,
+        top_edit_id: Option<u64>,
+    ) -> Option<egui::TextureHandle> {
         if frame >= doc.frame_count() {
             return None;
         }
@@ -98,9 +106,17 @@ impl ThumbnailCache {
         }
         let pixels = build_pixels(doc, &composited);
         let image = egui::ColorImage::from_rgba_unmultiplied([THUMB_W, THUMB_H], &pixels);
-        let texture = ctx.load_texture(format!("gascii_anim_thumb_{frame}"), image, egui::TextureOptions::LINEAR);
+        let texture = ctx.load_texture(
+            format!("gascii_anim_thumb_{frame}"),
+            image,
+            egui::TextureOptions::LINEAR,
+        );
         let handle = texture.clone();
-        self.entries[frame] = Some(CachedThumb { content_hash: hash, texture, built_at_edit_id: top_edit_id });
+        self.entries[frame] = Some(CachedThumb {
+            content_hash: hash,
+            texture,
+            built_at_edit_id: top_edit_id,
+        });
         Some(handle)
     }
 }
@@ -130,11 +146,11 @@ fn content_hash(rows: &[Vec<Cell>]) -> u64 {
 fn glyph_coverage(ch: char) -> f32 {
     match ch {
         ' ' => 0.0,
-        '\u{2588}' => 1.0,                                            // █
-        '\u{2593}' => 0.75,                                           // ▓
-        '\u{2592}' => 0.5,                                            // ▒
-        '\u{2591}' => 0.25,                                           // ░
-        '.' | ',' | '\'' | '`' | ':' | ';' | '\u{00B7}' => 0.15,      // sparse punctuation
+        '\u{2588}' => 1.0,                                       // █
+        '\u{2593}' => 0.75,                                      // ▓
+        '\u{2592}' => 0.5,                                       // ▒
+        '\u{2591}' => 0.25,                                      // ░
+        '.' | ',' | '\'' | '`' | ':' | ';' | '\u{00B7}' => 0.15, // sparse punctuation
         _ => 0.45,
     }
 }
@@ -203,7 +219,16 @@ mod tests {
 
     fn doc_with_cell(w: u16, h: u16, ch: char, bg: Rgba) -> Document {
         let mut doc = Document::new(w, h);
-        doc.set_cell(0, 0, 0, Cell { ch, fg: Rgba::WHITE, bg });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch,
+                fg: Rgba::WHITE,
+                bg,
+            },
+        );
         doc
     }
 
@@ -214,7 +239,11 @@ mod tests {
         let mut cache = ThumbnailCache::new();
         let first = cache.get_or_build(&ctx, &doc, 0, Some(1)).unwrap();
         let second = cache.get_or_build(&ctx, &doc, 0, Some(1)).unwrap();
-        assert_eq!(first.id(), second.id(), "unchanged content must reuse the same texture");
+        assert_eq!(
+            first.id(),
+            second.id(),
+            "unchanged content must reuse the same texture"
+        );
     }
 
     #[test]
@@ -223,11 +252,24 @@ mod tests {
         let mut doc = doc_with_cell(4, 4, 'x', Rgba(200, 0, 0, 255));
         let mut cache = ThumbnailCache::new();
         let first = cache.get_or_build(&ctx, &doc, 0, Some(1)).unwrap();
-        doc.set_cell(0, 1, 1, Cell { ch: 'y', fg: Rgba::WHITE, bg: Rgba(0, 200, 0, 255) });
+        doc.set_cell(
+            0,
+            1,
+            1,
+            Cell {
+                ch: 'y',
+                fg: Rgba::WHITE,
+                bg: Rgba(0, 200, 0, 255),
+            },
+        );
         // A real edit always advances `top_edit_id` too — this pins the ordinary "something in the
         // document actually changed" path, distinct from the edit-id-gate-specific tests below.
         let second = cache.get_or_build(&ctx, &doc, 0, Some(2)).unwrap();
-        assert_ne!(first.id(), second.id(), "changed content must regenerate the texture");
+        assert_ne!(
+            first.id(),
+            second.id(),
+            "changed content must regenerate the texture"
+        );
     }
 
     /// The edit-id fast path, proven behaviorally rather than via an instrumentation hook: with
@@ -242,7 +284,16 @@ mod tests {
         let mut doc = doc_with_cell(4, 4, 'x', Rgba(200, 0, 0, 255));
         let mut cache = ThumbnailCache::new();
         let first = cache.get_or_build(&ctx, &doc, 0, Some(1)).unwrap();
-        doc.set_cell(0, 1, 1, Cell { ch: 'y', fg: Rgba::WHITE, bg: Rgba(0, 200, 0, 255) });
+        doc.set_cell(
+            0,
+            1,
+            1,
+            Cell {
+                ch: 'y',
+                fg: Rgba::WHITE,
+                bg: Rgba(0, 200, 0, 255),
+            },
+        );
         let second = cache.get_or_build(&ctx, &doc, 0, Some(1)).unwrap();
         assert_eq!(first.id(), second.id(), "an unchanged top_edit_id must skip re-composite/re-hash entirely, even if doc content moved underneath it");
     }
@@ -257,7 +308,11 @@ mod tests {
         let mut cache = ThumbnailCache::new();
         let first = cache.get_or_build(&ctx, &doc, 0, Some(1)).unwrap();
         let second = cache.get_or_build(&ctx, &doc, 0, Some(2)).unwrap();
-        assert_eq!(first.id(), second.id(), "an edit id change with identical content must not re-upload the texture");
+        assert_eq!(
+            first.id(),
+            second.id(),
+            "an edit id change with identical content must not re-upload the texture"
+        );
 
         // The fast path must now be armed against the new id, not the original one.
         let third = cache.get_or_build(&ctx, &doc, 0, Some(2)).unwrap();
@@ -270,7 +325,11 @@ mod tests {
     }
 
     fn glyph_cell(ch: char) -> Cell {
-        Cell { ch, fg: Rgba::WHITE, bg: Rgba::TRANSPARENT }
+        Cell {
+            ch,
+            fg: Rgba::WHITE,
+            bg: Rgba::TRANSPARENT,
+        }
     }
 
     /// The whole point of the ink-coverage blend: glyph-only art (fg ink, no painted backgrounds)
@@ -286,7 +345,10 @@ mod tests {
         let inked = pixels_for(&doc);
         let blank = pixels_for(&Document::new(2, 2));
         assert_ne!(inked, blank, "glyph-only art must change the preview");
-        assert!(inked[0] > blank[0], "white full-block ink must read brighter than the bare background");
+        assert!(
+            inked[0] > blank[0],
+            "white full-block ink must read brighter than the bare background"
+        );
     }
 
     /// The block-shade run's real densities order the tint strength — a `█` cell reads brighter
@@ -352,6 +414,10 @@ mod tests {
         // remaining index, must truncate the stale entries above it.
         let shrunk = doc_with_frames(1);
         let _ = cache.get_or_build(&ctx, &shrunk, 0, Some(2));
-        assert_eq!(cache.entries.len(), 1, "entries past the document's current frame count must be evicted");
+        assert_eq!(
+            cache.entries.len(),
+            1,
+            "entries past the document's current frame count must be evicted"
+        );
     }
 }

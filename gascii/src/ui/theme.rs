@@ -150,7 +150,12 @@ impl Tokens {
         v.window_corner_radius = CornerRadius::ZERO;
         v.menu_corner_radius = CornerRadius::ZERO;
 
-        let shadow = Shadow { offset: SHADOW_OFFSET, blur: 0, spread: 0, color: self.shadow };
+        let shadow = Shadow {
+            offset: SHADOW_OFFSET,
+            blur: 0,
+            spread: 0,
+            color: self.shadow,
+        };
         v.window_shadow = shadow;
         v.popup_shadow = shadow;
 
@@ -231,7 +236,11 @@ mod tests {
     fn translucent_tokens_are_actually_translucent() {
         for (name, t) in [("light", Tokens::LIGHT), ("dark", Tokens::DARK)] {
             for (what, c) in [("shadow", t.shadow), ("pinstripe", t.pinstripe)] {
-                assert!(c.a() < 128, "{name} {what} is not translucent (a={})", c.a());
+                assert!(
+                    c.a() < 128,
+                    "{name} {what} is not translucent (a={})",
+                    c.a()
+                );
                 // Premultiplied: no channel may exceed the alpha, or it is not a valid
                 // premultiplied colour and will render brighter than intended.
                 assert!(
@@ -250,7 +259,10 @@ mod tests {
         for (name, t) in [("light", Tokens::LIGHT), ("dark", Tokens::DARK)] {
             let a = t.bg_hover.a();
             assert!(a > 0, "{name}: hover wash is fully transparent, invisible");
-            assert!(a < 96, "{name}: hover wash is too opaque, would read as selection");
+            assert!(
+                a < 96,
+                "{name}: hover wash is too opaque, would read as selection"
+            );
             assert!(
                 t.bg_hover.r() <= a && t.bg_hover.g() <= a && t.bg_hover.b() <= a,
                 "{name}: hover wash has a channel above its alpha — RGB was not premultiplied"
@@ -278,9 +290,15 @@ mod tests {
     #[test]
     fn inversion_swaps_ink_and_paper_in_both_themes() {
         for (name, t) in [("light", Tokens::LIGHT), ("dark", Tokens::DARK)] {
-            assert_eq!(t.bg_inverse, t.fg_text, "{name}: the selected fill is the text color");
+            assert_eq!(
+                t.bg_inverse, t.fg_text,
+                "{name}: the selected fill is the text color"
+            );
             let contrast = (luminance(t.fg_inverse) - luminance(t.bg_inverse)).abs();
-            assert!(contrast > 0.5, "{name}: inverse pair contrast is only {contrast:.2}");
+            assert!(
+                contrast > 0.5,
+                "{name}: inverse pair contrast is only {contrast:.2}"
+            );
         }
     }
 
@@ -288,10 +306,22 @@ mod tests {
     /// otherwise silent, since every contrast test above would still pass.
     #[test]
     fn light_is_light_and_dark_is_dark() {
-        assert!(luminance(Tokens::LIGHT.bg_panel) > 0.8, "light panel is not light");
-        assert!(luminance(Tokens::DARK.bg_panel) < 0.3, "dark panel is not dark");
-        assert!(luminance(Tokens::LIGHT.fg_text) < 0.3, "light text is not ink");
-        assert!(luminance(Tokens::DARK.fg_text) > 0.8, "dark text is not paper");
+        assert!(
+            luminance(Tokens::LIGHT.bg_panel) > 0.8,
+            "light panel is not light"
+        );
+        assert!(
+            luminance(Tokens::DARK.bg_panel) < 0.3,
+            "dark panel is not dark"
+        );
+        assert!(
+            luminance(Tokens::LIGHT.fg_text) < 0.3,
+            "light text is not ink"
+        );
+        assert!(
+            luminance(Tokens::DARK.fg_text) > 0.8,
+            "dark text is not paper"
+        );
     }
 
     /// Depth comes only from hard offset shadows. A blur would reintroduce exactly the soft depth
@@ -324,7 +354,11 @@ mod tests {
             .iter()
             .enumerate()
             {
-                assert_eq!(w.corner_radius, CornerRadius::ZERO, "{theme:?} widget {i} is rounded");
+                assert_eq!(
+                    w.corner_radius,
+                    CornerRadius::ZERO,
+                    "{theme:?} widget {i} is rounded"
+                );
                 assert_eq!(w.expansion, 0.0, "{theme:?} widget {i} expands");
             }
             assert_eq!(v.window_corner_radius, CornerRadius::ZERO);
@@ -354,7 +388,10 @@ mod tests {
             let v = Tokens::of(theme).visuals(theme);
             let contrast =
                 (luminance(v.selection.stroke.color) - luminance(v.selection.bg_fill)).abs();
-            assert!(contrast > 0.5, "{theme:?}: selected text contrast is only {contrast:.2}");
+            assert!(
+                contrast > 0.5,
+                "{theme:?}: selected text contrast is only {contrast:.2}"
+            );
         }
     }
 

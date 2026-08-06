@@ -24,7 +24,10 @@ pub(crate) fn mono_id(px: f32) -> egui::FontId {
 }
 
 pub(crate) fn ui_medium_id(px: f32) -> egui::FontId {
-    egui::FontId::new(px, egui::FontFamily::Name(std::sync::Arc::from("ui-medium")))
+    egui::FontId::new(
+        px,
+        egui::FontFamily::Name(std::sync::Arc::from("ui-medium")),
+    )
 }
 
 fn tokens(ui: &Ui) -> Tokens {
@@ -32,7 +35,9 @@ fn tokens(ui: &Ui) -> Tokens {
 }
 
 fn measure(ui: &Ui, text: &str, font: &egui::FontId) -> Vec2 {
-    ui.painter().layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER).size()
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER)
+        .size()
 }
 
 fn border(painter: &Painter, rect: Rect, color: Color32) {
@@ -58,12 +63,20 @@ fn cell(painter: &Painter, rect: Rect, t: &Tokens, selected: bool, hovered: bool
 
 /// A segmented control: one bordered group, 1px dividers, the selected segment inverted. Returns
 /// true if the selection changed.
-pub(crate) fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options: &[(T, &str)], soft: bool) -> bool {
+pub(crate) fn segmented<T: PartialEq + Copy>(
+    ui: &mut Ui,
+    value: &mut T,
+    options: &[(T, &str)],
+    soft: bool,
+) -> bool {
     let t = tokens(ui);
     let edge = if soft { t.border_soft } else { t.border_strong };
     let font = ui_medium_id(size::CONTROL);
 
-    let sizes: Vec<Vec2> = options.iter().map(|(_, label)| measure(ui, label, &font)).collect();
+    let sizes: Vec<Vec2> = options
+        .iter()
+        .map(|(_, label)| measure(ui, label, &font))
+        .collect();
     let widths: Vec<f32> = sizes.iter().map(|s| s.x + SEG_PAD.x * 2.0).collect();
     let row_h = sizes.iter().map(|s| s.y).fold(0.0, f32::max);
     let total = Vec2::new(widths.iter().sum(), row_h + SEG_PAD.y * 2.0);
@@ -78,7 +91,13 @@ pub(crate) fn segmented<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, options
         let resp = ui.interact(seg, group.id.with(i), Sense::click());
         let selected = *value == *opt;
         let fg = cell(&painter, seg, &t, selected, resp.hovered());
-        painter.text(seg.center(), Align2::CENTER_CENTER, *label, font.clone(), fg);
+        painter.text(
+            seg.center(),
+            Align2::CENTER_CENTER,
+            *label,
+            font.clone(),
+            fg,
+        );
         if x > rect.min.x {
             painter.vline(x, seg.y_range(), Stroke::new(1.0, edge));
         }
@@ -102,7 +121,10 @@ pub(crate) fn checkbox(ui: &mut Ui, checked: &mut bool, label: &str) -> bool {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter().clone();
 
-    let box_rect = Rect::from_min_size(Pos2::new(rect.min.x, rect.center().y - CHECKBOX / 2.0), Vec2::splat(CHECKBOX));
+    let box_rect = Rect::from_min_size(
+        Pos2::new(rect.min.x, rect.center().y - CHECKBOX / 2.0),
+        Vec2::splat(CHECKBOX),
+    );
     let fill = if *checked {
         t.bg_inverse
     } else if resp.hovered() {
@@ -113,9 +135,21 @@ pub(crate) fn checkbox(ui: &mut Ui, checked: &mut bool, label: &str) -> bool {
     painter.rect_filled(box_rect, 0.0, fill);
     border(&painter, box_rect, t.border_strong);
     if *checked {
-        painter.text(box_rect.center(), Align2::CENTER_CENTER, "\u{2713}", mono_id(size::CAPTION), t.fg_inverse);
+        painter.text(
+            box_rect.center(),
+            Align2::CENTER_CENTER,
+            "\u{2713}",
+            mono_id(size::CAPTION),
+            t.fg_inverse,
+        );
     }
-    painter.text(Pos2::new(box_rect.max.x + 5.0, rect.center().y), Align2::LEFT_CENTER, label, font, t.fg_text);
+    painter.text(
+        Pos2::new(box_rect.max.x + 5.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        font,
+        t.fg_text,
+    );
     if resp.clicked() {
         *checked = !*checked;
         return true;
@@ -128,7 +162,11 @@ pub(crate) fn checkbox(ui: &mut Ui, checked: &mut bool, label: &str) -> bool {
 pub(crate) fn micro_label(ui: &mut Ui, text: &str) -> Response {
     let t = tokens(ui);
     let spaced: String = text.chars().flat_map(|c| [c, '\u{2009}']).collect();
-    ui.label(egui::RichText::new(spaced).font(mono_id(size::MICRO)).color(t.fg_secondary))
+    ui.label(
+        egui::RichText::new(spaced)
+            .font(mono_id(size::MICRO))
+            .color(t.fg_secondary),
+    )
 }
 
 #[cfg(test)]
@@ -141,8 +179,15 @@ mod tests {
     /// chain instead — enough to render without panicking, not a claim about the real typeface.
     fn install_test_fonts(ctx: &egui::Context) {
         let mut fonts = egui::FontDefinitions::default();
-        let default_chain = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
-        fonts.families.insert(egui::FontFamily::Name(std::sync::Arc::from("ui-medium")), default_chain);
+        let default_chain = fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default();
+        fonts.families.insert(
+            egui::FontFamily::Name(std::sync::Arc::from("ui-medium")),
+            default_chain,
+        );
         ctx.set_fonts(fonts);
         let _ = ctx.run_ui(egui::RawInput::default(), |_ui| {});
     }
@@ -157,7 +202,12 @@ mod tests {
         let mut value = false;
         let mut checked = true;
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let changed = segmented(ui, &mut value, &[(false, "Fixed"), (true, "Buildup")], false);
+            let changed = segmented(
+                ui,
+                &mut value,
+                &[(false, "Fixed"), (true, "Buildup")],
+                false,
+            );
             assert!(!changed);
             let changed = checkbox(ui, &mut checked, "Pressure");
             assert!(!changed);

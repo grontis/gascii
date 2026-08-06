@@ -9,8 +9,14 @@ pub struct Ramp {
 
 pub fn builtin_ramps() -> Vec<Ramp> {
     vec![
-        Ramp { name: "ASCII shading", chars: " .:-=+*#%@".chars().collect() },
-        Ramp { name: "Block shades", chars: "░▒▓█".chars().collect() },
+        Ramp {
+            name: "ASCII shading",
+            chars: " .:-=+*#%@".chars().collect(),
+        },
+        Ramp {
+            name: "Block shades",
+            chars: "░▒▓█".chars().collect(),
+        },
     ]
 }
 
@@ -57,7 +63,9 @@ impl IntensitySource for Buildup {
         if ctx.ramp_len <= 1 {
             return 1.0;
         }
-        let next = ctx.current_ramp_index.map_or(0, |i| (i + 1).min(ctx.ramp_len - 1));
+        let next = ctx
+            .current_ramp_index
+            .map_or(0, |i| (i + 1).min(ctx.ramp_len - 1));
         next as f32 / (ctx.ramp_len - 1) as f32
     }
 }
@@ -113,7 +121,12 @@ mod tests {
     }
 
     fn sample(current_ramp_index: Option<usize>, ramp_len: usize) -> StrokeSample {
-        StrokeSample { position: (0, 0), timing: 0.0, current_ramp_index, ramp_len }
+        StrokeSample {
+            position: (0, 0),
+            timing: 0.0,
+            current_ramp_index,
+            ramp_len,
+        }
     }
 
     #[test]
@@ -135,14 +148,32 @@ mod tests {
         let mut buildup = Buildup;
         let ramp_len = 5;
         // Off-ramp (no current index): lands on step 0.
-        assert_eq!(intensity_to_index(buildup.sample(&sample(None, ramp_len)), ramp_len), 0);
+        assert_eq!(
+            intensity_to_index(buildup.sample(&sample(None, ramp_len)), ramp_len),
+            0
+        );
         // Each pass advances exactly one step.
-        assert_eq!(intensity_to_index(buildup.sample(&sample(Some(0), ramp_len)), ramp_len), 1);
-        assert_eq!(intensity_to_index(buildup.sample(&sample(Some(1), ramp_len)), ramp_len), 2);
-        assert_eq!(intensity_to_index(buildup.sample(&sample(Some(3), ramp_len)), ramp_len), 4);
+        assert_eq!(
+            intensity_to_index(buildup.sample(&sample(Some(0), ramp_len)), ramp_len),
+            1
+        );
+        assert_eq!(
+            intensity_to_index(buildup.sample(&sample(Some(1), ramp_len)), ramp_len),
+            2
+        );
+        assert_eq!(
+            intensity_to_index(buildup.sample(&sample(Some(3), ramp_len)), ramp_len),
+            4
+        );
         // Clamps at the top rather than wrapping or overflowing.
-        assert_eq!(intensity_to_index(buildup.sample(&sample(Some(4), ramp_len)), ramp_len), 4);
-        assert_eq!(intensity_to_index(buildup.sample(&sample(Some(99), ramp_len)), ramp_len), 4);
+        assert_eq!(
+            intensity_to_index(buildup.sample(&sample(Some(4), ramp_len)), ramp_len),
+            4
+        );
+        assert_eq!(
+            intensity_to_index(buildup.sample(&sample(Some(99), ramp_len)), ramp_len),
+            4
+        );
     }
 
     #[test]

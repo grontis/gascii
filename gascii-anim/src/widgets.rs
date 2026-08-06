@@ -22,7 +22,9 @@ fn tokens(ui: &Ui) -> Tokens {
 }
 
 fn measure(ui: &Ui, text: &str, font: &egui::FontId) -> Vec2 {
-    ui.painter().layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER).size()
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER)
+        .size()
 }
 
 fn border(painter: &Painter, rect: Rect, color: Color32) {
@@ -40,7 +42,11 @@ pub(crate) fn button(ui: &mut Ui, label: &str, enabled: bool, min_h: f32) -> Res
     let pad = Vec2::new(10.0, 5.0);
     let mut size = text + pad * 2.0;
     size.y = size.y.max(min_h);
-    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
     let (rect, resp) = ui.allocate_exact_size(size, sense);
     let painter = ui.painter().clone();
 
@@ -67,7 +73,10 @@ pub(crate) fn checkbox(ui: &mut Ui, checked: &mut bool, label: &str) -> bool {
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter().clone();
 
-    let box_rect = Rect::from_min_size(egui::Pos2::new(rect.min.x, rect.center().y - CHECKBOX / 2.0), Vec2::splat(CHECKBOX));
+    let box_rect = Rect::from_min_size(
+        egui::Pos2::new(rect.min.x, rect.center().y - CHECKBOX / 2.0),
+        Vec2::splat(CHECKBOX),
+    );
     let fill = if *checked {
         t.bg_inverse
     } else if resp.hovered() {
@@ -78,9 +87,21 @@ pub(crate) fn checkbox(ui: &mut Ui, checked: &mut bool, label: &str) -> bool {
     painter.rect_filled(box_rect, 0.0, fill);
     border(&painter, box_rect, t.border_strong);
     if *checked {
-        painter.text(box_rect.center(), Align2::CENTER_CENTER, "\u{2713}", mono_id(11.0), t.fg_inverse);
+        painter.text(
+            box_rect.center(),
+            Align2::CENTER_CENTER,
+            "\u{2713}",
+            mono_id(11.0),
+            t.fg_inverse,
+        );
     }
-    painter.text(egui::Pos2::new(box_rect.max.x + 5.0, rect.center().y), Align2::LEFT_CENTER, label, font, t.fg_text);
+    painter.text(
+        egui::Pos2::new(box_rect.max.x + 5.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        font,
+        t.fg_text,
+    );
     if resp.clicked() {
         *checked = !*checked;
         return true;
@@ -93,7 +114,11 @@ pub(crate) fn checkbox(ui: &mut Ui, checked: &mut bool, label: &str) -> bool {
 pub(crate) fn micro_label(ui: &mut Ui, text: &str) -> Response {
     let t = tokens(ui);
     let spaced: String = text.chars().flat_map(|c| [c, '\u{2009}']).collect();
-    ui.label(egui::RichText::new(spaced).font(mono_id(size::MICRO)).color(t.fg_secondary))
+    ui.label(
+        egui::RichText::new(spaced)
+            .font(mono_id(size::MICRO))
+            .color(t.fg_secondary),
+    )
 }
 
 #[cfg(test)]

@@ -64,19 +64,29 @@ impl CanvasRenderer for NaiveRenderer {
         // through every other layer's ink.)
         let font_id = canvas_font_id(vp.font_px());
         let frame = doc.active_frame();
-        let pending_set: std::collections::HashSet<(u16, u16)> = pending.iter().map(|p| (p.x, p.y)).collect();
+        let pending_set: std::collections::HashSet<(u16, u16)> =
+            pending.iter().map(|p| (p.x, p.y)).collect();
         let lifted = selection.and_then(|s| s.lifted_source);
         for layer in gascii_core::visible_layers(doc, frame) {
             let is_active = layer == doc.active_layer();
             for y in y0..y1 {
                 for x in x0..x1 {
-                    if is_active && (pending_set.contains(&(x, y)) || lifted.as_ref().is_some_and(|r| r.contains(x, y))) {
+                    if is_active
+                        && (pending_set.contains(&(x, y))
+                            || lifted.as_ref().is_some_and(|r| r.contains(x, y)))
+                    {
                         continue;
                     }
-                    let Some(&c) = doc.cell_at(frame, layer, x, y) else { continue };
+                    let Some(&c) = doc.cell_at(frame, layer, x, y) else {
+                        continue;
+                    };
                     let rect_min = vp.cell_to_screen(x, y, cell, origin);
                     if c.bg.3 > 0 {
-                        painter.rect_filled(Rect::from_min_size(rect_min, cell), 0.0, color32(c.bg));
+                        painter.rect_filled(
+                            Rect::from_min_size(rect_min, cell),
+                            0.0,
+                            color32(c.bg),
+                        );
                     }
                     if c.ch != ' ' {
                         painter.text(
@@ -98,7 +108,11 @@ impl CanvasRenderer for NaiveRenderer {
                 }
                 let rect_min = vp.cell_to_screen(p.x, p.y, cell, origin);
                 if p.cell.bg.3 > 0 {
-                    painter.rect_filled(Rect::from_min_size(rect_min, cell), 0.0, color32(p.cell.bg));
+                    painter.rect_filled(
+                        Rect::from_min_size(rect_min, cell),
+                        0.0,
+                        color32(p.cell.bg),
+                    );
                 }
                 if p.cell.ch != ' ' {
                     painter.text(
@@ -129,18 +143,32 @@ impl CanvasRenderer for NaiveRenderer {
         if let Some((cx, cy, block_on)) = caret {
             let rect = Rect::from_min_size(vp.cell_to_screen(cx, cy, cell, origin), cell);
             if block_on {
-                painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 120));
+                painter.rect_filled(
+                    rect,
+                    0.0,
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 120),
+                );
             }
             let h = (cell.y * 0.12).max(1.0);
             let underscore = Rect::from_min_max(Pos2::new(rect.min.x, rect.max.y - h), rect.max);
-            painter.rect_filled(underscore, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, 200));
+            painter.rect_filled(
+                underscore,
+                0.0,
+                Color32::from_rgba_unmultiplied(255, 255, 255, 200),
+            );
         }
 
         if let Some(marquee) = selection.and_then(|s| s.marquee) {
             let rect = cell_rect_to_screen(marquee, vp, cell, origin);
             painter.rect_filled(rect, 0.0, ACCENT.gamma_multiply(0.08));
             let c = rect;
-            let corners = [c.left_top(), c.right_top(), c.right_bottom(), c.left_bottom(), c.left_top()];
+            let corners = [
+                c.left_top(),
+                c.right_top(),
+                c.right_bottom(),
+                c.left_bottom(),
+                c.left_top(),
+            ];
             painter.extend(Shape::dashed_line(
                 &corners,
                 Stroke::new(1.0, ACCENT),
@@ -204,7 +232,12 @@ struct StrokeTail {
 /// Integer-only (no floating point): the 45°-ray boundaries at 22.5°/67.5° are approximated via
 /// `adx * 1000` vs. `ady * TAN_67_5_X1000` cross-multiplication rather than `atan2`, so the result
 /// is exactly reproducible and trivially unit-testable against round-number vectors.
-pub(crate) fn shift_constrain(kind: ToolKind, anchor: (u16, u16), cur: (u16, u16), shift: bool) -> (u16, u16) {
+pub(crate) fn shift_constrain(
+    kind: ToolKind,
+    anchor: (u16, u16),
+    cur: (u16, u16),
+    shift: bool,
+) -> (u16, u16) {
     if !shift || !matches!(kind, ToolKind::Line | ToolKind::Rectangle) {
         return cur;
     }
@@ -284,7 +317,11 @@ fn drive_stroke_tail(
             edit = Some(e);
         }
     }
-    StrokeTail { ended: ends, edit, last_drag_cell }
+    StrokeTail {
+        ended: ends,
+        edit,
+        last_drag_cell,
+    }
 }
 
 /// Applies a `ToolCtxPatch` over the `(density, ramp)` defaults, field by field: a `None` patch (no
@@ -324,7 +361,9 @@ pub(crate) fn tool_ctx(app: &GasciiApp, b: Binding) -> gascii_core::ToolCtx {
     // path for data it ignores.
     let kind = app.slot(b).kind;
     let patch = if tool_def(kind).wants_ctx_patch {
-        let i = tool_def(kind).plugin_slot.expect("wants_ctx_patch implies a plugin_slot");
+        let i = tool_def(kind)
+            .plugin_slot
+            .expect("wants_ctx_patch implies a plugin_slot");
         app.plugins[i].tool_ctx_patch(tool_def(kind).name)
     } else {
         None
@@ -360,7 +399,14 @@ pub(crate) fn tool_ctx(app: &GasciiApp, b: Binding) -> gascii_core::ToolCtx {
 /// by a `Drag` to the actual click, instead of starting a fresh line at the click. The pointer's
 /// subsequent mouse-up still fires an ordinary `Release` through the unchanged `stroke_owner`
 /// machinery below.
-pub(crate) fn begin_gesture(app: &mut GasciiApp, b: Binding, x: u16, y: u16, alt_sample: bool, shift_held: bool) -> bool {
+pub(crate) fn begin_gesture(
+    app: &mut GasciiApp,
+    b: Binding,
+    x: u16,
+    y: u16,
+    alt_sample: bool,
+    shift_held: bool,
+) -> bool {
     // Drawing with a button focuses that binding for the [/] size keys.
     app.options_focus = b;
 
@@ -411,10 +457,16 @@ pub(crate) fn begin_gesture(app: &mut GasciiApp, b: Binding, x: u16, y: u16, alt
 
     let tctx = tool_ctx(app, b);
     let resp = if let Some(lp) = continue_from {
-        app.slots[b.ix()].tool.update(ToolEvent::Press { x: lp.0, y: lp.1 }, &tctx, &app.doc);
-        app.slots[b.ix()].tool.update(ToolEvent::Drag { x, y }, &tctx, &app.doc)
+        app.slots[b.ix()]
+            .tool
+            .update(ToolEvent::Press { x: lp.0, y: lp.1 }, &tctx, &app.doc);
+        app.slots[b.ix()]
+            .tool
+            .update(ToolEvent::Drag { x, y }, &tctx, &app.doc)
     } else {
-        app.slots[b.ix()].tool.update(ToolEvent::Press { x, y }, &tctx, &app.doc)
+        app.slots[b.ix()]
+            .tool
+            .update(ToolEvent::Press { x, y }, &tctx, &app.doc)
     };
     // Always apply the press response. This is what makes the bindings symmetric: a stroke tool's
     // `Press` returns `Active` and never matches, while Selection's press CAN commit (clicking away
@@ -442,7 +494,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut GasciiApp, pointer_on_resize_grip: bool
     let (response, painter, origin, cell, doc_extent, scroll_bars) =
         handle_canvas_input(ui, app, &ctx, pointer_on_resize_grip);
     paint_canvas(
-        ui, app, &ctx, &response, &painter, origin, cell, doc_extent, pointer_on_resize_grip,
+        ui,
+        app,
+        &ctx,
+        &response,
+        &painter,
+        origin,
+        cell,
+        doc_extent,
+        pointer_on_resize_grip,
         scroll_bars,
     );
 }
@@ -457,7 +517,14 @@ fn handle_canvas_input(
     app: &mut GasciiApp,
     ctx: &egui::Context,
     pointer_on_resize_grip: bool,
-) -> (egui::Response, Painter, Pos2, Vec2, DocExtent, crate::scrollbar::Bars) {
+) -> (
+    egui::Response,
+    Painter,
+    Pos2,
+    Vec2,
+    DocExtent,
+    crate::scrollbar::Bars,
+) {
     let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
     if app.pending_fit {
         app.pending_fit = false;
@@ -476,7 +543,8 @@ fn handle_canvas_input(
         // size mismatch persists, so the refit lands on the first frame after release.
         let avail = ui.available_size();
         if app.kiosk_last_fit_size != Some(avail) && !app.stroke_in_progress() {
-            app.viewport.fit_to_window(avail, DESK_MARGIN, app.doc.extent(), ctx);
+            app.viewport
+                .fit_to_window(avail, DESK_MARGIN, app.doc.extent(), ctx);
             app.kiosk_last_fit_size = Some(avail);
         }
     } else {
@@ -485,7 +553,8 @@ fn handle_canvas_input(
         app.kiosk_last_fit_size = None;
     }
 
-    let (response, painter) = ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
+    let (response, painter) =
+        ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
     let origin = response.rect.min;
     let mut cell = app.viewport.cell_size(ctx);
     let doc_extent = app.doc.extent();
@@ -543,7 +612,9 @@ fn handle_canvas_input(
             let dir = app.pending_step_zoom;
             app.pending_step_zoom = 0;
             if !app.stroke_in_progress() {
-                let anchor = response.hover_pos().unwrap_or_else(|| response.rect.center());
+                let anchor = response
+                    .hover_pos()
+                    .unwrap_or_else(|| response.rect.center());
                 app.viewport.zoom_at(anchor, dir, cell, origin);
             }
         }
@@ -575,7 +646,10 @@ fn handle_canvas_input(
         // Precedence 2b: the desk-edge scrollbars. Registered here — after zoom has settled this
         // frame's cell size, before press routing — so a thumb drag pans before the document
         // paints and a press on a bar is claimed before the stroke branch can see it.
-        let doc_size = Vec2::new(doc_extent.width as f32 * cell.x, doc_extent.height as f32 * cell.y);
+        let doc_size = Vec2::new(
+            doc_extent.width as f32 * cell.x,
+            doc_extent.height as f32 * cell.y,
+        );
         scroll_bars = crate::scrollbar::interact(ui, &mut app.viewport, response.rect, doc_size);
 
         app.hovered_cell = response
@@ -592,17 +666,23 @@ fn handle_canvas_input(
         // Known gap: release is detected from pointer state, so an OS-level focus loss mid-drag with
         // no synthetic mouse-up (e.g. alt-tab while dragging) can leave
         // `stroke_active`/`space_pan_active` stuck until the next primary press.
-        let (primary_pressed, primary_down, primary_released, secondary_pressed, secondary_down, secondary_released) =
-            ui.input(|i| {
-                (
-                    i.pointer.primary_pressed(),
-                    i.pointer.primary_down(),
-                    i.pointer.primary_released(),
-                    i.pointer.secondary_pressed(),
-                    i.pointer.secondary_down(),
-                    i.pointer.secondary_released(),
-                )
-            });
+        let (
+            primary_pressed,
+            primary_down,
+            primary_released,
+            secondary_pressed,
+            secondary_down,
+            secondary_released,
+        ) = ui.input(|i| {
+            (
+                i.pointer.primary_pressed(),
+                i.pointer.primary_down(),
+                i.pointer.primary_released(),
+                i.pointer.secondary_pressed(),
+                i.pointer.secondary_down(),
+                i.pointer.secondary_released(),
+            )
+        });
         let gesture_ends = primary_released || !primary_down;
 
         // Tracks whether this frame's press just started the gesture, so the tail below doesn't also
@@ -631,8 +711,11 @@ fn handle_canvas_input(
                 };
                 if let Some(b) = pressed.filter(|_| response.contains_pointer()) {
                     if let Some(pos) = response.interact_pointer_pos() {
-                        if let Some((x, y)) = app.viewport.screen_to_cell(pos, cell, origin, doc_extent) {
-                            gesture_just_started = begin_gesture(app, b, x, y, alt_sample, shift_held);
+                        if let Some((x, y)) =
+                            app.viewport.screen_to_cell(pos, cell, origin, doc_extent)
+                        {
+                            gesture_just_started =
+                                begin_gesture(app, b, x, y, alt_sample, shift_held);
                         }
                     }
                 }
@@ -711,7 +794,9 @@ fn handle_canvas_input(
             if let Some(b) = app.stroke_owner {
                 let td = tool_def(app.slot(b).kind);
                 let overridden = td.pressure_sizeable
-                    && td.plugin_slot.is_some_and(|i| app.plugins[i].pressure_override_enabled(td.name));
+                    && td
+                        .plugin_slot
+                        .is_some_and(|i| app.plugins[i].pressure_override_enabled(td.name));
                 if overridden {
                     let quantized = 1 + (force.clamp(0.0, 1.0) * 3.0).round() as u16; // 1..=4
                     app.pressure_stamp_size = Some(quantized);
@@ -734,7 +819,9 @@ fn handle_canvas_input(
             if let Some(b) = app.stroke_owner.take() {
                 app.pressure_stamp_size = None;
                 let tctx = tool_ctx(app, b);
-                app.slots[b.ix()].tool.update(ToolEvent::Cancel, &tctx, &app.doc);
+                app.slots[b.ix()]
+                    .tool
+                    .update(ToolEvent::Cancel, &tctx, &app.doc);
                 // The Cancel just cleared this binding's residue (caret, marquee); a keyboard
                 // claim pointing at residue-free Text would silently swallow every keystroke on
                 // return, with no caret to explain why.
@@ -778,28 +865,48 @@ fn route_owner_keys(ui: &egui::Ui, app: &mut GasciiApp) {
                                 }
                                 let tctx = tool_ctx(app, b);
                                 let resp =
-                                    app.slots[bi].tool.update(ToolEvent::Char(ch), &tctx, &app.doc);
+                                    app.slots[bi]
+                                        .tool
+                                        .update(ToolEvent::Char(ch), &tctx, &app.doc);
                                 if let ToolResponse::Commit(Some(edit)) = resp {
                                     app.apply_edit(edit, Some(b));
                                 }
                             }
                         }
-                        egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => {
+                        egui::Event::Key {
+                            key: egui::Key::Enter,
+                            pressed: true,
+                            ..
+                        } => {
                             let tctx = tool_ctx(app, b);
                             app.slots[bi].tool.update(ToolEvent::Enter, &tctx, &app.doc);
                         }
-                        egui::Event::Key { key: egui::Key::Backspace, pressed: true, .. } => {
+                        egui::Event::Key {
+                            key: egui::Key::Backspace,
+                            pressed: true,
+                            ..
+                        } => {
                             let tctx = tool_ctx(app, b);
-                            app.slots[bi].tool.update(ToolEvent::Backspace, &tctx, &app.doc);
+                            app.slots[bi]
+                                .tool
+                                .update(ToolEvent::Backspace, &tctx, &app.doc);
                         }
-                        egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
+                        egui::Event::Key {
+                            key: egui::Key::Escape,
+                            pressed: true,
+                            ..
+                        } => {
                             // Escape ends the session; only the owner's, never the other slot's.
                             app.end_session(b);
                         }
-                        egui::Event::Key { key, pressed: true, .. } => {
+                        egui::Event::Key {
+                            key, pressed: true, ..
+                        } => {
                             if let Some(dir) = arrow_direction(key) {
                                 let tctx = tool_ctx(app, b);
-                                app.slots[bi].tool.update(ToolEvent::Arrow(dir), &tctx, &app.doc);
+                                app.slots[bi]
+                                    .tool
+                                    .update(ToolEvent::Arrow(dir), &tctx, &app.doc);
                             }
                         }
                         _ => {}
@@ -809,22 +916,39 @@ fn route_owner_keys(ui: &egui::Ui, app: &mut GasciiApp) {
             ToolKind::Selection => {
                 for ev in events {
                     match ev {
-                        egui::Event::Key { key: egui::Key::Delete, pressed: true, .. } => {
+                        egui::Event::Key {
+                            key: egui::Key::Delete,
+                            pressed: true,
+                            ..
+                        } => {
                             let tctx = tool_ctx(app, b);
-                            let resp = app.slots[bi].tool.update(ToolEvent::Delete, &tctx, &app.doc);
+                            let resp =
+                                app.slots[bi]
+                                    .tool
+                                    .update(ToolEvent::Delete, &tctx, &app.doc);
                             if let ToolResponse::Commit(Some(edit)) = resp {
                                 app.apply_edit(edit, Some(b));
                             }
                         }
-                        egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => {
+                        egui::Event::Key {
+                            key: egui::Key::Enter,
+                            pressed: true,
+                            ..
+                        } => {
                             app.flush_slot(b);
                         }
-                        egui::Event::Key { key: egui::Key::Escape, pressed: true, .. } => {
+                        egui::Event::Key {
+                            key: egui::Key::Escape,
+                            pressed: true,
+                            ..
+                        } => {
                             // Bespoke, deliberately non-flushing: Escape-as-abort must be able to
                             // discard an in-progress move rather than commit it, so this does NOT
                             // route through `end_session` (which always commits first).
                             let tctx = tool_ctx(app, b);
-                            app.slots[bi].tool.update(ToolEvent::Cancel, &tctx, &app.doc);
+                            app.slots[bi]
+                                .tool
+                                .update(ToolEvent::Cancel, &tctx, &app.doc);
                             app.release_keyboard(b);
                         }
                         _ => {}
@@ -878,7 +1002,9 @@ fn paint_canvas(
     pointer_on_resize_grip: bool,
     scroll_bars: crate::scrollbar::Bars,
 ) {
-    let visible = app.viewport.visible_cell_rect(painter.clip_rect(), cell, origin, doc_extent);
+    let visible = app
+        .viewport
+        .visible_cell_rect(painter.clip_rect(), cell, origin, doc_extent);
 
     // The text caret follows keyboard ownership, which is what keeps it honest: no caret means "not
     // accepting keys". It reads the same state the routing above does, so the caret can never
@@ -889,7 +1015,12 @@ fn paint_canvas(
         .keyboard_owner()
         .filter(|&b| app.slot(b).kind == ToolKind::Text)
         .and_then(|b| app.slot(b).tool.caret())
-        .map(|(x, y)| (x.min(app.doc.width.saturating_sub(1)), y.min(app.doc.height.saturating_sub(1))));
+        .map(|(x, y)| {
+            (
+                x.min(app.doc.width.saturating_sub(1)),
+                y.min(app.doc.height.saturating_sub(1)),
+            )
+        });
     if caret.is_some() {
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
     }
@@ -960,7 +1091,10 @@ fn paint_canvas(
     let t = crate::ui::theme::current(ctx);
     let doc_rect = Rect::from_min_size(
         origin + app.viewport.pan,
-        Vec2::new(app.doc.width as f32 * cell.x, app.doc.height as f32 * cell.y),
+        Vec2::new(
+            app.doc.width as f32 * cell.x,
+            app.doc.height as f32 * cell.y,
+        ),
     );
     painter.rect_filled(doc_rect.translate(Vec2::splat(3.0)), 0.0, t.shadow);
 
@@ -976,10 +1110,14 @@ fn paint_canvas(
     if let Some(bg) = &app.image_bg {
         if bg.show_as_trace {
             if let Some(tex) = &bg.texture {
-                if let Some((ox, oy, w, h)) =
-                    crate::image_bg::fit_contain(bg.pixels.width(), bg.pixels.height(), doc_rect.width(), doc_rect.height())
-                {
-                    let target = Rect::from_min_size(doc_rect.min + Vec2::new(ox, oy), Vec2::new(w, h));
+                if let Some((ox, oy, w, h)) = crate::image_bg::fit_contain(
+                    bg.pixels.width(),
+                    bg.pixels.height(),
+                    doc_rect.width(),
+                    doc_rect.height(),
+                ) {
+                    let target =
+                        Rect::from_min_size(doc_rect.min + Vec2::new(ox, oy), Vec2::new(w, h));
                     painter.image(
                         tex.id(),
                         target,
@@ -1005,14 +1143,33 @@ fn paint_canvas(
     );
 
     if app.show_grid {
-        paint_grid(painter, &app.viewport, cell, origin, doc_rect, visible, doc_extent);
+        paint_grid(
+            painter,
+            &app.viewport,
+            cell,
+            origin,
+            doc_rect,
+            visible,
+            doc_extent,
+        );
     }
 
-    painter.rect_stroke(doc_rect, 0.0, Stroke::new(1.0, t.window_edge), StrokeKind::Outside);
+    painter.rect_stroke(
+        doc_rect,
+        0.0,
+        Stroke::new(1.0, t.window_edge),
+        StrokeKind::Outside,
+    );
 
     // The scrollbars sit above everything the canvas paints: they are chrome, not document, and
     // must stay reachable over any document content or overlay.
-    crate::scrollbar::paint(ui, &app.viewport, response.rect, doc_rect.size(), scroll_bars);
+    crate::scrollbar::paint(
+        ui,
+        &app.viewport,
+        response.rect,
+        doc_rect.size(),
+        scroll_bars,
+    );
 
     // The tool-icon cursor: replaces the OS cursor over the canvas for every stamp-shaped tool.
     // Text/Selection keep stock cursors (their gestures aren't stamp-shaped); space-pan gets the
@@ -1077,7 +1234,13 @@ fn paint_tool_cursor(painter: &Painter, kind: ToolKind, pos: Pos2) {
     let rect = Rect::from_center_size(pos, Vec2::splat(ICON_SIZE));
     let def = tool_def(kind);
     let fallback_letter = def.name.chars().next().unwrap_or('?');
-    crate::ui::icons::paint(painter, def.icon, rect.translate(Vec2::splat(1.0)), Color32::BLACK, fallback_letter);
+    crate::ui::icons::paint(
+        painter,
+        def.icon,
+        rect.translate(Vec2::splat(1.0)),
+        Color32::BLACK,
+        fallback_letter,
+    );
     crate::ui::icons::paint(painter, def.icon, rect, Color32::WHITE, fallback_letter);
 }
 
@@ -1090,7 +1253,10 @@ mod tests {
     /// `apply_ctx_patch`'s field-by-field merge, not a wholesale replace.
     #[test]
     fn a_patch_with_no_density_leaves_the_tool_ctx_default() {
-        let patch = gascii_plugin_api::ToolCtxPatch { density: None, ramp: Some(vec!['a', 'b']) };
+        let patch = gascii_plugin_api::ToolCtxPatch {
+            density: None,
+            ramp: Some(vec!['a', 'b']),
+        };
         let (density, ramp) = apply_ctx_patch(Some(patch));
         assert!(
             matches!(density, DensityMode::Fixed(Fixed(l)) if (l - 1.0).abs() < f32::EPSILON),
@@ -1120,7 +1286,10 @@ mod tests {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h))),
             ..Default::default()
         };
-        raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().fullscreen = Some(fullscreen);
+        raw.viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .fullscreen = Some(fullscreen);
         raw
     }
 
@@ -1134,14 +1303,20 @@ mod tests {
         app.pending_fit = false; // isolate the auto-refit gate from the entry-transition snap
 
         let ctx = headless_ctx();
-        let _ = ctx.run_ui(raw_input_with_screen(900.0, 700.0, true), |ui| show(ui, &mut app, false));
-        let fit_size_1 = app.kiosk_last_fit_size.expect("fit must have run on the first fullscreen frame");
+        let _ = ctx.run_ui(raw_input_with_screen(900.0, 700.0, true), |ui| {
+            show(ui, &mut app, false)
+        });
+        let fit_size_1 = app
+            .kiosk_last_fit_size
+            .expect("fit must have run on the first fullscreen frame");
 
         // Nudge the zoom step away from whatever the fit picked — if auto-refit fired
         // unconditionally every frame, the next `show` call at the SAME size would silently
         // overwrite this back to the fit value.
         app.viewport.zoom_step = 0;
-        let _ = ctx.run_ui(raw_input_with_screen(900.0, 700.0, true), |ui| show(ui, &mut app, false));
+        let _ = ctx.run_ui(raw_input_with_screen(900.0, 700.0, true), |ui| {
+            show(ui, &mut app, false)
+        });
         assert_eq!(
             app.kiosk_last_fit_size,
             Some(fit_size_1),
@@ -1153,9 +1328,16 @@ mod tests {
         );
 
         // A genuine resize DOES trigger a re-fit.
-        let _ = ctx.run_ui(raw_input_with_screen(400.0, 300.0, true), |ui| show(ui, &mut app, false));
-        let fit_size_2 = app.kiosk_last_fit_size.expect("fit must run again after a real resize");
-        assert_ne!(fit_size_2, fit_size_1, "a genuine size change must update the tracked fit size");
+        let _ = ctx.run_ui(raw_input_with_screen(400.0, 300.0, true), |ui| {
+            show(ui, &mut app, false)
+        });
+        let fit_size_2 = app
+            .kiosk_last_fit_size
+            .expect("fit must run again after a real resize");
+        assert_ne!(
+            fit_size_2, fit_size_1,
+            "a genuine size change must update the tracked fit size"
+        );
     }
 
     /// Drives the actual pressure scan (`canvas.rs`'s own event loop, not a hand-rolled shortcut)
@@ -1197,7 +1379,10 @@ mod tests {
             });
             let _ = ctx.run_ui(raw, |ui| show(ui, &mut app, false));
 
-            assert!(app.stylus_detected, "force={force}: any touch force must mark stylus_detected");
+            assert!(
+                app.stylus_detected,
+                "force={force}: any touch force must mark stylus_detected"
+            );
             assert_eq!(
                 app.pressure_stamp_size,
                 Some(expected),
@@ -1235,8 +1420,14 @@ mod tests {
         });
         let _ = ctx.run_ui(raw, |ui| show(ui, &mut app, false));
 
-        assert!(app.stylus_detected, "force events still mark stylus_detected regardless of tool");
-        assert_eq!(app.pressure_stamp_size, None, "Pencil is not pressure_sizeable: no override may apply");
+        assert!(
+            app.stylus_detected,
+            "force events still mark stylus_detected regardless of tool"
+        );
+        assert_eq!(
+            app.pressure_stamp_size, None,
+            "Pencil is not pressure_sizeable: no override may apply"
+        );
     }
 
     /// `REVIEW_plugin-api_2026-07-20.md` Suggestion 2, the one untested combination the review
@@ -1253,7 +1444,10 @@ mod tests {
     fn a_pressure_sizeable_tool_with_the_pressure_toggle_off_gets_no_size_override() {
         let mut app = GasciiApp::headless();
         app.bind(Binding::L, BRUSH_KIND);
-        assert!(!app.brush_plugin_mut().pressure_enabled(), "sanity: the Pressure opt-in starts off");
+        assert!(
+            !app.brush_plugin_mut().pressure_enabled(),
+            "sanity: the Pressure opt-in starts off"
+        );
         begin_gesture(&mut app, Binding::L, 2, 2, false, false);
 
         let ctx = headless_ctx();
@@ -1275,7 +1469,10 @@ mod tests {
         });
         let _ = ctx.run_ui(raw, |ui| show(ui, &mut app, false));
 
-        assert!(app.stylus_detected, "force events still mark stylus_detected regardless of the opt-in");
+        assert!(
+            app.stylus_detected,
+            "force events still mark stylus_detected regardless of the opt-in"
+        );
         assert_eq!(
             app.pressure_stamp_size, None,
             "Brush IS pressure_sizeable, but the live Pressure toggle is off: no override may apply"
@@ -1297,22 +1494,41 @@ mod tests {
         // edges (the default doc overflows at the minimum zoom), so an edge-adjacent coordinate
         // would silently fall outside the visible range — the center never does.
         let (cx, cy) = (app.doc.width / 2, app.doc.height / 2);
-        app.doc.set_cell(0, cx, cy, gascii_core::Cell { ch: 'X', fg: Rgba::WHITE, bg: seeded_bg });
+        app.doc.set_cell(
+            0,
+            cx,
+            cy,
+            gascii_core::Cell {
+                ch: 'X',
+                fg: Rgba::WHITE,
+                bg: seeded_bg,
+            },
+        );
 
         let ctx = headless_ctx();
-        let via_plugins = ctx.run_ui(raw_input_with_screen(300.0, 300.0, false), |ui| show(ui, &mut app, false));
+        let via_plugins = ctx.run_ui(raw_input_with_screen(300.0, 300.0, false), |ui| {
+            show(ui, &mut app, false)
+        });
         let seeded_color = color32(seeded_bg);
         let via_plugins_bg_count = via_plugins
             .shapes
             .iter()
             .filter(|cs| matches!(&cs.shape, Shape::Rect(r) if r.fill == seeded_color))
             .count();
-        assert_eq!(via_plugins_bg_count, 1, "sanity: the real per-app renderer painted the seeded cell's background exactly once");
+        assert_eq!(
+            via_plugins_bg_count, 1,
+            "sanity: the real per-app renderer painted the seeded cell's background exactly once"
+        );
 
         app.renderer = Box::new(NaiveRenderer);
-        let bare = ctx.run_ui(raw_input_with_screen(300.0, 300.0, false), |ui| show(ui, &mut app, false));
-        let bare_bg_count =
-            bare.shapes.iter().filter(|cs| matches!(&cs.shape, Shape::Rect(r) if r.fill == seeded_color)).count();
+        let bare = ctx.run_ui(raw_input_with_screen(300.0, 300.0, false), |ui| {
+            show(ui, &mut app, false)
+        });
+        let bare_bg_count = bare
+            .shapes
+            .iter()
+            .filter(|cs| matches!(&cs.shape, Shape::Rect(r) if r.fill == seeded_color))
+            .count();
 
         assert_eq!(
             via_plugins.shapes.len(),
@@ -1320,7 +1536,10 @@ mod tests {
             "the plugin-composed renderer must paint the exact same shape count as a bare NaiveRenderer \
              — BrushPlugin contributes no wrap_renderer override this phase"
         );
-        assert_eq!(via_plugins_bg_count, bare_bg_count, "both must paint the seeded cell's background the same number of times");
+        assert_eq!(
+            via_plugins_bg_count, bare_bg_count,
+            "both must paint the seeded cell's background the same number of times"
+        );
     }
 
     /// `NaiveRenderer::paint` must composite every visible layer, not just layer 0 — the bug this
@@ -1335,14 +1554,32 @@ mod tests {
 
         let (cx, cy) = (app.doc.width / 2, app.doc.height / 2);
         let top_bg = Rgba(40, 60, 80, 255);
-        app.doc.set_cell(1, cx, cy, gascii_core::Cell { ch: 'Y', fg: Rgba::WHITE, bg: top_bg });
+        app.doc.set_cell(
+            1,
+            cx,
+            cy,
+            gascii_core::Cell {
+                ch: 'Y',
+                fg: Rgba::WHITE,
+                bg: top_bg,
+            },
+        );
         app.renderer = Box::new(NaiveRenderer);
 
         let ctx = headless_ctx();
-        let out = ctx.run_ui(raw_input_with_screen(300.0, 300.0, false), |ui| show(ui, &mut app, false));
+        let out = ctx.run_ui(raw_input_with_screen(300.0, 300.0, false), |ui| {
+            show(ui, &mut app, false)
+        });
         let seeded_color = color32(top_bg);
-        let count = out.shapes.iter().filter(|cs| matches!(&cs.shape, Shape::Rect(r) if r.fill == seeded_color)).count();
-        assert_eq!(count, 1, "content on layer 1 must be painted through composite_cell, not dropped");
+        let count = out
+            .shapes
+            .iter()
+            .filter(|cs| matches!(&cs.shape, Shape::Rect(r) if r.fill == seeded_color))
+            .count();
+        assert_eq!(
+            count, 1,
+            "content on layer 1 must be painted through composite_cell, not dropped"
+        );
     }
 
     /// A hidden layer's content must be excluded from the composited paint, even though the
@@ -1357,16 +1594,36 @@ mod tests {
 
         let (cx, cy) = (app.doc.width / 2, app.doc.height / 2);
         let hidden_bg = Rgba(40, 60, 80, 255);
-        app.doc.set_cell(1, cx, cy, gascii_core::Cell { ch: 'Y', fg: Rgba::WHITE, bg: hidden_bg });
-        let hide = gascii_core::set_layer_visibility(&app.doc, 1, false).unwrap().unwrap();
+        app.doc.set_cell(
+            1,
+            cx,
+            cy,
+            gascii_core::Cell {
+                ch: 'Y',
+                fg: Rgba::WHITE,
+                bg: hidden_bg,
+            },
+        );
+        let hide = gascii_core::set_layer_visibility(&app.doc, 1, false)
+            .unwrap()
+            .unwrap();
         history.apply(&mut app.doc, hide);
         app.renderer = Box::new(NaiveRenderer);
 
         let ctx = headless_ctx();
-        let out = ctx.run_ui(raw_input_with_screen(300.0, 300.0, false), |ui| show(ui, &mut app, false));
+        let out = ctx.run_ui(raw_input_with_screen(300.0, 300.0, false), |ui| {
+            show(ui, &mut app, false)
+        });
         let seeded_color = color32(hidden_bg);
-        let count = out.shapes.iter().filter(|cs| matches!(&cs.shape, Shape::Rect(r) if r.fill == seeded_color)).count();
-        assert_eq!(count, 0, "a hidden layer's content must never reach the composited paint");
+        let count = out
+            .shapes
+            .iter()
+            .filter(|cs| matches!(&cs.shape, Shape::Rect(r) if r.fill == seeded_color))
+            .count();
+        assert_eq!(
+            count, 0,
+            "a hidden layer's content must never reach the composited paint"
+        );
     }
 
     /// The acetate model: layers paint stacked, so a top-layer glyph with a transparent bg over a
@@ -1382,27 +1639,58 @@ mod tests {
         let (cx, cy) = (app.doc.width / 2, app.doc.height / 2);
         let bottom_fg = Rgba(200, 10, 10, 255);
         let top_fg = Rgba(10, 200, 10, 255);
-        app.doc.set_cell(0, cx, cy, gascii_core::Cell { ch: 'O', fg: bottom_fg, bg: Rgba::TRANSPARENT });
-        app.doc.set_cell(1, cx, cy, gascii_core::Cell { ch: 'X', fg: top_fg, bg: Rgba::TRANSPARENT });
+        app.doc.set_cell(
+            0,
+            cx,
+            cy,
+            gascii_core::Cell {
+                ch: 'O',
+                fg: bottom_fg,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
+        app.doc.set_cell(
+            1,
+            cx,
+            cy,
+            gascii_core::Cell {
+                ch: 'X',
+                fg: top_fg,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         app.renderer = Box::new(NaiveRenderer);
 
         let ctx = headless_ctx();
-        let out = ctx.run_ui(raw_input_with_screen(300.0, 300.0, false), |ui| show(ui, &mut app, false));
+        let out = ctx.run_ui(raw_input_with_screen(300.0, 300.0, false), |ui| {
+            show(ui, &mut app, false)
+        });
         let glyphs_of = |color: gascii_core::Rgba| {
             out.shapes
                 .iter()
-                .filter(|cs| matches!(&cs.shape, Shape::Text(t) if t.fallback_color == color32(color)))
+                .filter(
+                    |cs| matches!(&cs.shape, Shape::Text(t) if t.fallback_color == color32(color)),
+                )
                 .count()
         };
-        assert_eq!(glyphs_of(bottom_fg), 1, "the bottom layer's glyph must still be painted");
-        assert_eq!(glyphs_of(top_fg), 1, "the top layer's glyph must be painted over it");
+        assert_eq!(
+            glyphs_of(bottom_fg),
+            1,
+            "the bottom layer's glyph must still be painted"
+        );
+        assert_eq!(
+            glyphs_of(top_fg),
+            1,
+            "the top layer's glyph must be painted over it"
+        );
     }
 
     /// The focus-loss cancel path (`canvas.rs`'s own focus-edge block) must clear the pressure
     /// override alongside the stroke it belongs to — otherwise a stale override could leak into
     /// whatever stroke happens next after focus returns.
     #[test]
-    fn a_focus_loss_mid_pressure_modulated_stroke_clears_both_the_stroke_and_its_pressure_override() {
+    fn a_focus_loss_mid_pressure_modulated_stroke_clears_both_the_stroke_and_its_pressure_override()
+    {
         let mut app = GasciiApp::headless();
         app.bind(Binding::L, BRUSH_KIND);
         app.brush_plugin_mut().set_pressure_enabled(true);
@@ -1412,10 +1700,16 @@ mod tests {
 
         let ctx = headless_ctx();
         let mut raw = raw_input_with_screen(900.0, 700.0, false);
-        raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap().focused = Some(false);
+        raw.viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .unwrap()
+            .focused = Some(false);
         let _ = ctx.run_ui(raw, |ui| show(ui, &mut app, false));
 
-        assert_eq!(app.stroke_owner, None, "focus loss must cancel the in-progress stroke");
+        assert_eq!(
+            app.stroke_owner, None,
+            "focus loss must cancel the in-progress stroke"
+        );
         assert_eq!(
             app.pressure_stamp_size, None,
             "the pressure override must not survive a focus-loss cancel"
@@ -1435,12 +1729,26 @@ mod tests {
         ));
 
         let ctx = headless_ctx();
-        let _ = ctx.run_ui(raw_input_with_screen(900.0, 700.0, false), |ui| show(ui, &mut app, false));
+        let _ = ctx.run_ui(raw_input_with_screen(900.0, 700.0, false), |ui| {
+            show(ui, &mut app, false)
+        });
 
-        let bg = app.image_bg.as_ref().expect("a no-input render must not clear the loaded image");
-        assert!(bg.texture.is_none(), "still no texture: the render must not have synthesized one");
-        assert!((bg.trace_opacity - 0.5).abs() < f32::EPSILON, "a no-input render must not change opacity");
-        assert!(bg.show_as_trace, "a no-input render must not change trace visibility");
+        let bg = app
+            .image_bg
+            .as_ref()
+            .expect("a no-input render must not clear the loaded image");
+        assert!(
+            bg.texture.is_none(),
+            "still no texture: the render must not have synthesized one"
+        );
+        assert!(
+            (bg.trace_opacity - 0.5).abs() < f32::EPSILON,
+            "a no-input render must not change opacity"
+        );
+        assert!(
+            bg.show_as_trace,
+            "a no-input render must not change trace visibility"
+        );
     }
 
     /// Layering regression guard for the trace-invisible-under-an-opaque-background bug: the trace
@@ -1463,12 +1771,25 @@ mod tests {
         let ctx = headless_ctx();
         let pixels = image::RgbaImage::new(4, 3);
         let color_image = egui::ColorImage::from_rgba_unmultiplied([4, 3], pixels.as_raw());
-        let texture = ctx.load_texture("trace_layering_test", color_image, egui::TextureOptions::LINEAR);
+        let texture = ctx.load_texture(
+            "trace_layering_test",
+            color_image,
+            egui::TextureOptions::LINEAR,
+        );
         let tex_id = texture.id();
-        app.image_bg = Some(crate::image_bg::ImageBackground::new(pixels, Some(texture), None));
-        assert!(app.image_bg.as_ref().unwrap().show_as_trace, "must exercise the visible-trace path");
+        app.image_bg = Some(crate::image_bg::ImageBackground::new(
+            pixels,
+            Some(texture),
+            None,
+        ));
+        assert!(
+            app.image_bg.as_ref().unwrap().show_as_trace,
+            "must exercise the visible-trace path"
+        );
 
-        let output = ctx.run_ui(raw_input_with_screen(900.0, 700.0, false), |ui| show(ui, &mut app, false));
+        let output = ctx.run_ui(raw_input_with_screen(900.0, 700.0, false), |ui| {
+            show(ui, &mut app, false)
+        });
 
         let doc_bg = color32(app.doc.background);
         let bg_index = output
@@ -1480,7 +1801,9 @@ mod tests {
             .shapes
             .iter()
             .position(|cs| matches!(&cs.shape, Shape::Mesh(m) if m.texture_id == tex_id))
-            .expect("the trace image must be painted: a texture is loaded and show_as_trace is set");
+            .expect(
+                "the trace image must be painted: a texture is loaded and show_as_trace is set",
+            );
 
         assert!(
             trace_index > bg_index,
@@ -1495,20 +1818,36 @@ mod tests {
     fn alt_held_press_samples_color_regardless_of_the_bound_kind() {
         let mut app = GasciiApp::headless();
         app.bind(Binding::L, ToolKind::Pencil);
-        app.doc.set_cell(app.active_layer, 2, 2, gascii_core::Cell {
-            ch: 'x',
-            fg: gascii_core::Rgba(10, 20, 30, 255),
-            bg: gascii_core::Rgba(40, 50, 60, 255),
-        });
-        let (expected_fg, expected_bg) = gascii_core::eyedrop(&app.doc.cell(app.active_layer, 2, 2).copied().unwrap());
+        app.doc.set_cell(
+            app.active_layer,
+            2,
+            2,
+            gascii_core::Cell {
+                ch: 'x',
+                fg: gascii_core::Rgba(10, 20, 30, 255),
+                bg: gascii_core::Rgba(40, 50, 60, 255),
+            },
+        );
+        let (expected_fg, expected_bg) =
+            gascii_core::eyedrop(&app.doc.cell(app.active_layer, 2, 2).copied().unwrap());
 
         let started = begin_gesture(&mut app, Binding::L, 2, 2, true, false);
 
-        assert!(!started, "an Alt-sample press is a one-shot pick, not a gesture");
+        assert!(
+            !started,
+            "an Alt-sample press is a one-shot pick, not a gesture"
+        );
         assert_eq!(app.active_fg, expected_fg);
         assert_eq!(app.active_bg, expected_bg);
-        assert_eq!(app.slot(Binding::L).kind, ToolKind::Pencil, "alt_sample must never rebind the slot's own kind");
-        assert_eq!(app.stroke_owner, None, "a one-shot pick must not claim stroke ownership");
+        assert_eq!(
+            app.slot(Binding::L).kind,
+            ToolKind::Pencil,
+            "alt_sample must never rebind the slot's own kind"
+        );
+        assert_eq!(
+            app.stroke_owner, None,
+            "a one-shot pick must not claim stroke ownership"
+        );
     }
 
     /// A press against a hidden active layer must refuse to start a stroke at all: no tool session,
@@ -1518,18 +1857,37 @@ mod tests {
     fn begin_gesture_on_a_hidden_active_layer_starts_no_session_and_sets_last_error() {
         let mut app = GasciiApp::headless();
         app.bind(Binding::L, ToolKind::Pencil);
-        let hide = gascii_core::set_layer_visibility(&app.doc, 0, false).unwrap().unwrap();
+        let hide = gascii_core::set_layer_visibility(&app.doc, 0, false)
+            .unwrap()
+            .unwrap();
         app.apply_edit(hide, None);
-        assert!(!app.doc.layer_visible(app.active_layer), "sanity: layer 0 is now hidden");
+        assert!(
+            !app.doc.layer_visible(app.active_layer),
+            "sanity: layer 0 is now hidden"
+        );
 
         let before = app.doc.cell(0, 2, 2).copied();
         let started = begin_gesture(&mut app, Binding::L, 2, 2, false, false);
 
-        assert!(!started, "a press on a hidden active layer must not start a gesture");
+        assert!(
+            !started,
+            "a press on a hidden active layer must not start a gesture"
+        );
         assert_eq!(app.stroke_owner, None, "no session may be started");
-        assert_eq!(app.doc.cell(0, 2, 2).copied(), before, "the document must be completely untouched");
-        assert!(app.last_error.is_some(), "a readable error must be surfaced");
-        assert!(app.last_error_text().unwrap().contains("hidden"), "the message must explain why: {:?}", app.last_error_text());
+        assert_eq!(
+            app.doc.cell(0, 2, 2).copied(),
+            before,
+            "the document must be completely untouched"
+        );
+        assert!(
+            app.last_error.is_some(),
+            "a readable error must be surfaced"
+        );
+        assert!(
+            app.last_error_text().unwrap().contains("hidden"),
+            "the message must explain why: {:?}",
+            app.last_error_text()
+        );
     }
 
     /// A plugin reporting `blocks_editing` (animation playback) must refuse a press at
@@ -1555,8 +1913,16 @@ mod tests {
 
         assert!(!started, "a press during playback must not start a gesture");
         assert_eq!(app.stroke_owner, None, "no session may be started");
-        assert_eq!(app.doc.cell(0, 2, 2).copied(), before, "the document must be completely untouched");
-        assert!(app.last_error_text().unwrap().contains("pause"), "the message must explain why: {:?}", app.last_error_text());
+        assert_eq!(
+            app.doc.cell(0, 2, 2).copied(),
+            before,
+            "the document must be completely untouched"
+        );
+        assert!(
+            app.last_error_text().unwrap().contains("pause"),
+            "the message must explain why: {:?}",
+            app.last_error_text()
+        );
     }
 
     /// The eyedropper's one-shot pick reads, never writes — it must still succeed against a hidden
@@ -1565,21 +1931,38 @@ mod tests {
     fn begin_gesture_alt_sample_against_a_hidden_active_layer_still_succeeds() {
         let mut app = GasciiApp::headless();
         app.bind(Binding::L, ToolKind::Pencil);
-        app.doc.set_cell(app.active_layer, 2, 2, gascii_core::Cell {
-            ch: 'x',
-            fg: gascii_core::Rgba(10, 20, 30, 255),
-            bg: gascii_core::Rgba(40, 50, 60, 255),
-        });
-        let (expected_fg, expected_bg) = gascii_core::eyedrop(&app.doc.cell(app.active_layer, 2, 2).copied().unwrap());
-        let hide = gascii_core::set_layer_visibility(&app.doc, 0, false).unwrap().unwrap();
+        app.doc.set_cell(
+            app.active_layer,
+            2,
+            2,
+            gascii_core::Cell {
+                ch: 'x',
+                fg: gascii_core::Rgba(10, 20, 30, 255),
+                bg: gascii_core::Rgba(40, 50, 60, 255),
+            },
+        );
+        let (expected_fg, expected_bg) =
+            gascii_core::eyedrop(&app.doc.cell(app.active_layer, 2, 2).copied().unwrap());
+        let hide = gascii_core::set_layer_visibility(&app.doc, 0, false)
+            .unwrap()
+            .unwrap();
         app.apply_edit(hide, None);
 
         let started = begin_gesture(&mut app, Binding::L, 2, 2, true, false);
 
-        assert!(!started, "an Alt-sample press is a one-shot pick, not a gesture");
-        assert_eq!(app.active_fg, expected_fg, "the pick must succeed even against a hidden layer");
+        assert!(
+            !started,
+            "an Alt-sample press is a one-shot pick, not a gesture"
+        );
+        assert_eq!(
+            app.active_fg, expected_fg,
+            "the pick must succeed even against a hidden layer"
+        );
         assert_eq!(app.active_bg, expected_bg);
-        assert!(app.last_error.is_none(), "a successful pick must not set an error");
+        assert!(
+            app.last_error.is_none(),
+            "a successful pick must not set an error"
+        );
     }
 
     /// Re-showing the layer (`SetLayerVisibility`) must immediately unblock the same press that was
@@ -1588,16 +1971,26 @@ mod tests {
     fn begin_gesture_succeeds_again_after_a_set_layer_visibility_edit_re_shows_the_layer() {
         let mut app = GasciiApp::headless();
         app.bind(Binding::L, ToolKind::Pencil);
-        let hide = gascii_core::set_layer_visibility(&app.doc, 0, false).unwrap().unwrap();
+        let hide = gascii_core::set_layer_visibility(&app.doc, 0, false)
+            .unwrap()
+            .unwrap();
         app.apply_edit(hide, None);
-        assert!(!begin_gesture(&mut app, Binding::L, 2, 2, false, false), "sanity: blocked while hidden");
+        assert!(
+            !begin_gesture(&mut app, Binding::L, 2, 2, false, false),
+            "sanity: blocked while hidden"
+        );
 
-        let show = gascii_core::set_layer_visibility(&app.doc, 0, true).unwrap().unwrap();
+        let show = gascii_core::set_layer_visibility(&app.doc, 0, true)
+            .unwrap()
+            .unwrap();
         app.apply_edit(show, None);
         app.last_error = None;
 
         let started = begin_gesture(&mut app, Binding::L, 2, 2, false, false);
-        assert!(started, "a press must succeed again once the active layer is shown");
+        assert!(
+            started,
+            "a press must succeed again once the active layer is shown"
+        );
         assert_eq!(app.stroke_owner, Some(Binding::L));
     }
 
@@ -1612,7 +2005,11 @@ mod tests {
         app.pending_fit = false;
         app.bind(Binding::R, ToolKind::Pencil);
         begin_gesture(&mut app, Binding::R, 0, 0, false, false);
-        assert_eq!(app.stroke_owner, Some(Binding::R), "sanity: R's stroke is active");
+        assert_eq!(
+            app.stroke_owner,
+            Some(Binding::R),
+            "sanity: R's stroke is active"
+        );
         let (fg_before, bg_before) = (app.active_fg, app.active_bg);
 
         let ctx = headless_ctx();
@@ -1637,9 +2034,19 @@ mod tests {
         });
         let _ = ctx.run_ui(raw, |ui| show(ui, &mut app, false));
 
-        assert_eq!(app.active_fg, fg_before, "an Alt press while another binding's stroke is active must not resample fg");
-        assert_eq!(app.active_bg, bg_before, "an Alt press while another binding's stroke is active must not resample bg");
-        assert_eq!(app.stroke_owner, Some(Binding::R), "R's in-progress stroke must be untouched");
+        assert_eq!(
+            app.active_fg, fg_before,
+            "an Alt press while another binding's stroke is active must not resample fg"
+        );
+        assert_eq!(
+            app.active_bg, bg_before,
+            "an Alt press while another binding's stroke is active must not resample bg"
+        );
+        assert_eq!(
+            app.stroke_owner,
+            Some(Binding::R),
+            "R's in-progress stroke must be untouched"
+        );
     }
 
     const ALL_TOOL_KINDS: [ToolKind; 9] = [
@@ -1675,22 +2082,33 @@ mod tests {
     /// A non-Line/Rectangle kind must be a passthrough even with Shift held — only Line and
     /// Rectangle support the constraint at all.
     #[test]
-    fn shift_constrain_is_a_passthrough_for_every_non_line_non_rectangle_kind_even_with_shift_held() {
+    fn shift_constrain_is_a_passthrough_for_every_non_line_non_rectangle_kind_even_with_shift_held()
+    {
         let anchor = (0, 0);
         let cur = (10, 3);
         for kind in ALL_TOOL_KINDS {
             if matches!(kind, ToolKind::Line | ToolKind::Rectangle) {
                 continue;
             }
-            assert_eq!(shift_constrain(kind, anchor, cur, true), cur, "{kind:?} must ignore shift entirely");
+            assert_eq!(
+                shift_constrain(kind, anchor, cur, true),
+                cur,
+                "{kind:?} must ignore shift entirely"
+            );
         }
     }
 
     #[test]
     fn shift_constrain_returns_cur_unchanged_when_cur_equals_anchor() {
         let anchor = (5, 5);
-        assert_eq!(shift_constrain(ToolKind::Line, anchor, anchor, true), anchor);
-        assert_eq!(shift_constrain(ToolKind::Rectangle, anchor, anchor, true), anchor);
+        assert_eq!(
+            shift_constrain(ToolKind::Line, anchor, anchor, true),
+            anchor
+        );
+        assert_eq!(
+            shift_constrain(ToolKind::Rectangle, anchor, anchor, true),
+            anchor
+        );
     }
 
     #[test]
@@ -1698,16 +2116,19 @@ mod tests {
         let anchor = (10, 10);
         // (cursor delta from anchor, expected snapped delta)
         let cases: [((i32, i32), (i32, i32)); 6] = [
-            ((10, 0), (10, 0)),    // already horizontal
-            ((0, 10), (0, 10)),    // already vertical
-            ((10, 10), (10, 10)),  // already diagonal (45°)
-            ((10, 3), (10, 0)),    // ~16.7°, within 22.5° of horizontal
-            ((3, 10), (0, 10)),    // ~16.7°, within 22.5° of vertical
-            ((10, 8), (10, 10)),   // ~38.7°, closer to the 45° diagonal than either axis
+            ((10, 0), (10, 0)),   // already horizontal
+            ((0, 10), (0, 10)),   // already vertical
+            ((10, 10), (10, 10)), // already diagonal (45°)
+            ((10, 3), (10, 0)),   // ~16.7°, within 22.5° of horizontal
+            ((3, 10), (0, 10)),   // ~16.7°, within 22.5° of vertical
+            ((10, 8), (10, 10)),  // ~38.7°, closer to the 45° diagonal than either axis
         ];
         for ((dx, dy), (edx, edy)) in cases {
             let cur = ((anchor.0 as i32 + dx) as u16, (anchor.1 as i32 + dy) as u16);
-            let expected = ((anchor.0 as i32 + edx) as u16, (anchor.1 as i32 + edy) as u16);
+            let expected = (
+                (anchor.0 as i32 + edx) as u16,
+                (anchor.1 as i32 + edy) as u16,
+            );
             assert_eq!(
                 shift_constrain(ToolKind::Line, anchor, cur, true),
                 expected,
@@ -1735,13 +2156,25 @@ mod tests {
     fn shift_constrain_clamps_rectangle_to_a_square_using_the_larger_axis() {
         let anchor = (5, 5);
         // dx=10, dy=3: the larger axis (x) wins, y stretches to match.
-        assert_eq!(shift_constrain(ToolKind::Rectangle, anchor, (15, 8), true), (15, 15));
+        assert_eq!(
+            shift_constrain(ToolKind::Rectangle, anchor, (15, 8), true),
+            (15, 15)
+        );
         // dx=3, dy=10: the larger axis (y) wins, x stretches to match.
-        assert_eq!(shift_constrain(ToolKind::Rectangle, anchor, (8, 15), true), (15, 15));
+        assert_eq!(
+            shift_constrain(ToolKind::Rectangle, anchor, (8, 15), true),
+            (15, 15)
+        );
         // Already square: unchanged.
-        assert_eq!(shift_constrain(ToolKind::Rectangle, anchor, (12, 12), true), (12, 12));
+        assert_eq!(
+            shift_constrain(ToolKind::Rectangle, anchor, (12, 12), true),
+            (12, 12)
+        );
         // Negative direction: signs preserved on both axes.
-        assert_eq!(shift_constrain(ToolKind::Rectangle, anchor, (0, 2), true), (0, 0));
+        assert_eq!(
+            shift_constrain(ToolKind::Rectangle, anchor, (0, 2), true),
+            (0, 0)
+        );
     }
 
     /// Shift toggled mid-drag (not held at press time) must re-snap on the very next frame, not
@@ -1808,12 +2241,20 @@ mod tests {
         );
 
         let tctx = tool_ctx(&app, Binding::L);
-        let resp = app.slots[Binding::L.ix()].tool.update(ToolEvent::Release, &tctx, &app.doc);
+        let resp = app.slots[Binding::L.ix()]
+            .tool
+            .update(ToolEvent::Release, &tctx, &app.doc);
         let ToolResponse::Commit(Some(gascii_core::Edit::Cells(cells))) = resp else {
             panic!("expected a committed Edit::Cells spanning the continued line");
         };
-        assert!(cells.iter().any(|c| c.x == 2 && c.y == 2), "the line must include its remembered start point");
-        assert!(cells.iter().any(|c| c.x == 8 && c.y == 2), "the line must reach the click point");
+        assert!(
+            cells.iter().any(|c| c.x == 2 && c.y == 2),
+            "the line must include its remembered start point"
+        );
+        assert!(
+            cells.iter().any(|c| c.x == 8 && c.y == 2),
+            "the line must reach the click point"
+        );
     }
 
     /// Without Shift held, the same setup must behave exactly like today: a fresh line starting at
@@ -1825,7 +2266,11 @@ mod tests {
         app.slots[Binding::L.ix()].last_line_point = Some((2, 2));
 
         begin_gesture(&mut app, Binding::L, 8, 2, false, false);
-        assert_eq!(app.stroke_press_cell, Some((8, 2)), "the anchor must be the click, not the remembered point");
+        assert_eq!(
+            app.stroke_press_cell,
+            Some((8, 2)),
+            "the anchor must be the click, not the remembered point"
+        );
     }
 
     /// `set_tool`'s rebind-away-from-Line reset (`app.rs`): a rebind to any other kind must clear
@@ -1840,7 +2285,8 @@ mod tests {
         app.bind(Binding::L, ToolKind::Line);
 
         assert_eq!(
-            app.slots[Binding::L.ix()].last_line_point, None,
+            app.slots[Binding::L.ix()].last_line_point,
+            None,
             "rebinding away from Line and back must not resurrect a stale continuation point"
         );
     }
@@ -1853,7 +2299,11 @@ mod tests {
         let mut app = GasciiApp::headless();
         app.bind(Binding::L, ToolKind::Pencil);
         app.bind(Binding::R, ToolKind::Eraser);
-        assert_eq!(app.keyboard_owner(), None, "sanity: nothing owns the keyboard yet");
+        assert_eq!(
+            app.keyboard_owner(),
+            None,
+            "sanity: nothing owns the keyboard yet"
+        );
 
         let ctx = headless_ctx();
         let mut raw = raw_input_with_screen(900.0, 700.0, false);
@@ -1868,7 +2318,11 @@ mod tests {
             ToolKind::Pencil,
             "a focused widget must suppress the paste, leaving L unrebound"
         );
-        assert_eq!(app.keyboard_owner(), None, "a focused widget must suppress the paste's keyboard claim");
+        assert_eq!(
+            app.keyboard_owner(),
+            None,
+            "a focused widget must suppress the paste's keyboard claim"
+        );
     }
 
     /// Regression guard: with no widget focused, `Event::Paste` still lands as a floating Selection
@@ -1884,7 +2338,15 @@ mod tests {
         raw.events.push(egui::Event::Paste("hi".to_string()));
         let _ = ctx.run_ui(raw, |ui| show(ui, &mut app, false));
 
-        assert_eq!(app.slot(Binding::L).kind, ToolKind::Selection, "an unfocused paste must rebind L to Selection");
-        assert_eq!(app.keyboard_owner(), Some(Binding::L), "an unfocused paste must claim the keyboard");
+        assert_eq!(
+            app.slot(Binding::L).kind,
+            ToolKind::Selection,
+            "an unfocused paste must rebind L to Selection"
+        );
+        assert_eq!(
+            app.keyboard_owner(),
+            Some(Binding::L),
+            "an unfocused paste must claim the keyboard"
+        );
     }
 }

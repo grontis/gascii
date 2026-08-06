@@ -8,7 +8,9 @@ pub struct Pencil {
 
 impl Default for Pencil {
     fn default() -> Self {
-        Pencil { stroke: FreehandStroke::new() }
+        Pencil {
+            stroke: FreehandStroke::new(),
+        }
     }
 }
 
@@ -20,7 +22,11 @@ impl Pencil {
 
 impl Tool for Pencil {
     fn update(&mut self, ev: ToolEvent, ctx: &ToolCtx, doc: &Document) -> ToolResponse {
-        let proposed = Cell { ch: ctx.glyph, fg: ctx.fg, bg: ctx.bg };
+        let proposed = Cell {
+            ch: ctx.glyph,
+            fg: ctx.fg,
+            bg: ctx.bg,
+        };
         match ev {
             ToolEvent::Press { x, y } => {
                 self.stroke.press(x, y, proposed, ctx, doc);
@@ -30,7 +36,9 @@ impl Tool for Pencil {
                 self.stroke.drag(x, y, proposed, ctx, doc);
                 ToolResponse::Active
             }
-            ToolEvent::Release => ToolResponse::Commit(self.stroke.finish(doc, ctx.frame, ctx.layer)),
+            ToolEvent::Release => {
+                ToolResponse::Commit(self.stroke.finish(doc, ctx.frame, ctx.layer))
+            }
             ToolEvent::Cancel => {
                 self.stroke.cancel();
                 ToolResponse::Idle
@@ -111,7 +119,11 @@ mod tests {
     #[test]
     fn painting_identical_existing_content_commits_none() {
         let mut doc = Document::new(20, 20);
-        let existing = Cell { ch: '#', fg: Rgba(1, 2, 3, 255), bg: Rgba(4, 5, 6, 255) };
+        let existing = Cell {
+            ch: '#',
+            fg: Rgba(1, 2, 3, 255),
+            bg: Rgba(4, 5, 6, 255),
+        };
         doc.set_cell(0, 2, 2, existing);
 
         let mut pencil = Pencil::new();
@@ -125,10 +137,17 @@ mod tests {
     #[test]
     fn glyph_only_mask_writes_glyph_and_text_color_but_keeps_bg() {
         let mut doc = Document::new(20, 20);
-        let existing = Cell { ch: 'x', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) };
+        let existing = Cell {
+            ch: 'x',
+            fg: Rgba(9, 9, 9, 255),
+            bg: Rgba(8, 8, 8, 255),
+        };
         doc.set_cell(0, 1, 1, existing);
 
-        let mask = PlaneMask { glyph: true, bg: false };
+        let mask = PlaneMask {
+            glyph: true,
+            bg: false,
+        };
         let mut pencil = Pencil::new();
         let ctx = ctx(mask);
         pencil.update(ToolEvent::Press { x: 1, y: 1 }, &ctx, &doc);
@@ -139,14 +158,20 @@ mod tests {
         };
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0].after.ch, '#');
-        assert_eq!(cells[0].after.fg, ctx.fg, "text color follows the glyph plane");
+        assert_eq!(
+            cells[0].after.fg, ctx.fg,
+            "text color follows the glyph plane"
+        );
         assert_eq!(cells[0].after.bg, existing.bg, "bg masked off");
     }
 
     #[test]
     fn pending_reflects_masked_result_mid_stroke() {
         let doc = Document::new(20, 20);
-        let mask = PlaneMask { glyph: true, bg: false };
+        let mask = PlaneMask {
+            glyph: true,
+            bg: false,
+        };
         let mut pencil = Pencil::new();
         let ctx = ctx(mask);
         pencil.update(ToolEvent::Press { x: 4, y: 4 }, &ctx, &doc);
@@ -212,7 +237,11 @@ mod tests {
         let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
             panic!("expected a committed edit");
         };
-        assert_eq!(cells.len(), 18, "size-3 square press covers the aspect-corrected 6x3 box");
+        assert_eq!(
+            cells.len(),
+            18,
+            "size-3 square press covers the aspect-corrected 6x3 box"
+        );
     }
 
     #[test]
@@ -228,7 +257,11 @@ mod tests {
         let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
             panic!("expected a committed edit");
         };
-        assert_eq!(cells.len(), 8, "corner press keeps only the in-bounds quadrant");
+        assert_eq!(
+            cells.len(),
+            8,
+            "corner press keeps only the in-bounds quadrant"
+        );
     }
 
     #[test]
@@ -251,7 +284,8 @@ mod tests {
     fn a_stroke_tools_committed_cell_edit_carries_the_ctx_frame_it_was_drawn_against() {
         let mut doc = Document::new(10, 10);
         let mut history = crate::edit::History::new();
-        let edit = crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(10, 10)).unwrap();
+        let edit =
+            crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(10, 10)).unwrap();
         history.apply(&mut doc, edit);
 
         let mut tctx = ctx(PlaneMask::ALL);
@@ -263,6 +297,9 @@ mod tests {
         let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
             panic!("expected a committed edit");
         };
-        assert!(cells.iter().all(|c| c.frame == 1), "every CellEdit must carry the frame it was drawn against");
+        assert!(
+            cells.iter().all(|c| c.frame == 1),
+            "every CellEdit must carry the frame it was drawn against"
+        );
     }
 }

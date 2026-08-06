@@ -4,10 +4,10 @@
 //! round trip is byte-identical to the in-memory state that produced it.
 
 use gascii_core::{
-    add_frame, clear_document, composite_frame, duplicate_frame, load_str, reorder_frame, resize_document,
-    save_string, set_frame_duration, AxisAnchor, BrushShape, Cell, CellEdit, DensityMode, Document, Edit, Fixed,
-    Frame, FrameOpError, History, Layer, Pencil, PlaneMask, ResizeAnchor, ResizeError, Rgba, Tool, ToolCtx,
-    ToolEvent, ToolResponse,
+    add_frame, clear_document, composite_frame, duplicate_frame, load_str, reorder_frame,
+    resize_document, save_string, set_frame_duration, AxisAnchor, BrushShape, Cell, CellEdit,
+    DensityMode, Document, Edit, Fixed, Frame, FrameOpError, History, Layer, Pencil, PlaneMask,
+    ResizeAnchor, ResizeError, Rgba, Tool, ToolCtx, ToolEvent, ToolResponse,
 };
 
 fn cell(ch: char, fg: Rgba, bg: Rgba) -> Cell {
@@ -15,7 +15,10 @@ fn cell(ch: char, fg: Rgba, bg: Rgba) -> Cell {
 }
 
 fn start() -> ResizeAnchor {
-    ResizeAnchor { h: AxisAnchor::Start, v: AxisAnchor::Start }
+    ResizeAnchor {
+        h: AxisAnchor::Start,
+        v: AxisAnchor::Start,
+    }
 }
 
 /// A plain, full-mask `ToolCtx` targeting `frame` and stamping `glyph` in white-on-transparent —
@@ -62,7 +65,9 @@ fn add_draw_resize_save_load_and_composite_round_trip_both_frames_byte_exact() {
     assert!(doc.set_active_frame(0));
 
     // Resize the whole document (extent is document-wide — both frames grow together).
-    let resize_edit = resize_document(&doc, 6, 6, start()).unwrap().expect("a real extent change yields an edit");
+    let resize_edit = resize_document(&doc, 6, 6, start())
+        .unwrap()
+        .expect("a real extent change yields an edit");
     assert!(matches!(resize_edit, Edit::Resize { .. }));
     history.apply(&mut doc, resize_edit);
     assert_eq!(doc.width, 6);
@@ -73,16 +78,25 @@ fn add_draw_resize_save_load_and_composite_round_trip_both_frames_byte_exact() {
     // Save (must be v2 — frame_count() == 2), load back, and confirm a byte-exact Document.
     let json = save_string(&doc);
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert!(value.get("frames").is_some(), "a 2-frame document must save through the v2 envelope");
+    assert!(
+        value.get("frames").is_some(),
+        "a 2-frame document must save through the v2 envelope"
+    );
 
     let loaded = load_str(&json).unwrap();
-    assert_eq!(loaded, before_round_trip, "the round trip must be byte-exact");
+    assert_eq!(
+        loaded, before_round_trip,
+        "the round trip must be byte-exact"
+    );
     assert_eq!(loaded.frame_count(), 2);
 
     // Composite both frames explicitly and confirm each still carries its own marker post-round-trip.
     let composite0 = composite_frame(&loaded, 0).unwrap();
     let composite1 = composite_frame(&loaded, 1).unwrap();
-    assert_eq!(composite0[0][0].ch, 'a', "frame 0's marker survives resize + save/load");
+    assert_eq!(
+        composite0[0][0].ch, 'a',
+        "frame 0's marker survives resize + save/load"
+    );
     assert_eq!(composite1[3][3].ch, 'b', "frame 1's marker survives resize + save/load, at its original (unresized-shifted) coordinates");
     // Newly padded region (from the top-left-anchored grow) stays Blank in both frames.
     assert_eq!(composite0[5][5], Cell::BLANK);
@@ -120,16 +134,32 @@ fn drawing_via_pencil_on_two_frames_then_reordering_then_undoing_the_full_stack_
     history.apply(&mut doc, e3);
     forward.push(doc.clone()); // depth 3: 'b' on frame 1
 
-    assert_eq!(doc.active_frame(), 1, "sanity: the cursor sits on the frame AddFrame inserted");
+    assert_eq!(
+        doc.active_frame(),
+        1,
+        "sanity: the cursor sits on the frame AddFrame inserted"
+    );
     let e4 = reorder_frame(&doc, 0, 1).unwrap().unwrap();
     history.apply(&mut doc, e4);
     forward.push(doc.clone()); // depth 4: frames swapped
 
     // The reorder both moved content and shifted the active-frame cursor along with its frame —
     // a genuine tracked side effect, not a no-op.
-    assert_eq!(doc.cell_at(1, 0, 0, 0).unwrap().ch, 'a', "'a' followed the reorder from index 0 to index 1");
-    assert_eq!(doc.cell_at(0, 0, 3, 3).unwrap().ch, 'b', "'b' followed the reorder from index 1 to index 0");
-    assert_eq!(doc.active_frame(), 0, "the cursor's frame slid from index 1 to 0 and the cursor followed it");
+    assert_eq!(
+        doc.cell_at(1, 0, 0, 0).unwrap().ch,
+        'a',
+        "'a' followed the reorder from index 0 to index 1"
+    );
+    assert_eq!(
+        doc.cell_at(0, 0, 3, 3).unwrap().ch,
+        'b',
+        "'b' followed the reorder from index 1 to index 0"
+    );
+    assert_eq!(
+        doc.active_frame(),
+        0,
+        "the cursor's frame slid from index 1 to 0 and the cursor followed it"
+    );
 
     assert_eq!(forward.len(), 5);
 
@@ -137,7 +167,10 @@ fn drawing_via_pencil_on_two_frames_then_reordering_then_undoing_the_full_stack_
     // content, and the active_frame cursor) against the matching forward snapshot at each depth.
     for depth in (0..forward.len() - 1).rev() {
         assert!(history.undo(&mut doc), "undo must succeed at depth {depth}");
-        assert_eq!(doc, forward[depth], "undo landing at depth {depth} must match the forward snapshot exactly");
+        assert_eq!(
+            doc, forward[depth],
+            "undo landing at depth {depth} must match the forward snapshot exactly"
+        );
     }
     assert!(!history.can_undo());
     assert_eq!(doc, Document::new(4, 4));
@@ -145,7 +178,10 @@ fn drawing_via_pencil_on_two_frames_then_reordering_then_undoing_the_full_stack_
     // Redo forward, comparing against the same snapshots in the opposite direction.
     for (depth, snapshot) in forward.iter().enumerate().skip(1) {
         assert!(history.redo(&mut doc), "redo must succeed at depth {depth}");
-        assert_eq!(&doc, snapshot, "redo landing at depth {depth} must match the forward snapshot exactly");
+        assert_eq!(
+            &doc, snapshot,
+            "redo landing at depth {depth} must match the forward snapshot exactly"
+        );
     }
     assert!(!history.can_redo());
 }
@@ -159,7 +195,8 @@ fn drawing_via_pencil_on_two_frames_then_reordering_then_undoing_the_full_stack_
 /// time regardless of `resync`, so only a masked-off plane can actually expose this gap (see
 /// `FreehandStroke::resync`'s own doc comment on why re-pinning alone is not enough).
 #[test]
-fn a_frame_reorder_landing_mid_stroke_must_be_resynced_or_a_masked_off_plane_commits_the_wrong_frames_content() {
+fn a_frame_reorder_landing_mid_stroke_must_be_resynced_or_a_masked_off_plane_commits_the_wrong_frames_content(
+) {
     let color_p = Rgba(10, 10, 10, 255);
     let color_q = Rgba(50, 50, 50, 255);
 
@@ -173,15 +210,44 @@ fn a_frame_reorder_landing_mid_stroke_must_be_resynced_or_a_masked_off_plane_com
     // is under test, so it's written directly rather than through a tool). `set_cell_at` is
     // `pub(crate)`-only, so this integration crate switches the active frame instead, mirroring
     // every other integration test's convention.
-    doc.set_cell(0, 2, 2, Cell { ch: 'o', fg: Rgba::WHITE, bg: color_p }); // frame 0
+    doc.set_cell(
+        0,
+        2,
+        2,
+        Cell {
+            ch: 'o',
+            fg: Rgba::WHITE,
+            bg: color_p,
+        },
+    ); // frame 0
     assert!(doc.set_active_frame(1));
-    doc.set_cell(0, 2, 2, Cell { ch: 'o', fg: Rgba::WHITE, bg: color_q });
+    doc.set_cell(
+        0,
+        2,
+        2,
+        Cell {
+            ch: 'o',
+            fg: Rgba::WHITE,
+            bg: color_q,
+        },
+    );
     assert!(doc.set_active_frame(0));
 
     // A stroke targeting frame index 1, bg masked off: it must preserve whatever bg is actually
     // there, never overwrite it.
-    let mask = PlaneMask { glyph: true, bg: false };
-    let stroke_ctx = ToolCtx { frame: 1, layer: 0, glyph: 'X', fg: Rgba::WHITE, bg: Rgba(200, 200, 200, 255), mask, ..tctx(1, 'X') };
+    let mask = PlaneMask {
+        glyph: true,
+        bg: false,
+    };
+    let stroke_ctx = ToolCtx {
+        frame: 1,
+        layer: 0,
+        glyph: 'X',
+        fg: Rgba::WHITE,
+        bg: Rgba(200, 200, 200, 255),
+        mask,
+        ..tctx(1, 'X')
+    };
     let mut stroke = Pencil::new();
     stroke.update(ToolEvent::Press { x: 2, y: 2 }, &stroke_ctx, &doc);
     // Internally pins before = frame index 1's pre-reorder cell (bg = color_q).
@@ -200,13 +266,18 @@ fn a_frame_reorder_landing_mid_stroke_must_be_resynced_or_a_masked_off_plane_com
     // other resync call site's contract (`Tool::resync`'s own doc comment).
     stroke.resync(&doc, 1, 0);
 
-    let ToolResponse::Commit(Some(finish_edit)) = stroke.update(ToolEvent::Release, &stroke_ctx, &doc) else {
+    let ToolResponse::Commit(Some(finish_edit)) =
+        stroke.update(ToolEvent::Release, &stroke_ctx, &doc)
+    else {
         panic!("expected a committed edit");
     };
     history.apply(&mut doc, finish_edit);
 
     let committed = doc.cell_at(1, 0, 2, 2).unwrap();
-    assert_eq!(committed.ch, 'X', "the unmasked glyph plane must carry the stroke's own write");
+    assert_eq!(
+        committed.ch, 'X',
+        "the unmasked glyph plane must carry the stroke's own write"
+    );
     assert_eq!(
         committed.bg, color_p,
         "the masked-off bg plane must preserve frame 1's post-reorder content (color_p), not the \
@@ -220,7 +291,8 @@ fn a_frame_reorder_landing_mid_stroke_must_be_resynced_or_a_masked_off_plane_com
 /// argument `drawing_via_pencil_on_two_frames_then_reordering_...` makes for cell content, applied
 /// here to `duration_override` and a duplicated frame instead.
 #[test]
-fn duplicate_frame_carries_duration_override_and_a_set_frame_duration_survives_an_interleaved_reorder_and_undo() {
+fn duplicate_frame_carries_duration_override_and_a_set_frame_duration_survives_an_interleaved_reorder_and_undo(
+) {
     let mut doc = Document::new(3, 3);
     let mut history = History::new();
     let mut forward = vec![doc.clone()]; // depth 0
@@ -242,14 +314,22 @@ fn duplicate_frame_carries_duration_override_and_a_set_frame_duration_survives_a
     history.apply(&mut doc, e3);
     forward.push(doc.clone()); // depth 3
     assert_eq!(doc.frame_count(), 3);
-    assert_eq!(doc.frame(2).unwrap().duration_override, Some(50), "duplicate_frame must carry duration_override into the clone");
+    assert_eq!(
+        doc.frame(2).unwrap().duration_override,
+        Some(50),
+        "duplicate_frame must carry duration_override into the clone"
+    );
 
     // Reorder: move the duplicate (index 2) to the front. Frame indices addressing everything else
     // shift underneath whatever a *later* SetFrameDuration targets.
     let e4 = reorder_frame(&doc, 2, 0).unwrap().unwrap();
     history.apply(&mut doc, e4);
     forward.push(doc.clone()); // depth 4
-    assert_eq!(doc.frame(0).unwrap().duration_override, Some(50), "the duplicate's override followed it to index 0");
+    assert_eq!(
+        doc.frame(0).unwrap().duration_override,
+        Some(50),
+        "the duplicate's override followed it to index 0"
+    );
 
     // A SetFrameDuration on the now-relocated duplicate, addressed by its *post-reorder* index —
     // exactly the positional-addressing argument `edit.rs`'s module doc makes, now exercised with
@@ -264,7 +344,10 @@ fn duplicate_frame_carries_duration_override_and_a_set_frame_duration_survives_a
     // Undo the full stack back to empty, comparing the entire Document at each depth.
     for depth in (0..forward.len() - 1).rev() {
         assert!(history.undo(&mut doc), "undo must succeed at depth {depth}");
-        assert_eq!(doc, forward[depth], "undo landing at depth {depth} must match the forward snapshot exactly");
+        assert_eq!(
+            doc, forward[depth],
+            "undo landing at depth {depth} must match the forward snapshot exactly"
+        );
     }
     assert!(!history.can_undo());
     assert_eq!(doc, Document::new(3, 3));
@@ -272,7 +355,10 @@ fn duplicate_frame_carries_duration_override_and_a_set_frame_duration_survives_a
     // Redo forward, comparing against the same snapshots in the opposite direction.
     for (depth, snapshot) in forward.iter().enumerate().skip(1) {
         assert!(history.redo(&mut doc), "redo must succeed at depth {depth}");
-        assert_eq!(&doc, snapshot, "redo landing at depth {depth} must match the forward snapshot exactly");
+        assert_eq!(
+            &doc, snapshot,
+            "redo landing at depth {depth} must match the forward snapshot exactly"
+        );
     }
     assert!(!history.can_redo());
 }
@@ -302,7 +388,12 @@ fn a_three_frame_document_with_distinct_content_durations_and_a_custom_backgroun
     let e2 = add_frame(&doc, 2, Frame::blank(5, 4)).unwrap();
     history.apply(&mut doc, e2);
     assert!(doc.set_active_frame(2));
-    doc.set_cell(0, 2, 2, cell('c', Rgba(7, 8, 9, 255), Rgba(10, 11, 12, 255)));
+    doc.set_cell(
+        0,
+        2,
+        2,
+        cell('c', Rgba(7, 8, 9, 255), Rgba(10, 11, 12, 255)),
+    );
     assert!(doc.set_active_frame(0));
 
     let d1 = set_frame_duration(&doc, 1, Some(30)).unwrap().unwrap();
@@ -319,11 +410,18 @@ fn a_three_frame_document_with_distinct_content_durations_and_a_custom_backgroun
     assert_eq!(value["frames"].as_array().unwrap().len(), 3);
 
     let loaded = load_str(&json).unwrap();
-    assert_eq!(loaded, before_round_trip, "the full 3-frame document must round-trip byte-exact");
+    assert_eq!(
+        loaded, before_round_trip,
+        "the full 3-frame document must round-trip byte-exact"
+    );
     assert_eq!(loaded.background, Rgba(11, 22, 33, 255));
     assert_eq!(loaded.frame_duration_ms, 80);
     assert!(!loaded.loop_playback);
-    assert_eq!(loaded.resolved_frame_duration_ms(0), Some(80), "frame 0 has no override, falls back to the default");
+    assert_eq!(
+        loaded.resolved_frame_duration_ms(0),
+        Some(80),
+        "frame 0 has no override, falls back to the default"
+    );
     assert_eq!(loaded.resolved_frame_duration_ms(1), Some(30));
     assert_eq!(loaded.resolved_frame_duration_ms(2), Some(500));
     assert_eq!(loaded.cell_at(0, 0, 0, 0).unwrap().ch, 'a');
@@ -337,13 +435,19 @@ fn a_three_frame_document_with_distinct_content_durations_and_a_custom_backgroun
 /// into a single-frame save would fail here even if it slipped past a looser "no frames key"
 /// check.
 #[test]
-fn a_single_frame_document_saves_as_a_literal_version_1_envelope_with_exactly_the_pre_frames_key_set() {
+fn a_single_frame_document_saves_as_a_literal_version_1_envelope_with_exactly_the_pre_frames_key_set(
+) {
     let mut doc = Document::new(3, 3);
     doc.set_cell(0, 1, 1, cell('m', Rgba::WHITE, Rgba(1, 2, 3, 255)));
     let json = save_string(&doc);
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-    let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
     keys.sort();
     assert_eq!(
         keys,
@@ -351,7 +455,10 @@ fn a_single_frame_document_saves_as_a_literal_version_1_envelope_with_exactly_th
         "a single-frame save must be exactly the pre-frames v1 key set plus the additive layer_meta \
          field — no v2-only field leaks in"
     );
-    assert_eq!(value["version"], 1, "a single-frame document must be tagged version 1, not CURRENT_VERSION (2)");
+    assert_eq!(
+        value["version"], 1,
+        "a single-frame document must be tagged version 1, not CURRENT_VERSION (2)"
+    );
 }
 
 /// A literal, hand-authored v1 JSON string — exactly the shape a pre-frames build would have
@@ -360,7 +467,8 @@ fn a_single_frame_document_saves_as_a_literal_version_1_envelope_with_exactly_th
 /// `a_v1_file_with_no_frames_field_loads_as_a_single_frame_document` (which only asserts
 /// `frame_count() == 1`): this asserts the actual decoded content and the default metadata too.
 #[test]
-fn a_hand_authored_pre_frames_v1_fixture_loads_with_byte_identical_cells_and_default_frame_metadata() {
+fn a_hand_authored_pre_frames_v1_fixture_loads_with_byte_identical_cells_and_default_frame_metadata(
+) {
     let json = r##"{
         "version": 1,
         "width": 2,
@@ -385,7 +493,10 @@ fn a_hand_authored_pre_frames_v1_fixture_loads_with_byte_identical_cells_and_def
         Document::DEFAULT_FRAME_DURATION_MS,
         "no frame_duration_ms in the file — must fall back to the documented default"
     );
-    assert!(doc.loop_playback, "no loop_playback in the file — must fall back to the documented default (true)");
+    assert!(
+        doc.loop_playback,
+        "no loop_playback in the file — must fall back to the documented default (true)"
+    );
 }
 
 /// Per the plan's documented D-format contract (`gascii-core/src/model.rs`'s `frame_duration_ms`
@@ -403,8 +514,14 @@ fn a_single_frame_documents_customized_playback_metadata_does_not_survive_a_save
 
     let json = save_string(&doc);
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert!(value.get("frame_duration_ms").is_none(), "a v1-shaped save must not carry frame_duration_ms at all");
-    assert!(value.get("loop_playback").is_none(), "a v1-shaped save must not carry loop_playback at all");
+    assert!(
+        value.get("frame_duration_ms").is_none(),
+        "a v1-shaped save must not carry frame_duration_ms at all"
+    );
+    assert!(
+        value.get("loop_playback").is_none(),
+        "a v1-shaped save must not carry loop_playback at all"
+    );
 
     let loaded = load_str(&json).unwrap();
     assert_eq!(
@@ -412,7 +529,10 @@ fn a_single_frame_documents_customized_playback_metadata_does_not_survive_a_save
         Document::DEFAULT_FRAME_DURATION_MS,
         "the customization does not survive — a v1 load always falls back to the documented default"
     );
-    assert!(loaded.loop_playback, "loop_playback likewise falls back to its documented default (true)");
+    assert!(
+        loaded.loop_playback,
+        "loop_playback likewise falls back to its documented default (true)"
+    );
 }
 
 // --- resize/clear composed with frames and undo ---
@@ -449,13 +569,28 @@ fn resizing_a_three_frame_document_then_undoing_restores_every_frames_cropped_co
     let resize_edit = resize_document(&doc, 2, 2, start()).unwrap().unwrap();
     history.apply(&mut doc, resize_edit);
     assert_eq!((doc.width, doc.height), (2, 2));
-    assert_eq!(doc.cell_at(0, 0, 0, 0).unwrap().ch, 'a', "frame 0's top-left survives the crop");
-    assert_eq!(doc.cell_at(1, 0, 0, 0), Some(&Cell::BLANK), "frame 1's only content ('e') was cropped away");
-    assert_eq!(doc.cell_at(2, 0, 0, 0), Some(&Cell::BLANK), "frame 2's only content ('f') was cropped away");
+    assert_eq!(
+        doc.cell_at(0, 0, 0, 0).unwrap().ch,
+        'a',
+        "frame 0's top-left survives the crop"
+    );
+    assert_eq!(
+        doc.cell_at(1, 0, 0, 0),
+        Some(&Cell::BLANK),
+        "frame 1's only content ('e') was cropped away"
+    );
+    assert_eq!(
+        doc.cell_at(2, 0, 0, 0),
+        Some(&Cell::BLANK),
+        "frame 2's only content ('f') was cropped away"
+    );
 
     // Undo restores every frame's cropped-away content exactly, not just the active frame's.
     assert!(history.undo(&mut doc));
-    assert_eq!(doc, before_resize, "undo must restore all three frames' cropped content byte-exact");
+    assert_eq!(
+        doc, before_resize,
+        "undo must restore all three frames' cropped content byte-exact"
+    );
     assert_eq!(doc.cell_at(1, 0, 4, 4).unwrap().ch, 'e');
     assert_eq!(doc.cell_at(2, 0, 4, 4).unwrap().ch, 'f');
 
@@ -485,8 +620,16 @@ fn clearing_the_active_frame_leaves_other_frames_intact_through_a_save_load_roun
 
     let clear_edit = clear_document(&doc).unwrap();
     history.apply(&mut doc, clear_edit);
-    assert_eq!(doc.cell(0, 0, 0), Some(&Cell::BLANK), "the active frame (0) must be cleared");
-    assert_eq!(doc.cell_at(1, 0, 1, 1).unwrap().ch, 'y', "frame 1 must survive untouched");
+    assert_eq!(
+        doc.cell(0, 0, 0),
+        Some(&Cell::BLANK),
+        "the active frame (0) must be cleared"
+    );
+    assert_eq!(
+        doc.cell_at(1, 0, 1, 1).unwrap().ch,
+        'y',
+        "frame 1 must survive untouched"
+    );
 
     let loaded = load_str(&save_string(&doc)).unwrap();
     assert_eq!(loaded.cell_at(0, 0, 0, 0), Some(&Cell::BLANK));
@@ -501,7 +644,8 @@ fn clearing_the_active_frame_leaves_other_frames_intact_through_a_save_load_roun
 /// confirms the document is left completely unmodified and still fully usable (an ordinary cell
 /// edit and its undo still work), not just that the call returned `Err`.
 #[test]
-fn add_frame_rejection_after_legitimately_building_up_to_max_frames_leaves_the_document_and_history_fully_usable() {
+fn add_frame_rejection_after_legitimately_building_up_to_max_frames_leaves_the_document_and_history_fully_usable(
+) {
     let mut doc = Document::new(2, 2);
     let mut history = History::new();
     for i in 0..Document::MAX_FRAMES - 1 {
@@ -513,14 +657,24 @@ fn add_frame_rejection_after_legitimately_building_up_to_max_frames_leaves_the_d
 
     let result = add_frame(&doc, 0, Frame::blank(2, 2));
     assert!(matches!(result, Err(FrameOpError::TooManyFrames { .. })));
-    assert_eq!(doc, before_rejection, "a rejected add_frame call must leave the document completely unmodified");
+    assert_eq!(
+        doc, before_rejection,
+        "a rejected add_frame call must leave the document completely unmodified"
+    );
 
     // Still fully usable afterward: an ordinary cell edit and its undo work cleanly. Addressed
     // against frame 0 explicitly (`cell_at`, not the implicit `cell`) — the 254 preceding inserts
     // at ever-lower indices dragged the active-frame cursor up to the last frame along with them
     // (each insert lands at/before the then-active index), so `doc.cell(...)`'s implicit
     // addressing would read frame 254, not frame 0.
-    let cell_edit = Edit::Cells(vec![CellEdit { frame: 0, layer: 0, x: 0, y: 0, before: Cell::BLANK, after: cell('z', Rgba::WHITE, Rgba::TRANSPARENT) }]);
+    let cell_edit = Edit::Cells(vec![CellEdit {
+        frame: 0,
+        layer: 0,
+        x: 0,
+        y: 0,
+        before: Cell::BLANK,
+        after: cell('z', Rgba::WHITE, Rgba::TRANSPARENT),
+    }]);
     history.apply(&mut doc, cell_edit);
     assert_eq!(doc.cell_at(0, 0, 0, 0).unwrap().ch, 'z');
     assert!(history.undo(&mut doc));
@@ -534,20 +688,39 @@ fn add_frame_rejection_after_legitimately_building_up_to_max_frames_leaves_the_d
 /// proving the two independently-reviewed seams compose correctly rather than one silently
 /// trusting the other.
 #[test]
-fn frames_built_up_through_legitimate_add_frame_calls_still_trip_resize_documents_joint_budget_check() {
+fn frames_built_up_through_legitimate_add_frame_calls_still_trip_resize_documents_joint_budget_check(
+) {
     let mut doc = Document::new(2, 2);
     let mut history = History::new();
     for i in 0..5 {
-        let frame = Frame { layers: (0..Document::MAX_LAYERS).map(|_| Layer::blank(2, 2)).collect(), duration_override: None };
+        let frame = Frame {
+            layers: (0..Document::MAX_LAYERS)
+                .map(|_| Layer::blank(2, 2))
+                .collect(),
+            duration_override: None,
+        };
         let edit = add_frame(&doc, i, frame).unwrap();
         history.apply(&mut doc, edit);
     }
-    assert_eq!(doc.frame_count(), 6, "1 original + 5 legitimately added, each at the per-frame MAX_LAYERS cap");
+    assert_eq!(
+        doc.frame_count(),
+        6,
+        "1 original + 5 legitimately added, each at the per-frame MAX_LAYERS cap"
+    );
     let before_resize_attempt = doc.clone();
 
     let started = std::time::Instant::now();
     let result = resize_document(&doc, Document::MAX_WIDTH, Document::MAX_HEIGHT, start());
-    assert!(started.elapsed() < std::time::Duration::from_millis(200), "must reject before allocating, not after");
-    assert!(matches!(result, Err(ResizeError::TotalCellBudgetExceeded { .. })));
-    assert_eq!(doc, before_resize_attempt, "a rejected resize must leave the document completely unmodified");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(200),
+        "must reject before allocating, not after"
+    );
+    assert!(matches!(
+        result,
+        Err(ResizeError::TotalCellBudgetExceeded { .. })
+    ));
+    assert_eq!(
+        doc, before_resize_attempt,
+        "a rejected resize must leave the document completely unmodified"
+    );
 }

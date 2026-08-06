@@ -8,7 +8,9 @@ use std::time::Instant;
 
 use std::collections::HashSet;
 
-use super::{footprint, line_cells, FreehandStroke, PendingCell, Tool, ToolCtx, ToolEvent, ToolResponse};
+use super::{
+    footprint, line_cells, FreehandStroke, PendingCell, Tool, ToolCtx, ToolEvent, ToolResponse,
+};
 use crate::brush::{intensity_to_index, DensityMode, IntensitySource, StrokeSample};
 use crate::model::{Cell, Document};
 
@@ -48,7 +50,10 @@ impl DensityBrush {
     /// one-step-per-pass feel at every size. A cell the brush leaves and re-enters counts as a
     /// genuine revisit and advances again, matching the size-1 backtracking behavior.
     fn stamp_cell(&mut self, x: u16, y: u16, ctx: &ToolCtx, doc: &Document) {
-        let timing = self.started.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0);
+        let timing = self
+            .started
+            .map(|t| t.elapsed().as_secs_f32())
+            .unwrap_or(0.0);
         let mut fp = std::mem::take(&mut self.fp);
         footprint((x, y), ctx.size, ctx.shape, &mut fp);
         for &(fx, fy) in fp.iter() {
@@ -57,8 +62,12 @@ impl DensityBrush {
             }
             let current = self.stroke.current(fx, fy, doc, ctx.frame, ctx.layer);
             let current_ramp_index = ctx.ramp.iter().position(|&c| c == current.ch);
-            let sample =
-                StrokeSample { position: (fx, fy), timing, current_ramp_index, ramp_len: ctx.ramp.len() };
+            let sample = StrokeSample {
+                position: (fx, fy),
+                timing,
+                current_ramp_index,
+                ramp_len: ctx.ramp.len(),
+            };
 
             let mut density = ctx.density; // Copy — a local mutable copy is fine for &mut self.sample
             let intensity = match &mut density {
@@ -67,8 +76,13 @@ impl DensityBrush {
             };
             let idx = intensity_to_index(intensity, ctx.ramp.len());
             let ch = ctx.ramp.get(idx).copied().unwrap_or(ctx.glyph); // defensive: empty-ramp fallback
-            let proposed = Cell { ch, fg: ctx.fg, bg: ctx.bg };
-            self.stroke.stamp(fx, fy, proposed, ctx.mask, doc, ctx.frame, ctx.layer);
+            let proposed = Cell {
+                ch,
+                fg: ctx.fg,
+                bg: ctx.bg,
+            };
+            self.stroke
+                .stamp(fx, fy, proposed, ctx.mask, doc, ctx.frame, ctx.layer);
         }
         self.prev_fp.clear();
         self.prev_fp.extend(fp.iter().copied());
@@ -187,16 +201,20 @@ mod tests {
         let tctx = ctx(DensityMode::Buildup(Buildup), "abcd");
         let mut brush = DensityBrush::new();
         brush.update(ToolEvent::Press { x: 5, y: 5 }, &tctx, &doc); // off-ramp -> step 0 -> 'a'
-        // Repeated Drag calls at the SAME cell simulate a stationary held pointer (Drag fires
-        // every frame while the button is down, not only on cell change). `line_cells` from a
-        // point to itself yields a single-element buffer, and the skip-first-element rule means
-        // none of these calls re-stamp anything.
+                                                                    // Repeated Drag calls at the SAME cell simulate a stationary held pointer (Drag fires
+                                                                    // every frame while the button is down, not only on cell change). `line_cells` from a
+                                                                    // point to itself yields a single-element buffer, and the skip-first-element rule means
+                                                                    // none of these calls re-stamp anything.
         for _ in 0..10 {
             brush.update(ToolEvent::Drag { x: 5, y: 5 }, &tctx, &doc);
         }
         let resp = brush.update(ToolEvent::Release, &tctx, &doc);
         apply(&mut doc, resp);
-        assert_eq!(ch_at(&doc, 5, 5), 'a', "dwelling must not advance past the single Press touch");
+        assert_eq!(
+            ch_at(&doc, 5, 5),
+            'a',
+            "dwelling must not advance past the single Press touch"
+        );
     }
 
     #[test]
@@ -222,15 +240,27 @@ mod tests {
         brush.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &doc); // (0,0) -> step 0 'a'
         brush.update(ToolEvent::Drag { x: 1, y: 0 }, &tctx, &doc); // (1,0) -> step 0 'a'
         brush.update(ToolEvent::Drag { x: 2, y: 0 }, &tctx, &doc); // (2,0) -> step 0 'a'
-        // Backtracking to (0,0) interpolates back through (1,0): both are genuinely revisited
-        // (touched a second time within this stroke) and advance one more step; (2,0) was only
-        // ever touched once and stays at step 0.
+                                                                   // Backtracking to (0,0) interpolates back through (1,0): both are genuinely revisited
+                                                                   // (touched a second time within this stroke) and advance one more step; (2,0) was only
+                                                                   // ever touched once and stays at step 0.
         brush.update(ToolEvent::Drag { x: 0, y: 0 }, &tctx, &doc);
         let resp = brush.update(ToolEvent::Release, &tctx, &doc);
         apply(&mut doc, resp);
-        assert_eq!(ch_at(&doc, 0, 0), 'b', "revisited cell must advance one more ramp step");
-        assert_eq!(ch_at(&doc, 1, 0), 'b', "the backtrack path revisits this cell too");
-        assert_eq!(ch_at(&doc, 2, 0), 'a', "touched exactly once, must not advance further");
+        assert_eq!(
+            ch_at(&doc, 0, 0),
+            'b',
+            "revisited cell must advance one more ramp step"
+        );
+        assert_eq!(
+            ch_at(&doc, 1, 0),
+            'b',
+            "the backtrack path revisits this cell too"
+        );
+        assert_eq!(
+            ch_at(&doc, 2, 0),
+            'a',
+            "touched exactly once, must not advance further"
+        );
     }
 
     #[test]
@@ -247,14 +277,27 @@ mod tests {
         assert_eq!(ch_at(&doc, 2, 2), 'a');
 
         // Force the cell onto the ramp at a known index for a clean assertion.
-        doc.set_cell(0, 2, 2, Cell { ch: 'b', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT }); // index 1
+        doc.set_cell(
+            0,
+            2,
+            2,
+            Cell {
+                ch: 'b',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        ); // index 1
 
         // Fresh brush + fresh stroke: must read the document's current index, not restart at 0.
         let mut brush2 = DensityBrush::new();
         brush2.update(ToolEvent::Press { x: 2, y: 2 }, &tctx, &doc);
         let resp = brush2.update(ToolEvent::Release, &tctx, &doc);
         apply(&mut doc, resp);
-        assert_eq!(ch_at(&doc, 2, 2), 'c', "a fresh stroke must continue from the doc's current step");
+        assert_eq!(
+            ch_at(&doc, 2, 2),
+            'c',
+            "a fresh stroke must continue from the doc's current step"
+        );
     }
 
     #[test]
@@ -275,7 +318,11 @@ mod tests {
         // (cols 0..=11, rows 1..=3) at step 0 — never saturated.
         for y in 1..=3u16 {
             for x in 0..=11u16 {
-                assert_eq!(ch_at(&doc, x, y), 'a', "cell ({x},{y}) must advance exactly once");
+                assert_eq!(
+                    ch_at(&doc, x, y),
+                    'a',
+                    "cell ({x},{y}) must advance exactly once"
+                );
             }
         }
     }
@@ -296,20 +343,34 @@ mod tests {
         }
         let resp = brush.update(ToolEvent::Release, &tctx, &doc);
         apply(&mut doc, resp);
-        assert_eq!(ch_at(&doc, 2, 2), 'b', "left and re-entered: advances a second time");
+        assert_eq!(
+            ch_at(&doc, 2, 2),
+            'b',
+            "left and re-entered: advances a second time"
+        );
     }
 
     #[test]
     fn plane_mask_gates_the_computed_glyph_like_pencil() {
         let mut doc = Document::new(10, 10);
-        let existing = Cell { ch: 'x', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) };
+        let existing = Cell {
+            ch: 'x',
+            fg: Rgba(9, 9, 9, 255),
+            bg: Rgba(8, 8, 8, 255),
+        };
         doc.set_cell(0, 1, 1, existing);
         let mut tctx = ctx(DensityMode::Fixed(Fixed(1.0)), " .:-=+*#%@");
-        tctx.mask = PlaneMask { glyph: false, bg: false };
+        tctx.mask = PlaneMask {
+            glyph: false,
+            bg: false,
+        };
         let mut brush = DensityBrush::new();
         brush.update(ToolEvent::Press { x: 1, y: 1 }, &tctx, &doc);
         let resp = brush.update(ToolEvent::Release, &tctx, &doc);
-        assert!(matches!(resp, ToolResponse::Commit(None)), "glyph-off mask must leave the cell untouched");
+        assert!(
+            matches!(resp, ToolResponse::Commit(None)),
+            "glyph-off mask must leave the cell untouched"
+        );
     }
 
     #[test]
@@ -339,12 +400,25 @@ mod tests {
     fn off_ramp_cell_including_a_glyph_not_on_the_ramp_starts_buildup_at_step_zero() {
         let mut doc = Document::new(10, 10);
         // A glyph that exists but isn't a character of the active ramp.
-        doc.set_cell(0, 0, 0, Cell { ch: '?', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: '?',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         let tctx = ctx(DensityMode::Buildup(Buildup), " .:-=+*#%@");
         let mut brush = DensityBrush::new();
         brush.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &doc);
         let resp = brush.update(ToolEvent::Release, &tctx, &doc);
         apply(&mut doc, resp);
-        assert_eq!(ch_at(&doc, 0, 0), ' ', "an off-ramp glyph must be treated as no current index, landing on step 0");
+        assert_eq!(
+            ch_at(&doc, 0, 0),
+            ' ',
+            "an off-ramp glyph must be treated as no current index, landing on step 0"
+        );
     }
 }

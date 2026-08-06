@@ -2,8 +2,8 @@
 
 use eframe::egui::{self, Sense, Stroke, Ui, Vec2};
 
-use super::widgets::{self, Bound};
 use super::theme;
+use super::widgets::{self, Bound};
 use crate::app::{sized_slot, tool_def, Binding, GasciiApp, ToolDef, ToolKind};
 use crate::fonts;
 use gascii_core::{BrushShape, MAX_TOOL_SIZE};
@@ -43,7 +43,6 @@ fn page_label(page_name: &str) -> &str {
     }
 }
 
-
 /// The stamp shape segment, shared with kiosk so both chrome modes name the shapes identically.
 pub(crate) const SHAPE_OPTIONS: [(BrushShape, &str); 3] = [
     (BrushShape::Raw, "None"),
@@ -63,52 +62,62 @@ const SIDEBAR_GEOM: OptionsGeom = OptionsGeom {
 pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
     let t = theme::current(ui.ctx());
     let panel_h = ui.available_height();
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
-        let top = ui.cursor().min.y;
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+            let top = ui.cursor().min.y;
 
-        toolbox(ui, app);
-        rule(ui, t.border_soft);
-        binding_options(ui, app);
-        rule(ui, t.border_soft);
-        trace_controls(ui, app, 1.0);
-        rule(ui, t.border_soft);
+            toolbox(ui, app);
+            rule(ui, t.border_soft);
+            binding_options(ui, app);
+            rule(ui, t.border_soft);
+            trace_controls(ui, app, 1.0);
+            rule(ui, t.border_soft);
 
-        // The options block's height varies (shape rows, the brush block), so the glyph scroll
-        // gives up height first. `available_height` is unbounded inside the scroll area — size
-        // against the panel's real height minus what has actually been consumed.
-        let remaining = panel_h - (ui.cursor().min.y - top);
-        let scroll_h = (remaining - PALETTE_RESERVED - BOTTOM_BLOCK).clamp(PALETTE_SCROLL_MIN, PALETTE_SCROLL_MAX);
-        palette(ui, app, widgets::SWATCH, fonts::size::GLYPH, scroll_h);
+            // The options block's height varies (shape rows, the brush block), so the glyph scroll
+            // gives up height first. `available_height` is unbounded inside the scroll area — size
+            // against the panel's real height minus what has actually been consumed.
+            let remaining = panel_h - (ui.cursor().min.y - top);
+            let scroll_h = (remaining - PALETTE_RESERVED - BOTTOM_BLOCK)
+                .clamp(PALETTE_SCROLL_MIN, PALETTE_SCROLL_MAX);
+            palette(ui, app, widgets::SWATCH, fonts::size::GLYPH, scroll_h);
 
-        // Colours and write toggles sit at the foot of the panel, pushed there with an explicit
-        // spacer rather than a `bottom_up` layout: bottom-up mis-measures the nested rows here and
-        // draws the rule straight through the colour wells. On panels too short for everything the
-        // spacer bottoms out and the whole sidebar scrolls instead of clipping the colour block.
-        let gap = (panel_h - (ui.cursor().min.y - top) - BOTTOM_BLOCK).max(8.0);
-        ui.add_space(gap);
-        rule(ui, t.border_soft);
-        ui.add_space(4.0);
-        colors(ui, app);
-        ui.add_space(4.0);
-        rule(ui, t.border_soft);
-        ui.add_space(4.0);
-        write_toggles(ui, app);
-    });
+            // Colours and write toggles sit at the foot of the panel, pushed there with an explicit
+            // spacer rather than a `bottom_up` layout: bottom-up mis-measures the nested rows here and
+            // draws the rule straight through the colour wells. On panels too short for everything the
+            // spacer bottoms out and the whole sidebar scrolls instead of clipping the colour block.
+            let gap = (panel_h - (ui.cursor().min.y - top) - BOTTOM_BLOCK).max(8.0);
+            ui.add_space(gap);
+            rule(ui, t.border_soft);
+            ui.add_space(4.0);
+            colors(ui, app);
+            ui.add_space(4.0);
+            rule(ui, t.border_soft);
+            ui.add_space(4.0);
+            write_toggles(ui, app);
+        });
 }
 
 /// A full-width 1px separator. `ui.separator()` sizes itself from the surrounding layout and can
 /// collapse to a stub, so the line is allocated and painted explicitly.
 pub(crate) fn rule(ui: &mut Ui, color: egui::Color32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
-    ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, color));
+    ui.painter()
+        .hline(rect.x_range(), rect.center().y, Stroke::new(1.0, color));
 }
 
 /// MacPaint-style grid: `tools` laid out `cols` wide at `cell_h` tall, cells butted together
 /// with the grid's own 1px border showing through the gaps, so the whole block reads as one
 /// object rather than a row of separate buttons. Click binds L, secondary-click binds R — the
 /// only place R is ever set by pointer, in either chrome mode.
-pub(crate) fn tool_grid(ui: &mut Ui, app: &mut GasciiApp, tools: &[ToolDef], cols: usize, cell_h: f32) {
+pub(crate) fn tool_grid(
+    ui: &mut Ui,
+    app: &mut GasciiApp,
+    tools: &[ToolDef],
+    cols: usize,
+    cell_h: f32,
+) {
     let t = theme::current(ui.ctx());
     let avail = ui.available_width();
     let cell_w = ((avail - (cols - 1) as f32) / cols as f32).floor();
@@ -126,8 +135,8 @@ pub(crate) fn tool_grid(ui: &mut Ui, app: &mut GasciiApp, tools: &[ToolDef], col
     let mut rebind: Option<(Binding, ToolKind)> = None;
     for (i, def) in tools.iter().enumerate() {
         let (col, row) = (i % cols, i / cols);
-        let min = grid_rect.min
-            + Vec2::new(col as f32 * (cell_w + 1.0), row as f32 * (cell.y + 1.0));
+        let min =
+            grid_rect.min + Vec2::new(col as f32 * (cell_w + 1.0), row as f32 * (cell.y + 1.0));
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(egui::Rect::from_min_size(min, cell))
@@ -150,8 +159,10 @@ pub(crate) fn tool_grid(ui: &mut Ui, app: &mut GasciiApp, tools: &[ToolDef], col
     // empty sockets in the block rather than ghost cells left in the gap colour.
     for i in tools.len()..rows * cols {
         let (col, row) = (i % cols, i / cols);
-        let min = grid_rect.min + Vec2::new(col as f32 * (cell_w + 1.0), row as f32 * (cell.y + 1.0));
-        ui.painter().rect_filled(egui::Rect::from_min_size(min, cell), 0.0, t.bg_panel);
+        let min =
+            grid_rect.min + Vec2::new(col as f32 * (cell_w + 1.0), row as f32 * (cell.y + 1.0));
+        ui.painter()
+            .rect_filled(egui::Rect::from_min_size(min, cell), 0.0, t.bg_panel);
     }
     ui.painter().rect_stroke(
         grid_rect,
@@ -256,7 +267,12 @@ pub(crate) fn binding_options_geom(ui: &mut Ui, app: &mut GasciiApp, geom: Optio
             if !shown.contains(&i) {
                 ui.add_space(2.0);
                 let (stylus_detected, bound) = crate::app::host_context(app);
-                let host = crate::app::host_facts(&app.doc, stylus_detected, bound, app.history.top_edit_id());
+                let host = crate::app::host_facts(
+                    &app.doc,
+                    stylus_detected,
+                    bound,
+                    app.history.top_edit_id(),
+                );
                 app.plugins[i].options_ui(tool_def(kind).name, ui, geom, &host);
                 shown.push(i);
             }
@@ -379,7 +395,13 @@ fn swatch_cols(avail: f32, swatch: f32) -> usize {
 /// A wrapped grid of glyph swatches, reflowing to the sidebar's current width. Returns the glyph
 /// clicked this frame, if any — the caller applies the pick, so rows can render off shared
 /// borrows of the app's own glyph lists.
-fn swatch_row(ui: &mut Ui, active_glyph: char, glyphs: &[char], swatch: f32, glyph_px: f32) -> Option<char> {
+fn swatch_row(
+    ui: &mut Ui,
+    active_glyph: char,
+    glyphs: &[char],
+    swatch: f32,
+    glyph_px: f32,
+) -> Option<char> {
     let mut picked: Option<char> = None;
     let cols = swatch_cols(ui.available_width(), swatch);
     ui.spacing_mut().item_spacing = Vec2::splat(SWATCH_GAP);
@@ -444,7 +466,8 @@ pub(crate) fn color_picker_body(ui: &mut Ui, color: &mut gascii_core::Rgba) {
     });
     ui.separator();
     let mut c32 = egui::Color32::from_rgba_unmultiplied(color.0, color.1, color.2, color.3);
-    if egui::color_picker::color_picker_color32(ui, &mut c32, egui::color_picker::Alpha::OnlyBlend) {
+    if egui::color_picker::color_picker_color32(ui, &mut c32, egui::color_picker::Alpha::OnlyBlend)
+    {
         let [r, g, b, a] = c32.to_srgba_unmultiplied();
         *color = gascii_core::Rgba(r, g, b, a);
     }
@@ -454,7 +477,10 @@ pub(crate) fn color_picker_body(ui: &mut Ui, color: &mut gascii_core::Rgba) {
     let mut buf = ui
         .ctx()
         .data_mut(|d| d.get_temp::<HexBuf>(id))
-        .unwrap_or_else(|| HexBuf { text: widgets::hex_string_rgba(*color), synced: *color });
+        .unwrap_or_else(|| HexBuf {
+            text: widgets::hex_string_rgba(*color),
+            synced: *color,
+        });
     // The ANSI-16 or picker paths above may have just written `*color` directly — reformat the
     // buffer to match rather than let it go stale, but only when it wasn't this field's own edit.
     if buf.synced != *color {
@@ -462,7 +488,9 @@ pub(crate) fn color_picker_body(ui: &mut Ui, color: &mut gascii_core::Rgba) {
         buf.synced = *color;
     }
     let resp = ui.add(
-        egui::TextEdit::singleline(&mut buf.text).desired_width(90.0).font(fonts::mono_id(fonts::size::CONTROL)),
+        egui::TextEdit::singleline(&mut buf.text)
+            .desired_width(90.0)
+            .font(fonts::mono_id(fonts::size::CONTROL)),
     );
     if resp.changed() {
         if let Some(parsed) = widgets::parse_hex(&buf.text) {
@@ -496,8 +524,16 @@ fn colors(ui: &mut Ui, app: &mut GasciiApp) {
             for (tag, c) in [("FG", app.active_fg), ("BG", app.active_bg)] {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.label(egui::RichText::new(tag).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_secondary));
-                    ui.label(egui::RichText::new(widgets::hex_string(c)).font(fonts::ui_medium_id(fonts::size::LABEL)).color(t.fg_text));
+                    ui.label(
+                        egui::RichText::new(tag)
+                            .font(fonts::mono_id(fonts::size::LABEL))
+                            .color(t.fg_secondary),
+                    );
+                    ui.label(
+                        egui::RichText::new(widgets::hex_string(c))
+                            .font(fonts::ui_medium_id(fonts::size::LABEL))
+                            .color(t.fg_text),
+                    );
                 });
             }
         });
@@ -545,7 +581,10 @@ mod tests {
         // A generous margin allowance either side of the panel's raw 190..=320 range — the actual
         // available content width is narrower than the panel width (padding/margins), but must
         // never be negative in practice.
-        for avail in [0.0, 50.0, 121.0 /* just below the min-clamp boundary */, 150.0, 170.0, 200.0, 260.0, 320.0, 1000.0] {
+        for avail in [
+            0.0, 50.0, 121.0, /* just below the min-clamp boundary */
+            150.0, 170.0, 200.0, 260.0, 320.0, 1000.0,
+        ] {
             let cols = swatch_cols(avail, widgets::SWATCH);
             assert!(
                 (SWATCH_COLS_MIN..=SWATCH_COLS_MAX).contains(&cols),
@@ -642,10 +681,16 @@ mod tests {
             palette(ui, &mut app, widgets::SWATCH, fonts::size::GLYPH, 200.0);
         });
 
-        assert_eq!(app.active_page, 0, "a render pass with no input must not change the active page");
+        assert_eq!(
+            app.active_page, 0,
+            "a render pass with no input must not change the active page"
+        );
         // The scroll target is consumed once its section's header is laid out during the render
         // above — it must not still be pending afterward.
-        assert_eq!(app.palette_scroll_target, None, "the jump target must be consumed by the render");
+        assert_eq!(
+            app.palette_scroll_target, None,
+            "the jump target must be consumed by the render"
+        );
     }
 
     /// Walks every valid section index (the palette's actual page count, not just the single index
@@ -656,7 +701,10 @@ mod tests {
     fn palette_consumes_a_scroll_target_at_every_valid_section_index() {
         let app_template = crate::app::GasciiApp::headless();
         let page_count = app_template.pages.len();
-        assert!(page_count > 0, "sanity: the built-in palette must have at least one page");
+        assert!(
+            page_count > 0,
+            "sanity: the built-in palette must have at least one page"
+        );
 
         let ctx = egui::Context::default();
         fonts::install_fonts(&ctx);
@@ -714,7 +762,11 @@ mod tests {
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
                 color_picker_body(ui, &mut color);
             });
-            assert_eq!(color, gascii_core::Rgba(0x12, 0x34, 0x56, 255), "{theme:?}: no-input render must not change the colour");
+            assert_eq!(
+                color,
+                gascii_core::Rgba(0x12, 0x34, 0x56, 255),
+                "{theme:?}: no-input render must not change the colour"
+            );
         }
     }
 
@@ -732,7 +784,11 @@ mod tests {
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             color_picker_body(ui, &mut color);
         });
-        assert_eq!(color, gascii_core::Rgba::TRANSPARENT, "a no-input render must not force a transparent colour opaque");
+        assert_eq!(
+            color,
+            gascii_core::Rgba::TRANSPARENT,
+            "a no-input render must not force a transparent colour opaque"
+        );
     }
 
     /// With no image background loaded, `trace_controls` must render just the TRACE label and a
@@ -745,7 +801,10 @@ mod tests {
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             trace_controls(ui, &mut app, 1.0);
         });
-        assert!(app.image_bg.is_none(), "a no-input render must not conjure an image background");
+        assert!(
+            app.image_bg.is_none(),
+            "a no-input render must not conjure an image background"
+        );
     }
 
     /// With an image background present (`texture: None`, the headless/pre-upload no-op path — see
@@ -755,7 +814,11 @@ mod tests {
     #[test]
     fn trace_controls_renders_with_an_image_loaded_without_panicking_or_mutating_its_settings() {
         let mut app = crate::app::GasciiApp::headless();
-        app.image_bg = Some(crate::image_bg::ImageBackground::new(image::RgbaImage::new(4, 3), None, None));
+        app.image_bg = Some(crate::image_bg::ImageBackground::new(
+            image::RgbaImage::new(4, 3),
+            None,
+            None,
+        ));
 
         let ctx = egui::Context::default();
         fonts::install_fonts(&ctx);
@@ -763,9 +826,18 @@ mod tests {
             trace_controls(ui, &mut app, 1.0);
         });
 
-        let bg = app.image_bg.as_ref().expect("a no-input render must not clear the loaded image");
-        assert!(bg.show_as_trace, "a no-input render must not change trace visibility");
-        assert!((bg.trace_opacity - 0.5).abs() < f32::EPSILON, "a no-input render must not change opacity");
+        let bg = app
+            .image_bg
+            .as_ref()
+            .expect("a no-input render must not clear the loaded image");
+        assert!(
+            bg.show_as_trace,
+            "a no-input render must not change trace visibility"
+        );
+        assert!(
+            (bg.trace_opacity - 0.5).abs() < f32::EPSILON,
+            "a no-input render must not change opacity"
+        );
     }
 
     /// The pre-refactor code had two separate `binding_options`/`brush_options` bodies (sidebar's
@@ -787,7 +859,8 @@ mod tests {
         app.slots[Binding::L.ix()].stamps[slot].size = 6;
         app.slots[Binding::L.ix()].stamps[slot].shape = BrushShape::Circle;
         app.brush_plugin_mut().set_active_ramp(1);
-        app.brush_plugin_mut().set_density_mode(DensityMode::Buildup(Buildup));
+        app.brush_plugin_mut()
+            .set_density_mode(DensityMode::Buildup(Buildup));
 
         // Kiosk's own geometry (`kiosk::binding_options`'s literal params, mirrored here since
         // `kiosk.rs` is a separate module this test must not depend on for compilation ordering).
@@ -808,14 +881,26 @@ mod tests {
             binding_options(ui, &mut app); // the normal sidebar's own SIDEBAR_GEOM
         });
 
-        assert_eq!(app.slots[Binding::L.ix()].stamps[slot].size, 6, "size must survive both renders unchanged");
         assert_eq!(
-            app.slots[Binding::L.ix()].stamps[slot].shape, BrushShape::Circle,
+            app.slots[Binding::L.ix()].stamps[slot].size,
+            6,
+            "size must survive both renders unchanged"
+        );
+        assert_eq!(
+            app.slots[Binding::L.ix()].stamps[slot].shape,
+            BrushShape::Circle,
             "shape must survive both renders unchanged"
         );
-        assert_eq!(app.brush_plugin_mut().active_ramp(), 1, "the brush ramp is app-global; neither render may reset it");
+        assert_eq!(
+            app.brush_plugin_mut().active_ramp(),
+            1,
+            "the brush ramp is app-global; neither render may reset it"
+        );
         assert!(
-            matches!(app.brush_plugin_mut().density_mode(), DensityMode::Buildup(_)),
+            matches!(
+                app.brush_plugin_mut().density_mode(),
+                DensityMode::Buildup(_)
+            ),
             "the brush's density mode is app-global; neither render may reset it"
         );
     }

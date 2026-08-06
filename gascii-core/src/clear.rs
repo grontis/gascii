@@ -20,7 +20,14 @@ pub fn clear_document(doc: &Document) -> Option<Edit> {
                 if before == Cell::BLANK {
                     continue;
                 }
-                cell_edits.push(CellEdit { frame, layer: layer_ix, x, y, before, after: Cell::BLANK });
+                cell_edits.push(CellEdit {
+                    frame,
+                    layer: layer_ix,
+                    x,
+                    y,
+                    before,
+                    after: Cell::BLANK,
+                });
             }
         }
     }
@@ -34,7 +41,11 @@ mod tests {
     use crate::model::{Layer, Rgba};
 
     fn cell(ch: char) -> Cell {
-        Cell { ch, fg: Rgba::WHITE, bg: Rgba::TRANSPARENT }
+        Cell {
+            ch,
+            fg: Rgba::WHITE,
+            bg: Rgba::TRANSPARENT,
+        }
     }
 
     #[test]
@@ -42,7 +53,9 @@ mod tests {
         let mut doc = Document::new(3, 3);
         doc.set_cell(0, 1, 1, cell('a'));
         let edit = clear_document(&doc).unwrap();
-        let Edit::Cells(cells) = &edit else { panic!("expected Edit::Cells") };
+        let Edit::Cells(cells) = &edit else {
+            panic!("expected Edit::Cells")
+        };
         // Only the one non-blank cell should appear — every already-blank cell is skipped.
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0].x, 1);
@@ -107,7 +120,15 @@ mod tests {
         let edit = clear_document(&doc).unwrap();
         history.apply(&mut doc, edit);
 
-        assert_eq!(doc.cell(0, 1, 1), Some(&Cell::BLANK), "the active frame must be cleared");
-        assert_eq!(doc.frame(1).unwrap(), &frame1_before, "the other frame must survive byte-exact");
+        assert_eq!(
+            doc.cell(0, 1, 1),
+            Some(&Cell::BLANK),
+            "the active frame must be cleared"
+        );
+        assert_eq!(
+            doc.frame(1).unwrap(),
+            &frame1_before,
+            "the other frame must survive byte-exact"
+        );
     }
 }

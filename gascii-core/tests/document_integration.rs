@@ -21,10 +21,17 @@ fn large_document_all_four_corners_round_trip_independently() {
         (1023, 1023, 'D'),
     ];
     for &(x, y, ch) in &corners {
-        assert!(doc.set_cell(0, x, y, glyph(ch)), "set_cell should succeed at ({x},{y})");
+        assert!(
+            doc.set_cell(0, x, y, glyph(ch)),
+            "set_cell should succeed at ({x},{y})"
+        );
     }
     for &(x, y, ch) in &corners {
-        assert_eq!(doc.cell(0, x, y), Some(&glyph(ch)), "readback mismatch at ({x},{y})");
+        assert_eq!(
+            doc.cell(0, x, y),
+            Some(&glyph(ch)),
+            "readback mismatch at ({x},{y})"
+        );
     }
 
     // Cells adjacent to each corner (but not corners themselves) must remain untouched.
@@ -45,9 +52,17 @@ fn row_major_index_does_not_bleed_across_row_boundary() {
     assert!(doc.set_cell(0, 0, 2, glyph('Y'))); // first cell of row 2
 
     assert_eq!(doc.cell(0, 1023, 0), Some(&glyph('X')));
-    assert_eq!(doc.cell(0, 0, 1), Some(&Cell::BLANK), "row 0's last cell must not bleed into row 1");
+    assert_eq!(
+        doc.cell(0, 0, 1),
+        Some(&Cell::BLANK),
+        "row 0's last cell must not bleed into row 1"
+    );
     assert_eq!(doc.cell(0, 0, 2), Some(&glyph('Y')));
-    assert_eq!(doc.cell(0, 1023, 1), Some(&Cell::BLANK), "row 2's first cell must not bleed into row 1");
+    assert_eq!(
+        doc.cell(0, 1023, 1),
+        Some(&Cell::BLANK),
+        "row 2's first cell must not bleed into row 1"
+    );
 }
 
 #[test]
@@ -86,13 +101,25 @@ fn serde_round_trip_at_1024x1024_scale() {
     assert_eq!(doc, back);
     assert_eq!(back.cell(0, 0, 0), Some(&glyph('A')));
     assert_eq!(back.cell(0, 1023, 1023), Some(&glyph('Z')));
-    assert_eq!(back.extent(), DocExtent { width: 1024, height: 1024 });
+    assert_eq!(
+        back.extent(),
+        DocExtent {
+            width: 1024,
+            height: 1024
+        }
+    );
 }
 
 #[test]
 fn doc_extent_matches_construction_dimensions_for_non_square_docs() {
     let doc = Document::new(37, 91);
-    assert_eq!(doc.extent(), DocExtent { width: 37, height: 91 });
+    assert_eq!(
+        doc.extent(),
+        DocExtent {
+            width: 37,
+            height: 91
+        }
+    );
     assert!(doc.in_bounds(36, 90));
     assert!(!doc.in_bounds(37, 90));
     assert!(!doc.in_bounds(36, 91));
@@ -112,11 +139,23 @@ fn out_of_bounds_layer_index_degrades_gracefully_not_panics() {
 #[test]
 fn default_document_and_new_1x1_document_are_both_well_formed() {
     let default_doc = Document::default_document();
-    assert_eq!(default_doc.extent(), DocExtent { width: 120, height: 40 });
+    assert_eq!(
+        default_doc.extent(),
+        DocExtent {
+            width: 120,
+            height: 40
+        }
+    );
     assert_eq!(default_doc.layers().len(), 1);
 
     let mut tiny = Document::new(1, 1);
-    assert_eq!(tiny.extent(), DocExtent { width: 1, height: 1 });
+    assert_eq!(
+        tiny.extent(),
+        DocExtent {
+            width: 1,
+            height: 1
+        }
+    );
     assert!(tiny.in_bounds(0, 0));
     assert!(!tiny.in_bounds(1, 0));
     assert!(!tiny.in_bounds(0, 1));

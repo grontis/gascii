@@ -53,7 +53,13 @@ struct PaintCtx<'a> {
 
 impl<'a> PaintCtx<'a> {
     fn new(vp: &'a dyn CellGrid, origin: Pos2, cell: Vec2, visible: (u16, u16, u16, u16)) -> Self {
-        Self { vp, origin, cell, visible, font: font_id(vp.font_px()) }
+        Self {
+            vp,
+            origin,
+            cell,
+            visible,
+            font: font_id(vp.font_px()),
+        }
     }
 }
 
@@ -93,7 +99,9 @@ impl CanvasRenderer for PlaybackRenderer {
         // editing cursor. (Pause parks the cursor on the frozen frame — `Inner::pause_playback` —
         // so the common stop path lands seamlessly anyway.)
         drop(s);
-        self.inner.paint(painter, doc, vp, origin, cell, visible, pending, hover, caret, selection);
+        self.inner.paint(
+            painter, doc, vp, origin, cell, visible, pending, hover, caret, selection,
+        );
     }
 }
 
@@ -105,7 +113,9 @@ fn paint_frame_cells(painter: &Painter, doc: &Document, frame: usize, ctx: &Pain
     for layer in gascii_core::visible_layers(doc, frame) {
         for y in y0..y1 {
             for x in x0..x1 {
-                let Some(&c) = doc.cell_at(frame, layer, x, y) else { continue };
+                let Some(&c) = doc.cell_at(frame, layer, x, y) else {
+                    continue;
+                };
                 paint_cell(painter, &c, ctx, x, y);
             }
         }
@@ -120,7 +130,13 @@ fn paint_cell(painter: &Painter, c: &Cell, ctx: &PaintCtx, x: u16, y: u16) {
         painter.rect_filled(rect, 0.0, color32(c.bg));
     }
     if c.ch != ' ' {
-        painter.text(rect_min, Align2::LEFT_TOP, c.ch, ctx.font.clone(), color32(c.fg));
+        painter.text(
+            rect_min,
+            Align2::LEFT_TOP,
+            c.ch,
+            ctx.font.clone(),
+            color32(c.fg),
+        );
     }
 }
 
@@ -170,7 +186,12 @@ mod tests {
         }
     }
 
-    fn run_paint(renderer: &mut PlaybackRenderer, doc: &Document, pending: &[PendingCell], hover: &[(u16, u16)]) {
+    fn run_paint(
+        renderer: &mut PlaybackRenderer,
+        doc: &Document,
+        pending: &[PendingCell],
+        hover: &[(u16, u16)],
+    ) {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             let painter = ui.painter().clone();
@@ -190,7 +211,8 @@ mod tests {
     }
 
     #[test]
-    fn playback_renderer_suppresses_pending_hover_caret_selection_while_playing_and_forwards_them_while_idle() {
+    fn playback_renderer_suppresses_pending_hover_caret_selection_while_playing_and_forwards_them_while_idle(
+    ) {
         let calls = std::rc::Rc::new(std::cell::RefCell::new(0));
         let last_pending_len = std::rc::Rc::new(std::cell::RefCell::new(0));
         let last_hover_len = std::rc::Rc::new(std::cell::RefCell::new(0));
@@ -206,7 +228,11 @@ mod tests {
         let state = SharedState::new();
         let mut renderer = PlaybackRenderer::new(Box::new(inner), state.clone());
         let doc = Document::default_document();
-        let pending = [PendingCell { x: 0, y: 0, cell: Cell::BLANK }];
+        let pending = [PendingCell {
+            x: 0,
+            y: 0,
+            cell: Cell::BLANK,
+        }];
         let hover = [(0u16, 0u16)];
 
         // Idle: forwards straight through to the inner renderer with the real overlay values.
@@ -220,7 +246,11 @@ mod tests {
         // frame directly and returns).
         state.borrow_mut().playing = true;
         run_paint(&mut renderer, &doc, &pending, &hover);
-        assert_eq!(*calls.borrow(), 1, "inner renderer must not be invoked while playing");
+        assert_eq!(
+            *calls.borrow(),
+            1,
+            "inner renderer must not be invoked while playing"
+        );
     }
 
     /// The render-side complement of `plugin.rs`'s own `tick`-clamp test: between an external frame
@@ -229,7 +259,8 @@ mod tests {
     /// — `doc.cell_at` already returns `None` gracefully for it, so this must render nothing for
     /// that frame rather than panicking or indexing out of bounds.
     #[test]
-    fn playback_renderer_override_paints_nothing_and_does_not_panic_when_playback_frame_is_stale_and_out_of_range() {
+    fn playback_renderer_override_paints_nothing_and_does_not_panic_when_playback_frame_is_stale_and_out_of_range(
+    ) {
         let inner = RecordingRenderer {
             calls: Default::default(),
             last_pending_len: Default::default(),
@@ -260,7 +291,16 @@ mod tests {
         history.apply(&mut doc, add);
         let (cx, cy) = (doc.width / 2, doc.height / 2);
         let top_bg = gascii_core::Rgba(40, 60, 80, 255);
-        doc.set_cell(1, cx, cy, Cell { ch: 'Y', fg: gascii_core::Rgba::WHITE, bg: top_bg });
+        doc.set_cell(
+            1,
+            cx,
+            cy,
+            Cell {
+                ch: 'Y',
+                fg: gascii_core::Rgba::WHITE,
+                bg: top_bg,
+            },
+        );
 
         let inner = RecordingRenderer {
             calls: Default::default(),
@@ -290,8 +330,15 @@ mod tests {
                 None,
             );
         });
-        let count = out.shapes.iter().filter(|cs| matches!(&cs.shape, egui::Shape::Rect(r) if r.fill == seeded_color)).count();
-        assert_eq!(count, 1, "the playback path must composite layer 1's content, not drop it");
+        let count = out
+            .shapes
+            .iter()
+            .filter(|cs| matches!(&cs.shape, egui::Shape::Rect(r) if r.fill == seeded_color))
+            .count();
+        assert_eq!(
+            count, 1,
+            "the playback path must composite layer 1's content, not drop it"
+        );
     }
 
     /// A hidden layer's content must be excluded from the playback path's composited paint, same
@@ -304,8 +351,19 @@ mod tests {
         history.apply(&mut doc, add);
         let (cx, cy) = (doc.width / 2, doc.height / 2);
         let hidden_bg = gascii_core::Rgba(40, 60, 80, 255);
-        doc.set_cell(1, cx, cy, Cell { ch: 'Y', fg: gascii_core::Rgba::WHITE, bg: hidden_bg });
-        let hide = gascii_core::set_layer_visibility(&doc, 1, false).unwrap().unwrap();
+        doc.set_cell(
+            1,
+            cx,
+            cy,
+            Cell {
+                ch: 'Y',
+                fg: gascii_core::Rgba::WHITE,
+                bg: hidden_bg,
+            },
+        );
+        let hide = gascii_core::set_layer_visibility(&doc, 1, false)
+            .unwrap()
+            .unwrap();
         history.apply(&mut doc, hide);
 
         let inner = RecordingRenderer {
@@ -336,7 +394,14 @@ mod tests {
                 None,
             );
         });
-        let count = out.shapes.iter().filter(|cs| matches!(&cs.shape, egui::Shape::Rect(r) if r.fill == seeded_color)).count();
-        assert_eq!(count, 0, "a hidden layer's content must never reach the playback path's composited paint");
+        let count = out
+            .shapes
+            .iter()
+            .filter(|cs| matches!(&cs.shape, egui::Shape::Rect(r) if r.fill == seeded_color))
+            .count();
+        assert_eq!(
+            count, 0,
+            "a hidden layer's content must never reach the playback path's composited paint"
+        );
     }
 }

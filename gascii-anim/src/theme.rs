@@ -9,7 +9,12 @@ use egui::Color32;
 /// A translucent colour from straight (un-premultiplied) components — mirrors
 /// `gascii::ui::theme::translucent` exactly.
 const fn translucent(r: u8, g: u8, b: u8, a: u8) -> Color32 {
-    Color32::from_rgba_premultiplied((r as u16 * a as u16 / 255) as u8, (g as u16 * a as u16 / 255) as u8, (b as u16 * a as u16 / 255) as u8, a)
+    Color32::from_rgba_premultiplied(
+        (r as u16 * a as u16 / 255) as u8,
+        (g as u16 * a as u16 / 255) as u8,
+        (b as u16 * a as u16 / 255) as u8,
+        a,
+    )
 }
 
 #[derive(Clone, Copy)]

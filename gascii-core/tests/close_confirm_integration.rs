@@ -33,9 +33,24 @@ fn ctx(mask: PlaneMask, glyph: char, fg: Rgba, bg: Rgba) -> ToolCtx {
 /// Drives a full press -> drag(...) -> release gesture through `tool`, committing the result (if
 /// any) into `history`/`doc`. Mirrors `gascii/src/canvas.rs`'s real pointer-to-Tool lifecycle
 /// without any GUI — same helper shape as `draw_integration.rs`/`persist_integration.rs`.
-fn stroke(tool: &mut dyn Tool, history: &mut History, doc: &mut Document, tctx: &ToolCtx, path: &[(u16, u16)]) {
-    let (&first, rest) = path.split_first().expect("stroke path must have at least one point");
-    tool.update(ToolEvent::Press { x: first.0, y: first.1 }, tctx, doc);
+fn stroke(
+    tool: &mut dyn Tool,
+    history: &mut History,
+    doc: &mut Document,
+    tctx: &ToolCtx,
+    path: &[(u16, u16)],
+) {
+    let (&first, rest) = path
+        .split_first()
+        .expect("stroke path must have at least one point");
+    tool.update(
+        ToolEvent::Press {
+            x: first.0,
+            y: first.1,
+        },
+        tctx,
+        doc,
+    );
     for &(x, y) in rest {
         tool.update(ToolEvent::Drag { x, y }, tctx, doc);
     }
@@ -47,7 +62,14 @@ fn stroke(tool: &mut dyn Tool, history: &mut History, doc: &mut Document, tctx: 
 /// Types `text` at `(x, y)` via a real `TextTool` session and commits it as one burst — mirrors
 /// `gascii/src/app.rs`'s `flush_active_tool` committing a pending burst before the dirty check in
 /// `handle_close_request`.
-fn type_text(doc: &mut Document, history: &mut History, x: u16, y: u16, text: &str, tctx: &ToolCtx) {
+fn type_text(
+    doc: &mut Document,
+    history: &mut History,
+    x: u16,
+    y: u16,
+    text: &str,
+    tctx: &ToolCtx,
+) {
     let mut tool = TextTool::new();
     tool.update(ToolEvent::Press { x, y }, tctx, doc);
     for ch in text.chars() {
@@ -62,24 +84,56 @@ fn type_text(doc: &mut Document, history: &mut History, x: u16, y: u16, text: &s
 fn undoing_back_to_a_saved_checkpoint_across_a_mixed_tool_session_reports_clean_via_top_edit_id() {
     let mut doc = Document::new(20, 10);
     let mut history = History::new();
-    let all_mask = ctx(PlaneMask::ALL, '#', Rgba(200, 10, 10, 255), Rgba(50, 50, 50, 255));
+    let all_mask = ctx(
+        PlaneMask::ALL,
+        '#',
+        Rgba(200, 10, 10, 255),
+        Rgba(50, 50, 50, 255),
+    );
 
     // A realistic session: pencil, text burst, pencil again.
     let mut pencil1 = Pencil::new();
-    stroke(&mut pencil1, &mut history, &mut doc, &all_mask, &[(0, 0), (1, 0)]);
+    stroke(
+        &mut pencil1,
+        &mut history,
+        &mut doc,
+        &all_mask,
+        &[(0, 0), (1, 0)],
+    );
     type_text(&mut doc, &mut history, 5, 5, "Hi", &all_mask);
 
     // Simulate a successful save: the app records `saved_marker = history.top_edit_id()` here.
     let saved_marker = history.top_edit_id();
-    assert!(saved_marker.is_some(), "a session with real committed edits must have a Some marker");
+    assert!(
+        saved_marker.is_some(),
+        "a session with real committed edits must have a Some marker"
+    );
 
     // More work happens after the save: a third stroke, then an eraser stroke.
     let mut pencil2 = Pencil::new();
     stroke(&mut pencil2, &mut history, &mut doc, &all_mask, &[(10, 9)]);
-    let bg_only_erase = ctx(PlaneMask { glyph: false, bg: true }, ' ', Rgba::WHITE, Rgba::TRANSPARENT);
+    let bg_only_erase = ctx(
+        PlaneMask {
+            glyph: false,
+            bg: true,
+        },
+        ' ',
+        Rgba::WHITE,
+        Rgba::TRANSPARENT,
+    );
     let mut eraser = Eraser::new();
-    stroke(&mut eraser, &mut history, &mut doc, &bg_only_erase, &[(0, 0)]);
-    assert_ne!(history.top_edit_id(), saved_marker, "post-save edits must diverge from the saved marker");
+    stroke(
+        &mut eraser,
+        &mut history,
+        &mut doc,
+        &bg_only_erase,
+        &[(0, 0)],
+    );
+    assert_ne!(
+        history.top_edit_id(),
+        saved_marker,
+        "post-save edits must diverge from the saved marker"
+    );
 
     // Undo both post-save edits, landing exactly back on the saved checkpoint.
     assert!(history.undo(&mut doc));
@@ -99,7 +153,12 @@ fn a_new_edit_after_undo_at_the_same_stack_depth_as_the_saved_edit_still_reports
     // marker must NOT coincidentally match just because the stack depth matches again.
     let mut doc = Document::new(20, 10);
     let mut history = History::new();
-    let all_mask = ctx(PlaneMask::ALL, '#', Rgba(200, 10, 10, 255), Rgba(50, 50, 50, 255));
+    let all_mask = ctx(
+        PlaneMask::ALL,
+        '#',
+        Rgba(200, 10, 10, 255),
+        Rgba(50, 50, 50, 255),
+    );
 
     let mut pencil1 = Pencil::new();
     stroke(&mut pencil1, &mut history, &mut doc, &all_mask, &[(0, 0)]);
@@ -126,7 +185,12 @@ fn a_new_edit_after_undo_at_the_same_stack_depth_as_the_saved_edit_still_reports
 fn undoing_below_the_saved_checkpoint_then_redoing_back_up_to_it_restores_the_exact_saved_marker() {
     let mut doc = Document::new(20, 10);
     let mut history = History::new();
-    let all_mask = ctx(PlaneMask::ALL, '#', Rgba(200, 10, 10, 255), Rgba(50, 50, 50, 255));
+    let all_mask = ctx(
+        PlaneMask::ALL,
+        '#',
+        Rgba(200, 10, 10, 255),
+        Rgba(50, 50, 50, 255),
+    );
 
     let mut pencil1 = Pencil::new();
     stroke(&mut pencil1, &mut history, &mut doc, &all_mask, &[(0, 0)]);
@@ -174,7 +238,8 @@ fn a_freshly_opened_document_reports_a_none_marker_matching_a_brand_new_history(
 }
 
 #[test]
-fn saving_with_no_prior_edits_then_drawing_then_undoing_the_only_edit_returns_to_the_initial_none_marker() {
+fn saving_with_no_prior_edits_then_drawing_then_undoing_the_only_edit_returns_to_the_initial_none_marker(
+) {
     // The "brand-new/untitled document is clean by construction" edge case: `saved_marker == None`
     // on a fresh app agrees with a fresh `History::new()`. This test proves the property survives
     // a single edit + undo round trip, not just at t=0.

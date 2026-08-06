@@ -1,7 +1,9 @@
 //! Rectangle tool: border cells resolved against existing box-drawing art via `join`; the interior
 //! is untouched. A one-cell-wide or one-cell-tall rectangle degenerates to a straight line.
 
-use super::{diff_pending, mask_apply, CellRect, PendingCell, Tool, ToolCtx, ToolEvent, ToolResponse};
+use super::{
+    diff_pending, mask_apply, CellRect, PendingCell, Tool, ToolCtx, ToolEvent, ToolResponse,
+};
 use crate::join::{join, ArmSet};
 use crate::model::{Cell, Document};
 
@@ -19,14 +21,32 @@ impl Rectangle {
         Self::default()
     }
 
-    fn stamp(pending: &mut Vec<PendingCell>, doc: &Document, ctx: &ToolCtx, x: u16, y: u16, arms: ArmSet) {
+    fn stamp(
+        pending: &mut Vec<PendingCell>,
+        doc: &Document,
+        ctx: &ToolCtx,
+        x: u16,
+        y: u16,
+        arms: ArmSet,
+    ) {
         if !doc.in_bounds(x, y) {
             return;
         }
-        let before = doc.cell_at(ctx.frame, ctx.layer, x, y).copied().unwrap_or(Cell::BLANK);
+        let before = doc
+            .cell_at(ctx.frame, ctx.layer, x, y)
+            .copied()
+            .unwrap_or(Cell::BLANK);
         let ch = join(before.ch, arms, ctx.glyph);
-        let proposed = Cell { ch, fg: ctx.fg, bg: ctx.bg };
-        pending.push(PendingCell { x, y, cell: mask_apply(before, proposed, ctx.mask) });
+        let proposed = Cell {
+            ch,
+            fg: ctx.fg,
+            bg: ctx.bg,
+        };
+        pending.push(PendingCell {
+            x,
+            y,
+            cell: mask_apply(before, proposed, ctx.mask),
+        });
     }
 
     fn recompute(&mut self, cur: (u16, u16), ctx: &ToolCtx, doc: &Document) {
@@ -48,8 +68,22 @@ impl Rectangle {
             }
         } else {
             for x in rect.x0..=rect.x1 {
-                Self::stamp(&mut self.pending, doc, ctx, x, rect.y0, corner_or_edge_arms(x, rect.y0, rect));
-                Self::stamp(&mut self.pending, doc, ctx, x, rect.y1, corner_or_edge_arms(x, rect.y1, rect));
+                Self::stamp(
+                    &mut self.pending,
+                    doc,
+                    ctx,
+                    x,
+                    rect.y0,
+                    corner_or_edge_arms(x, rect.y0, rect),
+                );
+                Self::stamp(
+                    &mut self.pending,
+                    doc,
+                    ctx,
+                    x,
+                    rect.y1,
+                    corner_or_edge_arms(x, rect.y1, rect),
+                );
             }
             for y in (rect.y0 + 1)..rect.y1 {
                 Self::stamp(&mut self.pending, doc, ctx, rect.x0, y, vertical);
@@ -112,7 +146,9 @@ impl Tool for Rectangle {
     }
 
     fn resync(&mut self, doc: &Document, frame: usize, layer: usize) {
-        let Some((cur, mut ctx)) = self.cur.clone() else { return };
+        let Some((cur, mut ctx)) = self.cur.clone() else {
+            return;
+        };
         ctx.frame = frame;
         ctx.layer = layer;
         self.recompute(cur, &ctx, doc);
@@ -142,7 +178,14 @@ mod tests {
 
     fn drag(doc: &Document, tctx: &ToolCtx, from: (u16, u16), to: (u16, u16)) -> Rectangle {
         let mut rect = Rectangle::new();
-        rect.update(ToolEvent::Press { x: from.0, y: from.1 }, tctx, doc);
+        rect.update(
+            ToolEvent::Press {
+                x: from.0,
+                y: from.1,
+            },
+            tctx,
+            doc,
+        );
         rect.update(ToolEvent::Drag { x: to.0, y: to.1 }, tctx, doc);
         rect
     }
@@ -182,8 +225,13 @@ mod tests {
         };
         // perimeter of a w x h rect = 2*w + 2*h - 4
         assert_eq!(cells.len(), 2 * 4 + 2 * 6 - 4);
-        let coords: std::collections::HashSet<(u16, u16)> = cells.iter().map(|c| (c.x, c.y)).collect();
-        assert_eq!(coords.len(), cells.len(), "no coordinate must be duplicated");
+        let coords: std::collections::HashSet<(u16, u16)> =
+            cells.iter().map(|c| (c.x, c.y)).collect();
+        assert_eq!(
+            coords.len(),
+            cells.len(),
+            "no coordinate must be duplicated"
+        );
     }
 
     #[test]
@@ -191,7 +239,16 @@ mod tests {
         let mut doc = Document::new(10, 10);
         // A vertical line crossing straight through where the rectangle's top edge will land.
         for y in 0..10u16 {
-            doc.set_cell(0, 5, y, Cell { ch: '│', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+            doc.set_cell(
+                0,
+                5,
+                y,
+                Cell {
+                    ch: '│',
+                    fg: Rgba::WHITE,
+                    bg: Rgba::TRANSPARENT,
+                },
+            );
         }
         let tctx = ctx(PlaneMask::ALL, '#');
         let mut rect = drag(&doc, &tctx, (2, 2), (8, 8));
@@ -212,11 +269,23 @@ mod tests {
     fn resync_after_external_clear_recomputes_joins_against_the_mutated_document() {
         let mut doc = Document::new(10, 10);
         for y in 0..10u16 {
-            doc.set_cell(0, 5, y, Cell { ch: '│', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+            doc.set_cell(
+                0,
+                5,
+                y,
+                Cell {
+                    ch: '│',
+                    fg: Rgba::WHITE,
+                    bg: Rgba::TRANSPARENT,
+                },
+            );
         }
         let tctx = ctx(PlaneMask::ALL, '#');
         let mut rect = drag(&doc, &tctx, (2, 2), (8, 8));
-        assert!(rect.pending().iter().any(|p| p.cell.ch == '┼'), "contact cells join pre-mutation");
+        assert!(
+            rect.pending().iter().any(|p| p.cell.ch == '┼'),
+            "contact cells join pre-mutation"
+        );
 
         // Simulate a Clear landing after the final Drag.
         for y in 0..10u16 {
@@ -229,7 +298,11 @@ mod tests {
             panic!("expected a committed edit");
         };
         let chars = chars_at(&cells);
-        assert_eq!(chars[&(5, 2)], '─', "the vanished vertical run must not leave a stale '┼' join");
+        assert_eq!(
+            chars[&(5, 2)],
+            '─',
+            "the vanished vertical run must not leave a stale '┼' join"
+        );
         assert_eq!(chars[&(5, 8)], '─');
     }
 
@@ -300,10 +373,21 @@ mod tests {
     fn a_stroke_tools_committed_cell_edit_reads_before_from_the_ctx_frame_it_was_drawn_against() {
         let mut doc = Document::new(10, 10);
         let mut history = crate::edit::History::new();
-        let edit = crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(10, 10)).unwrap();
+        let edit =
+            crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(10, 10)).unwrap();
         history.apply(&mut doc, edit);
         for y in 0..10u16 {
-            doc.set_cell_at(1, 0, 5, y, Cell { ch: '│', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+            doc.set_cell_at(
+                1,
+                0,
+                5,
+                y,
+                Cell {
+                    ch: '│',
+                    fg: Rgba::WHITE,
+                    bg: Rgba::TRANSPARENT,
+                },
+            );
         }
         doc.set_active_frame(0); // only ctx.frame targets frame 1
 
@@ -315,7 +399,11 @@ mod tests {
             panic!("expected a committed edit");
         };
         let chars = chars_at(&cells);
-        assert_eq!(chars[&(5, 2)], '┼', "the join read must consult frame 1's content, not frame 0's blank active frame");
+        assert_eq!(
+            chars[&(5, 2)],
+            '┼',
+            "the join read must consult frame 1's content, not frame 0's blank active frame"
+        );
         assert_eq!(chars[&(5, 8)], '┼');
     }
 
@@ -325,7 +413,8 @@ mod tests {
     fn a_stroke_tools_committed_cell_edit_carries_the_ctx_frame_it_was_drawn_against() {
         let mut doc = Document::new(10, 10);
         let mut history = crate::edit::History::new();
-        let edit = crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(10, 10)).unwrap();
+        let edit =
+            crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(10, 10)).unwrap();
         history.apply(&mut doc, edit);
 
         let mut tctx = ctx(PlaneMask::ALL, '#');
@@ -335,6 +424,9 @@ mod tests {
         let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
             panic!("expected a committed edit");
         };
-        assert!(cells.iter().all(|c| c.frame == 1), "every CellEdit must carry the frame it was drawn against");
+        assert!(
+            cells.iter().all(|c| c.frame == 1),
+            "every CellEdit must carry the frame it was drawn against"
+        );
     }
 }

@@ -24,13 +24,27 @@ const TOUCH_THUMB: Vec2 = Vec2::new(96.0, 60.0);
 /// shorter than the 68px touch ones.
 const PANEL_H: f32 = 240.0;
 
-pub(crate) fn show(ui: &mut Ui, doc: &Document, state: &SharedState, thumbs: &mut ThumbnailCache, top_edit_id: Option<u64>) -> PanelOutcome {
+pub(crate) fn show(
+    ui: &mut Ui,
+    doc: &Document,
+    state: &SharedState,
+    thumbs: &mut ThumbnailCache,
+    top_edit_id: Option<u64>,
+) -> PanelOutcome {
     let mut outcome = PanelOutcome::default();
     let resp = egui::Panel::bottom("gascii_anim_timeline_kiosk")
         .frame(crate::timeline::panel_frame(ui.ctx()))
         .exact_size(PANEL_H)
         .show(ui, |ui| {
-            outcome = crate::timeline::body(ui, doc, state, thumbs, TOUCH_THUMB, TOUCH_CONTROL_H, top_edit_id);
+            outcome = crate::timeline::body(
+                ui,
+                doc,
+                state,
+                thumbs,
+                TOUCH_THUMB,
+                TOUCH_CONTROL_H,
+                top_edit_id,
+            );
         });
     outcome.pressed_inside = crate::timeline::pressed_inside(ui, resp.response.rect);
     outcome
@@ -64,13 +78,21 @@ mod tests {
         let ctx = egui::Context::default();
         let mut windowed = None;
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            windowed = Some(crate::timeline::show(ui, &doc, &state, &mut thumbs_windowed, Some(1)));
+            windowed = Some(crate::timeline::show(
+                ui,
+                &doc,
+                &state,
+                &mut thumbs_windowed,
+                Some(1),
+            ));
         });
         let windowed = windowed.unwrap();
 
         let ctx2 = egui::Context::default();
         let mut kiosk = None;
-        let _ = ctx2.run_ui(egui::RawInput::default(), |ui| kiosk = Some(show(ui, &doc, &state, &mut thumbs_kiosk, Some(1))));
+        let _ = ctx2.run_ui(egui::RawInput::default(), |ui| {
+            kiosk = Some(show(ui, &doc, &state, &mut thumbs_kiosk, Some(1)))
+        });
         let kiosk = kiosk.unwrap();
 
         assert_eq!(windowed.edits.len(), kiosk.edits.len());

@@ -22,12 +22,23 @@ const STROKE_W: f32 = 1.4;
 const DASH: (f32, f32) = (2.5, 2.0);
 
 // M3 13l1-4 7.5-7.5 3 3L7 12l-4 1z
-pub(crate) const PENCIL: &[IconPath] =
-    &[IconPath::closed(&[(3.0, 13.0), (4.0, 9.0), (11.5, 1.5), (14.5, 4.5), (7.0, 12.0)])];
+pub(crate) const PENCIL: &[IconPath] = &[IconPath::closed(&[
+    (3.0, 13.0),
+    (4.0, 9.0),
+    (11.5, 1.5),
+    (14.5, 4.5),
+    (7.0, 12.0),
+])];
 
 // M6 13l-3.5-3.5L9 3l3.5 3.5L7 12H14
-pub(crate) const ERASER: &[IconPath] =
-    &[IconPath::open(&[(6.0, 13.0), (2.5, 9.5), (9.0, 3.0), (12.5, 6.5), (7.0, 12.0), (14.0, 12.0)])];
+pub(crate) const ERASER: &[IconPath] = &[IconPath::open(&[
+    (6.0, 13.0),
+    (2.5, 9.5),
+    (9.0, 3.0),
+    (12.5, 6.5),
+    (7.0, 12.0),
+    (14.0, 12.0),
+])];
 
 // pipette: squeeze bulb (top-left), tapered barrel to the tip (bottom-right), collar band
 pub(crate) const EYEDROPPER: &[IconPath] = &[
@@ -54,19 +65,35 @@ pub(crate) const FILL: &[IconPath] = &[
         (2.5, 8.5),
         (7.0, 4.0),
     ]),
-    IconPath::closed(&[(13.0, 10.5), (14.2, 13.0), (13.6, 14.2), (12.4, 14.2), (11.8, 13.0)]),
+    IconPath::closed(&[
+        (13.0, 10.5),
+        (14.2, 13.0),
+        (13.6, 14.2),
+        (12.4, 14.2),
+        (11.8, 13.0),
+    ]),
 ];
 
 // rect x=2.5 y=3.5 w=11 h=9
-pub(crate) const RECTANGLE: &[IconPath] =
-    &[IconPath::closed(&[(2.5, 3.5), (13.5, 3.5), (13.5, 12.5), (2.5, 12.5)])];
+pub(crate) const RECTANGLE: &[IconPath] = &[IconPath::closed(&[
+    (2.5, 3.5),
+    (13.5, 3.5),
+    (13.5, 12.5),
+    (2.5, 12.5),
+])];
 
 // M2.5 13.5l11-11
 pub(crate) const LINE: &[IconPath] = &[IconPath::open(&[(2.5, 13.5), (13.5, 2.5)])];
 
 // rect x=2.5 y=2.5 w=11 h=11, dashed
 pub(crate) const SELECTION: &[IconPath] = &[IconPath {
-    pts: &[(2.5, 2.5), (13.5, 2.5), (13.5, 13.5), (2.5, 13.5), (2.5, 2.5)],
+    pts: &[
+        (2.5, 2.5),
+        (13.5, 2.5),
+        (13.5, 13.5),
+        (2.5, 13.5),
+        (2.5, 2.5),
+    ],
     closed: false, // drawn as an explicitly-closed polyline so the dash pattern runs continuously
     dashed: true,
 }];
@@ -74,7 +101,13 @@ pub(crate) const SELECTION: &[IconPath] = &[IconPath {
 /// Strokes `icon` to fill `rect`, which is assumed square. Scaling lives only here. An empty
 /// `icon` slice falls back to `fallback_letter`, painted centered in the cell — a plugin tool with
 /// no icon of its own gets a legible cell rather than a blank one.
-pub fn paint(painter: &Painter, icon: &[IconPath], rect: Rect, color: Color32, fallback_letter: char) {
+pub fn paint(
+    painter: &Painter,
+    icon: &[IconPath],
+    rect: Rect,
+    color: Color32,
+    fallback_letter: char,
+) {
     if icon.is_empty() {
         painter.text(
             rect.center(),
@@ -93,7 +126,12 @@ pub fn paint(painter: &Painter, icon: &[IconPath], rect: Rect, color: Color32, f
     for sub in icon {
         let mut pts: Vec<Pos2> = sub.pts.iter().copied().map(map).collect();
         if sub.dashed {
-            painter.extend(Shape::dashed_line(&pts, stroke, DASH.0 * scale, DASH.1 * scale));
+            painter.extend(Shape::dashed_line(
+                &pts,
+                stroke,
+                DASH.0 * scale,
+                DASH.1 * scale,
+            ));
         } else if sub.closed {
             painter.add(Shape::closed_line(pts, stroke));
         } else {
@@ -114,8 +152,9 @@ pub fn paint(painter: &Painter, icon: &[IconPath], rect: Rect, color: Color32, f
 mod tests {
     use super::*;
 
-    const BUILTIN_ICONS: [&[IconPath]; 8] =
-        [PENCIL, ERASER, EYEDROPPER, TEXT, FILL, RECTANGLE, LINE, SELECTION];
+    const BUILTIN_ICONS: [&[IconPath]; 8] = [
+        PENCIL, ERASER, EYEDROPPER, TEXT, FILL, RECTANGLE, LINE, SELECTION,
+    ];
 
     /// Every `tools()` row must carry either a real icon (>=2 points per sub-path) or an empty
     /// slice that falls back cleanly (never a panic, never a blank cell) — replaces the old total
@@ -124,7 +163,11 @@ mod tests {
     fn every_tools_row_has_a_paintable_icon_or_falls_back_cleanly() {
         for d in crate::app::tools() {
             for sub in d.icon {
-                assert!(sub.pts.len() >= 2, "{}: a sub-path has fewer than 2 points", d.name);
+                assert!(
+                    sub.pts.len() >= 2,
+                    "{}: a sub-path has fewer than 2 points",
+                    d.name
+                );
             }
         }
 
@@ -156,7 +199,10 @@ mod tests {
     /// The bulb is the feature that distinguishes the eyedropper's silhouette from the pencil's.
     #[test]
     fn eyedropper_has_a_closed_bulb_subpath() {
-        assert!(EYEDROPPER.iter().any(|s| s.closed), "eyedropper is missing its closed bulb subpath");
+        assert!(
+            EYEDROPPER.iter().any(|s| s.closed),
+            "eyedropper is missing its closed bulb subpath"
+        );
     }
 
     /// D4: the brush icon now ships from the plugin crate, not from this module — this module no
@@ -166,6 +212,9 @@ mod tests {
     #[test]
     fn the_brush_icon_now_comes_from_the_plugin_crate() {
         let brush = crate::app::tool_def(crate::app::BRUSH_KIND);
-        assert!(std::ptr::eq(brush.icon, gascii_density_brush::BRUSH_ICON), "Brush's icon must be the plugin crate's own const, not a host copy");
+        assert!(
+            std::ptr::eq(brush.icon, gascii_density_brush::BRUSH_ICON),
+            "Brush's icon must be the plugin crate's own const, not a host copy"
+        );
     }
 }

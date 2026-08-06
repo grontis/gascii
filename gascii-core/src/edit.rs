@@ -59,37 +59,84 @@ pub enum Edit {
     /// A document-extent change (grow or shrink), top-left anchored. `before`/`after` are full
     /// snapshots so undo/redo restore cropped-away cells exactly, not just the extent. Frame count
     /// is invariant under resize, so `active_frame` is not part of this variant.
-    Resize { before: DocSnapshot, after: DocSnapshot },
+    Resize {
+        before: DocSnapshot,
+        after: DocSnapshot,
+    },
     /// Inserts `frame` at `index`. `active_frame_before`/`active_frame_after` are the cursor's
     /// exact value before/after this insert (computed once by `frame_ops.rs`'s index-shift rules,
     /// never recomputed by `History`) — inserting can shift which frame a numeric `active_frame`
     /// index refers to, exactly like inserting text shifts a cursor position.
-    AddFrame { index: usize, frame: Frame, active_frame_before: usize, active_frame_after: usize },
+    AddFrame {
+        index: usize,
+        frame: Frame,
+        active_frame_before: usize,
+        active_frame_after: usize,
+    },
     /// Removes the frame at `index`, keeping its content so undo can reinsert it exactly.
-    RemoveFrame { index: usize, frame: Frame, active_frame_before: usize, active_frame_after: usize },
+    RemoveFrame {
+        index: usize,
+        frame: Frame,
+        active_frame_before: usize,
+        active_frame_after: usize,
+    },
     /// Moves the frame at `from` to `to`. Never changes frame *count*, but can still shift the
     /// index a still-valid `active_frame` should track.
-    ReorderFrame { from: usize, to: usize, active_frame_before: usize, active_frame_after: usize },
+    ReorderFrame {
+        from: usize,
+        to: usize,
+        active_frame_before: usize,
+        active_frame_after: usize,
+    },
     /// Sets frame `index`'s duration override (`None` clears it, falling back to the document
     /// default).
-    SetFrameDuration { index: usize, before: Option<u32>, after: Option<u32> },
+    SetFrameDuration {
+        index: usize,
+        before: Option<u32>,
+        after: Option<u32>,
+    },
     /// Inserts a new layer at `index` — `layers[f]` is frame `f`'s own content for the layer being
     /// added (`layers.len()` must equal `doc.frame_count()`; enforced by `structural_edit_is_valid`).
     /// `active_layer_before`/`active_layer_after` mirror `AddFrame`'s own cursor-shift contract,
     /// except `layer_ops::add_layer`/`duplicate_layer` deliberately set `active_layer_after` to the
     /// *new* layer's own index rather than reusing `AddFrame`'s "shift the old cursor" rule — see
     /// `layer_ops.rs`'s own doc comment for why layer addition and frame addition diverge here.
-    AddLayer { index: usize, layers: Vec<Layer>, meta: LayerMeta, active_layer_before: usize, active_layer_after: usize },
+    AddLayer {
+        index: usize,
+        layers: Vec<Layer>,
+        meta: LayerMeta,
+        active_layer_before: usize,
+        active_layer_after: usize,
+    },
     /// Removes the layer at `index` from every frame, keeping each frame's removed content (plus
     /// the removed `LayerMeta`) so undo can reinsert it exactly.
-    RemoveLayer { index: usize, layers: Vec<Layer>, meta: LayerMeta, active_layer_before: usize, active_layer_after: usize },
+    RemoveLayer {
+        index: usize,
+        layers: Vec<Layer>,
+        meta: LayerMeta,
+        active_layer_before: usize,
+        active_layer_after: usize,
+    },
     /// Moves the layer at `from` to `to` in every frame (plus `layer_meta`). Never changes layer
     /// *count*, but can still shift the index a still-valid `active_layer` should track.
-    ReorderLayer { from: usize, to: usize, active_layer_before: usize, active_layer_after: usize },
+    ReorderLayer {
+        from: usize,
+        to: usize,
+        active_layer_before: usize,
+        active_layer_after: usize,
+    },
     /// Sets layer `index`'s visibility.
-    SetLayerVisibility { index: usize, before: bool, after: bool },
+    SetLayerVisibility {
+        index: usize,
+        before: bool,
+        after: bool,
+    },
     /// Sets layer `index`'s name.
-    SetLayerName { index: usize, before: String, after: String },
+    SetLayerName {
+        index: usize,
+        before: String,
+        after: String,
+    },
 }
 
 fn apply_forward(doc: &mut Document, edit: &Edit) {
@@ -104,15 +151,29 @@ fn apply_forward(doc: &mut Document, edit: &Edit) {
             doc.height = after.extent.height;
             doc.frames = after.frames.clone();
         }
-        Edit::AddFrame { index, frame, active_frame_after, .. } => {
+        Edit::AddFrame {
+            index,
+            frame,
+            active_frame_after,
+            ..
+        } => {
             doc.frames.insert(*index, frame.clone());
             doc.active_frame = *active_frame_after;
         }
-        Edit::RemoveFrame { index, active_frame_after, .. } => {
+        Edit::RemoveFrame {
+            index,
+            active_frame_after,
+            ..
+        } => {
             doc.frames.remove(*index);
             doc.active_frame = *active_frame_after;
         }
-        Edit::ReorderFrame { from, to, active_frame_after, .. } => {
+        Edit::ReorderFrame {
+            from,
+            to,
+            active_frame_after,
+            ..
+        } => {
             let f = doc.frames.remove(*from);
             doc.frames.insert(*to, f);
             doc.active_frame = *active_frame_after;
@@ -120,21 +181,36 @@ fn apply_forward(doc: &mut Document, edit: &Edit) {
         Edit::SetFrameDuration { index, after, .. } => {
             doc.frames[*index].duration_override = *after;
         }
-        Edit::AddLayer { index, layers, meta, active_layer_after, .. } => {
+        Edit::AddLayer {
+            index,
+            layers,
+            meta,
+            active_layer_after,
+            ..
+        } => {
             for (f, layer) in doc.frames.iter_mut().zip(layers.iter()) {
                 f.layers.insert(*index, layer.clone());
             }
             doc.layer_meta.insert(*index, meta.clone());
             doc.active_layer = *active_layer_after;
         }
-        Edit::RemoveLayer { index, active_layer_after, .. } => {
+        Edit::RemoveLayer {
+            index,
+            active_layer_after,
+            ..
+        } => {
             for f in doc.frames.iter_mut() {
                 f.layers.remove(*index);
             }
             doc.layer_meta.remove(*index);
             doc.active_layer = *active_layer_after;
         }
-        Edit::ReorderLayer { from, to, active_layer_after, .. } => {
+        Edit::ReorderLayer {
+            from,
+            to,
+            active_layer_after,
+            ..
+        } => {
             for f in doc.frames.iter_mut() {
                 let l = f.layers.remove(*from);
                 f.layers.insert(*to, l);
@@ -178,11 +254,18 @@ fn structural_edit_is_valid(doc: &Document, edit: &Edit) -> bool {
         Edit::RemoveFrame { index, .. } => *index < len && len > 1,
         Edit::ReorderFrame { from, to, .. } => *from < len && *to < len,
         Edit::SetFrameDuration { index, .. } => *index < len,
-        Edit::AddLayer { index, layers, .. } => frames_consistent && *index <= layer_len && layers.len() == doc.frames.len(),
-        Edit::RemoveLayer { index, layers, .. } => {
-            frames_consistent && *index < layer_len && layer_len > 1 && layers.len() == doc.frames.len()
+        Edit::AddLayer { index, layers, .. } => {
+            frames_consistent && *index <= layer_len && layers.len() == doc.frames.len()
         }
-        Edit::ReorderLayer { from, to, .. } => frames_consistent && *from < layer_len && *to < layer_len,
+        Edit::RemoveLayer { index, layers, .. } => {
+            frames_consistent
+                && *index < layer_len
+                && layer_len > 1
+                && layers.len() == doc.frames.len()
+        }
+        Edit::ReorderLayer { from, to, .. } => {
+            frames_consistent && *from < layer_len && *to < layer_len
+        }
         // `SetLayerVisibility`/`SetLayerName` never touch `frames`, so the frames-consistency guard
         // above doesn't apply to them.
         Edit::SetLayerVisibility { index, .. } => *index < layer_len,
@@ -202,15 +285,29 @@ fn apply_backward(doc: &mut Document, edit: &Edit) {
             doc.height = before.extent.height;
             doc.frames = before.frames.clone();
         }
-        Edit::AddFrame { index, active_frame_before, .. } => {
+        Edit::AddFrame {
+            index,
+            active_frame_before,
+            ..
+        } => {
             doc.frames.remove(*index);
             doc.active_frame = *active_frame_before;
         }
-        Edit::RemoveFrame { index, frame, active_frame_before, .. } => {
+        Edit::RemoveFrame {
+            index,
+            frame,
+            active_frame_before,
+            ..
+        } => {
             doc.frames.insert(*index, frame.clone());
             doc.active_frame = *active_frame_before;
         }
-        Edit::ReorderFrame { from, to, active_frame_before, .. } => {
+        Edit::ReorderFrame {
+            from,
+            to,
+            active_frame_before,
+            ..
+        } => {
             let f = doc.frames.remove(*to);
             doc.frames.insert(*from, f);
             doc.active_frame = *active_frame_before;
@@ -218,21 +315,36 @@ fn apply_backward(doc: &mut Document, edit: &Edit) {
         Edit::SetFrameDuration { index, before, .. } => {
             doc.frames[*index].duration_override = *before;
         }
-        Edit::AddLayer { index, active_layer_before, .. } => {
+        Edit::AddLayer {
+            index,
+            active_layer_before,
+            ..
+        } => {
             for f in doc.frames.iter_mut() {
                 f.layers.remove(*index);
             }
             doc.layer_meta.remove(*index);
             doc.active_layer = *active_layer_before;
         }
-        Edit::RemoveLayer { index, layers, meta, active_layer_before, .. } => {
+        Edit::RemoveLayer {
+            index,
+            layers,
+            meta,
+            active_layer_before,
+            ..
+        } => {
             for (f, layer) in doc.frames.iter_mut().zip(layers.iter()) {
                 f.layers.insert(*index, layer.clone());
             }
             doc.layer_meta.insert(*index, meta.clone());
             doc.active_layer = *active_layer_before;
         }
-        Edit::ReorderLayer { from, to, active_layer_before, .. } => {
+        Edit::ReorderLayer {
+            from,
+            to,
+            active_layer_before,
+            ..
+        } => {
             for f in doc.frames.iter_mut() {
                 let l = f.layers.remove(*to);
                 f.layers.insert(*from, l);
@@ -366,8 +478,14 @@ mod tests {
             d
         })
         .expect("a fully painted canvas must clear to an edit");
-        let Edit::Cells(cells) = &edit else { panic!("expected an Edit::Cells") };
-        assert_eq!(cells.len(), 64 * 64, "one CellEdit per touched cell, no dedup/compression");
+        let Edit::Cells(cells) = &edit else {
+            panic!("expected an Edit::Cells")
+        };
+        assert_eq!(
+            cells.len(),
+            64 * 64,
+            "one CellEdit per touched cell, no dedup/compression"
+        );
         let entry_bytes = cells.len() * std::mem::size_of::<CellEdit>();
         assert!(
             entry_bytes < 1 << 20,
@@ -397,9 +515,30 @@ mod tests {
         let mut doc = Document::new(10, 10);
         let mut history = History::new();
         let edit = Edit::Cells(vec![
-            CellEdit { frame: 0, layer: 0, x: 0, y: 0, before: Cell::BLANK, after: cell('a') },
-            CellEdit { frame: 0, layer: 0, x: 1, y: 0, before: Cell::BLANK, after: cell('b') },
-            CellEdit { frame: 0, layer: 0, x: 2, y: 0, before: Cell::BLANK, after: cell('c') },
+            CellEdit {
+                frame: 0,
+                layer: 0,
+                x: 0,
+                y: 0,
+                before: Cell::BLANK,
+                after: cell('a'),
+            },
+            CellEdit {
+                frame: 0,
+                layer: 0,
+                x: 1,
+                y: 0,
+                before: Cell::BLANK,
+                after: cell('b'),
+            },
+            CellEdit {
+                frame: 0,
+                layer: 0,
+                x: 2,
+                y: 0,
+                before: Cell::BLANK,
+                after: cell('c'),
+            },
         ]);
         history.apply(&mut doc, edit);
         assert_eq!(doc.cell(0, 0, 0), Some(&cell('a')));
@@ -412,7 +551,14 @@ mod tests {
         let mut doc = Document::new(10, 10);
         let mut history = History::new();
         let before = *doc.cell(0, 3, 4).unwrap();
-        let edit = Edit::Cells(vec![CellEdit { frame: 0, layer: 0, x: 3, y: 4, before, after: cell('x') }]);
+        let edit = Edit::Cells(vec![CellEdit {
+            frame: 0,
+            layer: 0,
+            x: 3,
+            y: 4,
+            before,
+            after: cell('x'),
+        }]);
         history.apply(&mut doc, edit);
         assert!(history.undo(&mut doc));
         assert_eq!(doc.cell(0, 3, 4), Some(&before));
@@ -497,8 +643,22 @@ mod tests {
         let mut doc = Document::new(10, 10);
         let mut history = History::new();
         let edit = Edit::Cells(vec![
-            CellEdit { frame: 0, layer: 0, x: 0, y: 0, before: Cell::BLANK, after: cell('a') },
-            CellEdit { frame: 0, layer: 0, x: 1, y: 0, before: Cell::BLANK, after: cell('b') },
+            CellEdit {
+                frame: 0,
+                layer: 0,
+                x: 0,
+                y: 0,
+                before: Cell::BLANK,
+                after: cell('a'),
+            },
+            CellEdit {
+                frame: 0,
+                layer: 0,
+                x: 1,
+                y: 0,
+                before: Cell::BLANK,
+                after: cell('b'),
+            },
         ]);
         history.apply(&mut doc, edit);
         history.undo(&mut doc);
@@ -674,7 +834,11 @@ mod tests {
         assert_ne!(history.top_edit_id(), id_a);
 
         history.undo(&mut doc);
-        assert_eq!(history.top_edit_id(), id_a, "undo must restore the exact prior edit's id");
+        assert_eq!(
+            history.top_edit_id(),
+            id_a,
+            "undo must restore the exact prior edit's id"
+        );
     }
 
     #[test]
@@ -694,7 +858,11 @@ mod tests {
 
         history.undo(&mut doc);
         history.redo(&mut doc);
-        assert_eq!(history.top_edit_id(), id_original, "redo must restore the original apply's id, not a fresh one");
+        assert_eq!(
+            history.top_edit_id(),
+            id_original,
+            "redo must restore the original apply's id, not a fresh one"
+        );
     }
 
     #[test]
@@ -748,7 +916,10 @@ mod tests {
         doc.set_cell(0, 0, 0, cell('a'));
         let before = DocSnapshot {
             extent: doc.extent(),
-            frames: vec![Frame { layers: doc.layers().to_vec(), duration_override: None }],
+            frames: vec![Frame {
+                layers: doc.layers().to_vec(),
+                duration_override: None,
+            }],
         };
 
         // Simulate a grow that preserves top-left content and pads the rest.
@@ -759,12 +930,24 @@ mod tests {
         };
         let after_layer = Layer::from_cells(after_cells, 8, 8);
         let after = DocSnapshot {
-            extent: DocExtent { width: 8, height: 8 },
-            frames: vec![Frame { layers: vec![after_layer], duration_override: None }],
+            extent: DocExtent {
+                width: 8,
+                height: 8,
+            },
+            frames: vec![Frame {
+                layers: vec![after_layer],
+                duration_override: None,
+            }],
         };
 
         let mut history = History::new();
-        history.apply(&mut doc, Edit::Resize { before: before.clone(), after: after.clone() });
+        history.apply(
+            &mut doc,
+            Edit::Resize {
+                before: before.clone(),
+                after: after.clone(),
+            },
+        );
         assert_eq!(doc.width, 8);
         assert_eq!(doc.height, 8);
         assert_eq!(doc.cell(0, 0, 0), Some(&cell('a')));
@@ -792,15 +975,29 @@ mod tests {
         let mut doc = Document::new(5, 5);
         let mut history = History::new();
 
-        let cells_edit = Edit::Cells(vec![CellEdit { frame: 0, layer: 0, x: 0, y: 0, before: Cell::BLANK, after: cell('a') }]);
+        let cells_edit = Edit::Cells(vec![CellEdit {
+            frame: 0,
+            layer: 0,
+            x: 0,
+            y: 0,
+            before: Cell::BLANK,
+            after: cell('a'),
+        }]);
         history.apply(&mut doc, cells_edit);
         let id_cells = history.top_edit_id();
 
-        let duration_edit = Edit::SetFrameDuration { index: 0, before: None, after: Some(50) };
+        let duration_edit = Edit::SetFrameDuration {
+            index: 0,
+            before: None,
+            after: Some(50),
+        };
         history.apply(&mut doc, duration_edit);
         let id_duration = history.top_edit_id();
 
-        assert_ne!(id_cells, id_duration, "each applied edit gets its own id regardless of kind");
+        assert_ne!(
+            id_cells, id_duration,
+            "each applied edit gets its own id regardless of kind"
+        );
         assert_eq!(doc.frame(0).unwrap().duration_override, Some(50));
 
         assert!(history.undo(&mut doc));
@@ -809,11 +1006,19 @@ mod tests {
             None,
             "the first undo must reverse the more recently applied edit (SetFrameDuration), not Cells"
         );
-        assert_eq!(doc.cell(0, 0, 0), Some(&cell('a')), "the Cells edit must still be applied");
+        assert_eq!(
+            doc.cell(0, 0, 0),
+            Some(&cell('a')),
+            "the Cells edit must still be applied"
+        );
         assert_eq!(history.top_edit_id(), id_cells);
 
         assert!(history.undo(&mut doc));
-        assert_eq!(doc.cell(0, 0, 0), Some(&Cell::BLANK), "the second undo reverses the Cells edit");
+        assert_eq!(
+            doc.cell(0, 0, 0),
+            Some(&Cell::BLANK),
+            "the second undo reverses the Cells edit"
+        );
         assert_eq!(history.top_edit_id(), None);
     }
 
@@ -827,19 +1032,40 @@ mod tests {
         let mut history = History::new();
 
         // Add a second frame, landing after the active one (active_frame stays 0).
-        let add_edit = Edit::AddFrame { index: 1, frame: Frame::blank(3, 3), active_frame_before: 0, active_frame_after: 0 };
+        let add_edit = Edit::AddFrame {
+            index: 1,
+            frame: Frame::blank(3, 3),
+            active_frame_before: 0,
+            active_frame_after: 0,
+        };
         history.apply(&mut doc, add_edit);
         assert_eq!(doc.frame_count(), 2);
 
         // Draw a distinguishing glyph on frame 1.
-        let cell_edit = Edit::Cells(vec![CellEdit { frame: 1, layer: 0, x: 0, y: 0, before: Cell::BLANK, after: cell('Q') }]);
+        let cell_edit = Edit::Cells(vec![CellEdit {
+            frame: 1,
+            layer: 0,
+            x: 0,
+            y: 0,
+            before: Cell::BLANK,
+            after: cell('Q'),
+        }]);
         history.apply(&mut doc, cell_edit);
         assert_eq!(doc.cell_at(1, 0, 0, 0), Some(&cell('Q')));
 
         // Reorder: swap frames 0 and 1. The active frame (0) follows the swap to index 1.
-        let reorder_edit = Edit::ReorderFrame { from: 0, to: 1, active_frame_before: 0, active_frame_after: 1 };
+        let reorder_edit = Edit::ReorderFrame {
+            from: 0,
+            to: 1,
+            active_frame_before: 0,
+            active_frame_after: 1,
+        };
         history.apply(&mut doc, reorder_edit);
-        assert_eq!(doc.cell_at(0, 0, 0, 0), Some(&cell('Q')), "the reorder moved frame 1's content to index 0");
+        assert_eq!(
+            doc.cell_at(0, 0, 0, 0),
+            Some(&cell('Q')),
+            "the reorder moved frame 1's content to index 0"
+        );
 
         // Undo the reorder first: frame 1's content (with 'Q') must land back at index 1.
         assert!(history.undo(&mut doc));
@@ -862,14 +1088,23 @@ mod tests {
     fn add_frame_undo_restores_active_frame_to_its_pre_insert_value() {
         let mut doc = Document::new(3, 3);
         let mut history = History::new();
-        let add_edit = Edit::AddFrame { index: 0, frame: Frame::blank(3, 3), active_frame_before: 0, active_frame_after: 1 };
+        let add_edit = Edit::AddFrame {
+            index: 0,
+            frame: Frame::blank(3, 3),
+            active_frame_before: 0,
+            active_frame_after: 1,
+        };
         history.apply(&mut doc, add_edit);
         assert_eq!(doc.frame_count(), 2);
         assert_eq!(doc.active_frame(), 1);
 
         assert!(history.undo(&mut doc));
         assert_eq!(doc.frame_count(), 1);
-        assert_eq!(doc.active_frame(), 0, "undo must restore active_frame to its pre-insert value");
+        assert_eq!(
+            doc.active_frame(),
+            0,
+            "undo must restore active_frame to its pre-insert value"
+        );
     }
 
     #[test]
@@ -879,13 +1114,26 @@ mod tests {
 
         let mut cells = vec![Cell::BLANK; 9];
         cells[0] = cell('Z');
-        let frame1 = Frame { layers: vec![Layer::from_cells(cells, 3, 3)], duration_override: None };
+        let frame1 = Frame {
+            layers: vec![Layer::from_cells(cells, 3, 3)],
+            duration_override: None,
+        };
 
-        let add_edit = Edit::AddFrame { index: 1, frame: frame1.clone(), active_frame_before: 0, active_frame_after: 0 };
+        let add_edit = Edit::AddFrame {
+            index: 1,
+            frame: frame1.clone(),
+            active_frame_before: 0,
+            active_frame_after: 0,
+        };
         history.apply(&mut doc, add_edit);
         assert_eq!(doc.cell_at(1, 0, 0, 0), Some(&cell('Z')));
 
-        let remove_edit = Edit::RemoveFrame { index: 1, frame: frame1, active_frame_before: 0, active_frame_after: 0 };
+        let remove_edit = Edit::RemoveFrame {
+            index: 1,
+            frame: frame1,
+            active_frame_before: 0,
+            active_frame_after: 0,
+        };
         history.apply(&mut doc, remove_edit);
         assert_eq!(doc.frame_count(), 1);
 
@@ -903,10 +1151,24 @@ mod tests {
         let mut doc = Document::new(3, 3);
         let mut history = History::new();
 
-        history.apply(&mut doc, Edit::SetFrameDuration { index: 0, before: None, after: Some(200) });
+        history.apply(
+            &mut doc,
+            Edit::SetFrameDuration {
+                index: 0,
+                before: None,
+                after: Some(200),
+            },
+        );
         assert_eq!(doc.frame(0).unwrap().duration_override, Some(200));
 
-        history.apply(&mut doc, Edit::SetFrameDuration { index: 0, before: Some(200), after: Some(400) });
+        history.apply(
+            &mut doc,
+            Edit::SetFrameDuration {
+                index: 0,
+                before: Some(200),
+                after: Some(400),
+            },
+        );
         assert_eq!(doc.frame(0).unwrap().duration_override, Some(400));
 
         assert!(history.undo(&mut doc));
@@ -929,10 +1191,23 @@ mod tests {
     fn add_frame_at_len_plus_one_is_a_silent_no_op() {
         let mut doc = Document::new(3, 3); // frame_count() == 1
         let mut history = History::new();
-        let edit = Edit::AddFrame { index: 2, frame: Frame::blank(3, 3), active_frame_before: 0, active_frame_after: 0 };
+        let edit = Edit::AddFrame {
+            index: 2,
+            frame: Frame::blank(3, 3),
+            active_frame_before: 0,
+            active_frame_after: 0,
+        };
         history.apply(&mut doc, edit);
-        assert_eq!(doc.frame_count(), 1, "an out-of-range AddFrame index must not touch the document");
-        assert_eq!(history.top_edit_id(), None, "a rejected edit must never reach the undo stack");
+        assert_eq!(
+            doc.frame_count(),
+            1,
+            "an out-of-range AddFrame index must not touch the document"
+        );
+        assert_eq!(
+            history.top_edit_id(),
+            None,
+            "a rejected edit must never reach the undo stack"
+        );
     }
 
     #[test]
@@ -941,7 +1216,12 @@ mod tests {
         // `Vec::insert`'s own contract), not an off-by-one rejection.
         let mut doc = Document::new(3, 3);
         let mut history = History::new();
-        let edit = Edit::AddFrame { index: 1, frame: Frame::blank(3, 3), active_frame_before: 0, active_frame_after: 1 };
+        let edit = Edit::AddFrame {
+            index: 1,
+            frame: Frame::blank(3, 3),
+            active_frame_before: 0,
+            active_frame_after: 1,
+        };
         history.apply(&mut doc, edit);
         assert_eq!(doc.frame_count(), 2);
         assert!(history.top_edit_id().is_some());
@@ -951,7 +1231,12 @@ mod tests {
     fn remove_frame_out_of_range_is_a_silent_no_op() {
         let mut doc = Document::new(3, 3);
         let mut history = History::new();
-        let edit = Edit::RemoveFrame { index: 5, frame: Frame::blank(3, 3), active_frame_before: 0, active_frame_after: 0 };
+        let edit = Edit::RemoveFrame {
+            index: 5,
+            frame: Frame::blank(3, 3),
+            active_frame_before: 0,
+            active_frame_after: 0,
+        };
         history.apply(&mut doc, edit);
         assert_eq!(doc.frame_count(), 1);
         assert_eq!(history.top_edit_id(), None);
@@ -964,9 +1249,18 @@ mod tests {
     fn remove_frame_of_the_only_remaining_frame_is_a_silent_no_op() {
         let mut doc = Document::new(3, 3);
         let mut history = History::new();
-        let edit = Edit::RemoveFrame { index: 0, frame: Frame::blank(3, 3), active_frame_before: 0, active_frame_after: 0 };
+        let edit = Edit::RemoveFrame {
+            index: 0,
+            frame: Frame::blank(3, 3),
+            active_frame_before: 0,
+            active_frame_after: 0,
+        };
         history.apply(&mut doc, edit);
-        assert_eq!(doc.frame_count(), 1, "a document must never be left with zero frames");
+        assert_eq!(
+            doc.frame_count(),
+            1,
+            "a document must never be left with zero frames"
+        );
         assert_eq!(history.top_edit_id(), None);
     }
 
@@ -974,24 +1268,51 @@ mod tests {
     fn reorder_frame_out_of_range_from_or_to_is_a_silent_no_op() {
         let mut doc = Document::new(3, 3);
         let mut history = History::new();
-        let edit = Edit::AddFrame { index: 1, frame: Frame::blank(3, 3), active_frame_before: 0, active_frame_after: 0 };
+        let edit = Edit::AddFrame {
+            index: 1,
+            frame: Frame::blank(3, 3),
+            active_frame_before: 0,
+            active_frame_after: 0,
+        };
         history.apply(&mut doc, edit); // 2 frames now
         let marker = history.top_edit_id();
 
-        let bad_from = Edit::ReorderFrame { from: 9, to: 0, active_frame_before: 0, active_frame_after: 0 };
+        let bad_from = Edit::ReorderFrame {
+            from: 9,
+            to: 0,
+            active_frame_before: 0,
+            active_frame_after: 0,
+        };
         history.apply(&mut doc, bad_from);
-        assert_eq!(history.top_edit_id(), marker, "an out-of-range `from` must not push a no-op edit");
+        assert_eq!(
+            history.top_edit_id(),
+            marker,
+            "an out-of-range `from` must not push a no-op edit"
+        );
 
-        let bad_to = Edit::ReorderFrame { from: 0, to: 9, active_frame_before: 0, active_frame_after: 0 };
+        let bad_to = Edit::ReorderFrame {
+            from: 0,
+            to: 9,
+            active_frame_before: 0,
+            active_frame_after: 0,
+        };
         history.apply(&mut doc, bad_to);
-        assert_eq!(history.top_edit_id(), marker, "an out-of-range `to` must not push a no-op edit");
+        assert_eq!(
+            history.top_edit_id(),
+            marker,
+            "an out-of-range `to` must not push a no-op edit"
+        );
     }
 
     #[test]
     fn set_frame_duration_out_of_range_is_a_silent_no_op() {
         let mut doc = Document::new(3, 3);
         let mut history = History::new();
-        let edit = Edit::SetFrameDuration { index: 7, before: None, after: Some(50) };
+        let edit = Edit::SetFrameDuration {
+            index: 7,
+            before: None,
+            after: Some(50),
+        };
         history.apply(&mut doc, edit);
         assert_eq!(history.top_edit_id(), None);
         assert_eq!(doc.frame(0).unwrap().duration_override, None);
@@ -1004,16 +1325,36 @@ mod tests {
     fn undo_after_a_rejected_structural_edit_still_reverses_the_correct_prior_edit() {
         let mut doc = Document::new(3, 3);
         let mut history = History::new();
-        let real_edit = Edit::Cells(vec![CellEdit { frame: 0, layer: 0, x: 0, y: 0, before: Cell::BLANK, after: cell('a') }]);
+        let real_edit = Edit::Cells(vec![CellEdit {
+            frame: 0,
+            layer: 0,
+            x: 0,
+            y: 0,
+            before: Cell::BLANK,
+            after: cell('a'),
+        }]);
         history.apply(&mut doc, real_edit);
         assert_eq!(doc.cell(0, 0, 0), Some(&cell('a')));
 
-        let bad_edit = Edit::RemoveFrame { index: 9, frame: Frame::blank(3, 3), active_frame_before: 0, active_frame_after: 0 };
+        let bad_edit = Edit::RemoveFrame {
+            index: 9,
+            frame: Frame::blank(3, 3),
+            active_frame_before: 0,
+            active_frame_after: 0,
+        };
         history.apply(&mut doc, bad_edit);
-        assert_eq!(doc.cell(0, 0, 0), Some(&cell('a')), "the rejected edit must not disturb the document");
+        assert_eq!(
+            doc.cell(0, 0, 0),
+            Some(&cell('a')),
+            "the rejected edit must not disturb the document"
+        );
 
         assert!(history.undo(&mut doc));
-        assert_eq!(doc.cell(0, 0, 0), Some(&Cell::BLANK), "undo must still reverse the one real edit that was applied");
+        assert_eq!(
+            doc.cell(0, 0, 0),
+            Some(&Cell::BLANK),
+            "undo must still reverse the one real edit that was applied"
+        );
         assert!(!history.can_undo());
     }
 
@@ -1038,7 +1379,11 @@ mod tests {
 
         assert!(history.undo(&mut doc));
         assert_eq!(doc.layer_count(), 1);
-        assert_eq!(doc.active_layer(), 0, "undo must restore active_layer to its pre-insert value");
+        assert_eq!(
+            doc.active_layer(),
+            0,
+            "undo must restore active_layer to its pre-insert value"
+        );
     }
 
     #[test]
@@ -1049,7 +1394,10 @@ mod tests {
         let mut cells = vec![Cell::BLANK; 9];
         cells[0] = cell('Z');
         let layer1 = Layer::from_cells(cells, 3, 3);
-        let meta1 = LayerMeta { name: "Ink".to_string(), visible: true };
+        let meta1 = LayerMeta {
+            name: "Ink".to_string(),
+            visible: true,
+        };
 
         let add_edit = Edit::AddLayer {
             index: 1,
@@ -1074,15 +1422,30 @@ mod tests {
 
         assert!(history.undo(&mut doc));
         assert_eq!(doc.layer_count(), 2);
-        assert_eq!(doc.cell_at(0, 1, 0, 0), Some(&cell('Z')), "undo must reinsert the exact removed layer's content");
-        assert_eq!(doc.layer_name(1), Some("Ink"), "undo must reinsert the exact removed layer's metadata");
+        assert_eq!(
+            doc.cell_at(0, 1, 0, 0),
+            Some(&cell('Z')),
+            "undo must reinsert the exact removed layer's content"
+        );
+        assert_eq!(
+            doc.layer_name(1),
+            Some("Ink"),
+            "undo must reinsert the exact removed layer's metadata"
+        );
     }
 
     #[test]
     fn set_layer_visibility_undo_restores_the_prior_value() {
         let mut doc = Document::new(3, 3);
         let mut history = History::new();
-        history.apply(&mut doc, Edit::SetLayerVisibility { index: 0, before: true, after: false });
+        history.apply(
+            &mut doc,
+            Edit::SetLayerVisibility {
+                index: 0,
+                before: true,
+                after: false,
+            },
+        );
         assert!(!doc.layer_visible(0));
 
         assert!(history.undo(&mut doc));
@@ -1095,10 +1458,24 @@ mod tests {
         let mut history = History::new();
         let original = doc.layer_name(0).unwrap().to_string();
 
-        history.apply(&mut doc, Edit::SetLayerName { index: 0, before: original.clone(), after: "Ink".to_string() });
+        history.apply(
+            &mut doc,
+            Edit::SetLayerName {
+                index: 0,
+                before: original.clone(),
+                after: "Ink".to_string(),
+            },
+        );
         assert_eq!(doc.layer_name(0), Some("Ink"));
 
-        history.apply(&mut doc, Edit::SetLayerName { index: 0, before: "Ink".to_string(), after: "Shading".to_string() });
+        history.apply(
+            &mut doc,
+            Edit::SetLayerName {
+                index: 0,
+                before: "Ink".to_string(),
+                after: "Shading".to_string(),
+            },
+        );
         assert_eq!(doc.layer_name(0), Some("Shading"));
 
         assert!(history.undo(&mut doc));
@@ -1133,14 +1510,30 @@ mod tests {
         assert_eq!(doc.layer_count(), 2);
 
         // Draw a distinguishing glyph on layer 1.
-        let cell_edit = Edit::Cells(vec![CellEdit { frame: 0, layer: 1, x: 0, y: 0, before: Cell::BLANK, after: cell('Q') }]);
+        let cell_edit = Edit::Cells(vec![CellEdit {
+            frame: 0,
+            layer: 1,
+            x: 0,
+            y: 0,
+            before: Cell::BLANK,
+            after: cell('Q'),
+        }]);
         history.apply(&mut doc, cell_edit);
         assert_eq!(doc.cell_at(0, 1, 0, 0), Some(&cell('Q')));
 
         // Reorder: swap layers 0 and 1. The active layer (1) follows the swap to index 0.
-        let reorder_edit = Edit::ReorderLayer { from: 0, to: 1, active_layer_before: 1, active_layer_after: 0 };
+        let reorder_edit = Edit::ReorderLayer {
+            from: 0,
+            to: 1,
+            active_layer_before: 1,
+            active_layer_after: 0,
+        };
         history.apply(&mut doc, reorder_edit);
-        assert_eq!(doc.cell_at(0, 0, 0, 0), Some(&cell('Q')), "the reorder moved layer 1's content to index 0");
+        assert_eq!(
+            doc.cell_at(0, 0, 0, 0),
+            Some(&cell('Q')),
+            "the reorder moved layer 1's content to index 0"
+        );
 
         // Undo the reorder first: layer 1's content (with 'Q') must land back at index 1.
         assert!(history.undo(&mut doc));
@@ -1175,8 +1568,16 @@ mod tests {
             active_layer_after: 0,
         };
         history.apply(&mut doc, edit);
-        assert_eq!(doc.layer_count(), 1, "an out-of-range AddLayer index must not touch the document");
-        assert_eq!(history.top_edit_id(), None, "a rejected edit must never reach the undo stack");
+        assert_eq!(
+            doc.layer_count(),
+            1,
+            "an out-of-range AddLayer index must not touch the document"
+        );
+        assert_eq!(
+            history.top_edit_id(),
+            None,
+            "a rejected edit must never reach the undo stack"
+        );
     }
 
     #[test]
@@ -1238,7 +1639,11 @@ mod tests {
             active_layer_after: 0,
         };
         history.apply(&mut doc, edit);
-        assert_eq!(doc.layer_count(), 1, "a document must never be left with zero layers");
+        assert_eq!(
+            doc.layer_count(),
+            1,
+            "a document must never be left with zero layers"
+        );
         assert_eq!(history.top_edit_id(), None);
     }
 
@@ -1256,20 +1661,42 @@ mod tests {
         history.apply(&mut doc, add); // 2 layers now
         let marker = history.top_edit_id();
 
-        let bad_from = Edit::ReorderLayer { from: 9, to: 0, active_layer_before: 0, active_layer_after: 0 };
+        let bad_from = Edit::ReorderLayer {
+            from: 9,
+            to: 0,
+            active_layer_before: 0,
+            active_layer_after: 0,
+        };
         history.apply(&mut doc, bad_from);
-        assert_eq!(history.top_edit_id(), marker, "an out-of-range `from` must not push a no-op edit");
+        assert_eq!(
+            history.top_edit_id(),
+            marker,
+            "an out-of-range `from` must not push a no-op edit"
+        );
 
-        let bad_to = Edit::ReorderLayer { from: 0, to: 9, active_layer_before: 0, active_layer_after: 0 };
+        let bad_to = Edit::ReorderLayer {
+            from: 0,
+            to: 9,
+            active_layer_before: 0,
+            active_layer_after: 0,
+        };
         history.apply(&mut doc, bad_to);
-        assert_eq!(history.top_edit_id(), marker, "an out-of-range `to` must not push a no-op edit");
+        assert_eq!(
+            history.top_edit_id(),
+            marker,
+            "an out-of-range `to` must not push a no-op edit"
+        );
     }
 
     #[test]
     fn set_layer_visibility_out_of_range_is_a_silent_no_op() {
         let mut doc = Document::new(3, 3);
         let mut history = History::new();
-        let edit = Edit::SetLayerVisibility { index: 7, before: true, after: false };
+        let edit = Edit::SetLayerVisibility {
+            index: 7,
+            before: true,
+            after: false,
+        };
         history.apply(&mut doc, edit);
         assert_eq!(history.top_edit_id(), None);
         assert!(doc.layer_visible(0));
@@ -1279,7 +1706,11 @@ mod tests {
     fn set_layer_name_out_of_range_is_a_silent_no_op() {
         let mut doc = Document::new(3, 3);
         let mut history = History::new();
-        let edit = Edit::SetLayerName { index: 7, before: "x".to_string(), after: "y".to_string() };
+        let edit = Edit::SetLayerName {
+            index: 7,
+            before: "x".to_string(),
+            after: "y".to_string(),
+        };
         history.apply(&mut doc, edit);
         assert_eq!(history.top_edit_id(), None);
     }
@@ -1289,13 +1720,18 @@ mod tests {
     /// — see `LayerMeta`'s field doc on `Document`) must cause every structural layer edit to
     /// no-op rather than panic.
     #[test]
-    fn structural_layer_edits_no_op_against_a_document_whose_frame_layer_counts_have_desynced_from_layer_meta() {
+    fn structural_layer_edits_no_op_against_a_document_whose_frame_layer_counts_have_desynced_from_layer_meta(
+    ) {
         let mut doc = Document::new(3, 3);
         // Bypass layer_ops entirely: push a layer directly onto the active frame's own Vec<Layer>,
         // leaving layer_meta (len 1) out of lockstep with frames[0].layers (len 2).
         doc.layers_mut().push(Layer::blank(3, 3));
         assert_eq!(doc.layers().len(), 2);
-        assert_eq!(doc.layer_count(), 1, "layer_meta was never touched by the direct layers_mut() push");
+        assert_eq!(
+            doc.layer_count(),
+            1,
+            "layer_meta was never touched by the direct layers_mut() push"
+        );
 
         let mut history = History::new();
 
@@ -1307,7 +1743,11 @@ mod tests {
             active_layer_after: 0,
         };
         history.apply(&mut doc, add);
-        assert_eq!(doc.layers().len(), 2, "AddLayer must no-op against a desynced document, not panic");
+        assert_eq!(
+            doc.layers().len(),
+            2,
+            "AddLayer must no-op against a desynced document, not panic"
+        );
         assert_eq!(history.top_edit_id(), None);
 
         let remove = Edit::RemoveLayer {
@@ -1318,11 +1758,24 @@ mod tests {
             active_layer_after: 0,
         };
         history.apply(&mut doc, remove);
-        assert_eq!(doc.layers().len(), 2, "RemoveLayer must no-op against a desynced document, not panic");
+        assert_eq!(
+            doc.layers().len(),
+            2,
+            "RemoveLayer must no-op against a desynced document, not panic"
+        );
         assert_eq!(history.top_edit_id(), None);
 
-        let reorder = Edit::ReorderLayer { from: 0, to: 0, active_layer_before: 0, active_layer_after: 0 };
+        let reorder = Edit::ReorderLayer {
+            from: 0,
+            to: 0,
+            active_layer_before: 0,
+            active_layer_after: 0,
+        };
         history.apply(&mut doc, reorder);
-        assert_eq!(history.top_edit_id(), None, "ReorderLayer must no-op against a desynced document, not panic");
+        assert_eq!(
+            history.top_edit_id(),
+            None,
+            "ReorderLayer must no-op against a desynced document, not panic"
+        );
     }
 }

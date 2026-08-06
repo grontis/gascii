@@ -53,7 +53,13 @@ pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
         Pos2::new(center, bar.center().y),
         Vec2::new(text_w + 20.0, bar.height()),
     );
-    painter.text(title_rect.center(), Align2::CENTER_CENTER, &title, font, t.fg_text);
+    painter.text(
+        title_rect.center(),
+        Align2::CENTER_CENTER,
+        &title,
+        font,
+        t.fg_text,
+    );
 
     let band = |from: f32, to: f32| {
         if to - from > 8.0 {
@@ -72,7 +78,11 @@ pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
 
     // Caption boxes, laid out from the trailing edge inwards.
     let mut x = bar.max.x - 10.0 - BOX;
-    for (label, action) in [("×", Caption::Close), ("□", Caption::Max), ("–", Caption::Min)] {
+    for (label, action) in [
+        ("×", Caption::Close),
+        ("□", Caption::Max),
+        ("–", Caption::Min),
+    ] {
         let r = Rect::from_min_size(Pos2::new(x, bar.center().y - BOX / 2.0), Vec2::splat(BOX));
         let resp = ui.interact(r, ui.id().with(label), Sense::click());
         // Pressed inverts (the shared selection rule); hover otherwise gets the ordinary wash, not
@@ -86,8 +96,19 @@ pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
             (egui::Color32::TRANSPARENT, t.fg_text)
         };
         painter.rect_filled(r, 0.0, fill);
-        painter.rect_stroke(r, 0.0, Stroke::new(1.0, t.border_strong), StrokeKind::Inside);
-        painter.text(r.center(), Align2::CENTER_CENTER, label, fonts::mono_id(fonts::size::CAPTION), fg);
+        painter.rect_stroke(
+            r,
+            0.0,
+            Stroke::new(1.0, t.border_strong),
+            StrokeKind::Inside,
+        );
+        painter.text(
+            r.center(),
+            Align2::CENTER_CENTER,
+            label,
+            fonts::mono_id(fonts::size::CAPTION),
+            fg,
+        );
         if resp.clicked() {
             match action {
                 // Routed through the ordinary close request, so the unsaved-changes veto still runs.
@@ -206,19 +227,43 @@ mod tests {
     #[test]
     fn corners_win_over_the_edges_they_overlap() {
         let g = 5.0;
-        assert_eq!(resize_hit(Pos2::new(1.0, 1.0), win(), g), Some(ResizeDirection::NorthWest));
-        assert_eq!(resize_hit(Pos2::new(999.0, 1.0), win(), g), Some(ResizeDirection::NorthEast));
-        assert_eq!(resize_hit(Pos2::new(1.0, 799.0), win(), g), Some(ResizeDirection::SouthWest));
-        assert_eq!(resize_hit(Pos2::new(999.0, 799.0), win(), g), Some(ResizeDirection::SouthEast));
+        assert_eq!(
+            resize_hit(Pos2::new(1.0, 1.0), win(), g),
+            Some(ResizeDirection::NorthWest)
+        );
+        assert_eq!(
+            resize_hit(Pos2::new(999.0, 1.0), win(), g),
+            Some(ResizeDirection::NorthEast)
+        );
+        assert_eq!(
+            resize_hit(Pos2::new(1.0, 799.0), win(), g),
+            Some(ResizeDirection::SouthWest)
+        );
+        assert_eq!(
+            resize_hit(Pos2::new(999.0, 799.0), win(), g),
+            Some(ResizeDirection::SouthEast)
+        );
     }
 
     #[test]
     fn edges_resolve_to_their_own_direction() {
         let g = 5.0;
-        assert_eq!(resize_hit(Pos2::new(500.0, 1.0), win(), g), Some(ResizeDirection::North));
-        assert_eq!(resize_hit(Pos2::new(500.0, 799.0), win(), g), Some(ResizeDirection::South));
-        assert_eq!(resize_hit(Pos2::new(1.0, 400.0), win(), g), Some(ResizeDirection::West));
-        assert_eq!(resize_hit(Pos2::new(999.0, 400.0), win(), g), Some(ResizeDirection::East));
+        assert_eq!(
+            resize_hit(Pos2::new(500.0, 1.0), win(), g),
+            Some(ResizeDirection::North)
+        );
+        assert_eq!(
+            resize_hit(Pos2::new(500.0, 799.0), win(), g),
+            Some(ResizeDirection::South)
+        );
+        assert_eq!(
+            resize_hit(Pos2::new(1.0, 400.0), win(), g),
+            Some(ResizeDirection::West)
+        );
+        assert_eq!(
+            resize_hit(Pos2::new(999.0, 400.0), win(), g),
+            Some(ResizeDirection::East)
+        );
     }
 
     /// The grip is a thin ring. If the interior reported a direction, every click in the app would

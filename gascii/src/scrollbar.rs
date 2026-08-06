@@ -152,7 +152,11 @@ fn interact_bar(
     horizontal: bool,
     id: egui::Id,
 ) -> BarVis {
-    let track_len = if horizontal { track.width() } else { track.height() };
+    let track_len = if horizontal {
+        track.width()
+    } else {
+        track.height()
+    };
     let Some((start, len)) = axis.thumb(track_len) else {
         return BarVis::default();
     };
@@ -160,7 +164,11 @@ fn interact_bar(
     let track_resp = ui.interact(track, id.with("track"), Sense::click());
     if track_resp.clicked() {
         if let Some(pos) = track_resp.interact_pointer_pos() {
-            let t = if horizontal { pos.x - track.left() } else { pos.y - track.top() };
+            let t = if horizontal {
+                pos.x - track.left()
+            } else {
+                pos.y - track.top()
+            };
             *pan = axis.pan_for_track_click(track_len, t);
         }
     }
@@ -206,12 +214,20 @@ fn paint_bar(ui: &Ui, t: &crate::ui::theme::Tokens, thumb: Rect, vis: BarVis) {
     let painter = ui.painter();
     // The chrome's four-state contract, floating over the desk: an idle thumb is a small panel
     // card, hover adds the shared wash, and dragging inverts.
-    let fill = if vis.dragged { t.bg_inverse } else { t.bg_panel };
+    let fill = if vis.dragged {
+        t.bg_inverse
+    } else {
+        t.bg_panel
+    };
     painter.rect_filled(thumb, 0.0, fill);
     if vis.hovered && !vis.dragged {
         painter.rect_filled(thumb, 0.0, t.bg_hover);
     }
-    let border = if vis.hovered || vis.dragged { t.border_strong } else { t.border_soft };
+    let border = if vis.hovered || vis.dragged {
+        t.border_strong
+    } else {
+        t.border_soft
+    };
     painter.rect_stroke(thumb, 0.0, Stroke::new(1.0, border), StrokeKind::Inside);
 }
 
@@ -263,7 +279,10 @@ mod tests {
         // View showing the doc's last page: pan = view - doc.
         let axis = Axis::new(1600.0, 800.0, -800.0);
         let (start, len) = axis.thumb(400.0).unwrap();
-        assert!((start + len - 400.0).abs() < 0.01, "start={start} len={len}");
+        assert!(
+            (start + len - 400.0).abs() < 0.01,
+            "start={start} len={len}"
+        );
     }
 
     #[test]
@@ -300,7 +319,11 @@ mod tests {
         let drag = 60.0;
         let moved = Axis::new(1600.0, 800.0, -200.0 + axis.pan_delta(track, drag));
         let (start_after, _) = moved.thumb(track).unwrap();
-        assert!((start_after - start_before - drag).abs() < 0.01, "moved {}", start_after - start_before);
+        assert!(
+            (start_after - start_before - drag).abs() < 0.01,
+            "moved {}",
+            start_after - start_before
+        );
     }
 
     #[test]

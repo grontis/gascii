@@ -67,8 +67,12 @@ mod tests {
     /// not silently ignored by a consumer's `match`.
     #[test]
     fn doc_property_variants_construct_and_match_exhaustively() {
-        let props =
-            vec![DocProperty::ActiveFrame(3), DocProperty::LoopPlayback(true), DocProperty::DefaultFrameDuration(120), DocProperty::ActiveLayer(2)];
+        let props = vec![
+            DocProperty::ActiveFrame(3),
+            DocProperty::LoopPlayback(true),
+            DocProperty::DefaultFrameDuration(120),
+            DocProperty::ActiveLayer(2),
+        ];
         for p in props {
             match p {
                 DocProperty::ActiveFrame(i) => assert_eq!(i, 3),

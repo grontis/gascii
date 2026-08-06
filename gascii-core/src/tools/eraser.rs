@@ -10,7 +10,9 @@ pub struct Eraser {
 
 impl Default for Eraser {
     fn default() -> Self {
-        Eraser { stroke: FreehandStroke::new() }
+        Eraser {
+            stroke: FreehandStroke::new(),
+        }
     }
 }
 
@@ -32,7 +34,9 @@ impl Tool for Eraser {
                 self.stroke.drag(x, y, proposed, ctx, doc);
                 ToolResponse::Active
             }
-            ToolEvent::Release => ToolResponse::Commit(self.stroke.finish(doc, ctx.frame, ctx.layer)),
+            ToolEvent::Release => {
+                ToolResponse::Commit(self.stroke.finish(doc, ctx.frame, ctx.layer))
+            }
             ToolEvent::Cancel => {
                 self.stroke.cancel();
                 ToolResponse::Idle
@@ -73,7 +77,16 @@ mod tests {
 
     fn painted_doc() -> Document {
         let mut doc = Document::new(20, 20);
-        doc.set_cell(0, 5, 5, Cell { ch: 'x', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) });
+        doc.set_cell(
+            0,
+            5,
+            5,
+            Cell {
+                ch: 'x',
+                fg: Rgba(9, 9, 9, 255),
+                bg: Rgba(8, 8, 8, 255),
+            },
+        );
         doc
     }
 
@@ -96,7 +109,10 @@ mod tests {
     fn glyph_only_erase_blanks_char_and_text_color_keeps_bg() {
         let doc = painted_doc();
         let existing = *doc.cell(0, 5, 5).unwrap();
-        let mask = PlaneMask { glyph: true, bg: false };
+        let mask = PlaneMask {
+            glyph: true,
+            bg: false,
+        };
         let mut eraser = Eraser::new();
         let ctx = ctx(mask);
         eraser.update(ToolEvent::Press { x: 5, y: 5 }, &ctx, &doc);
@@ -106,7 +122,11 @@ mod tests {
             panic!("expected a committed edit");
         };
         assert_eq!(cells[0].after.ch, ' ');
-        assert_eq!(cells[0].after.fg, Cell::BLANK.fg, "text color is cleared alongside the glyph");
+        assert_eq!(
+            cells[0].after.fg,
+            Cell::BLANK.fg,
+            "text color is cleared alongside the glyph"
+        );
         assert_eq!(cells[0].after.bg, existing.bg, "bg masked off");
     }
 
@@ -114,7 +134,10 @@ mod tests {
     fn bg_only_erase_clears_bg_keeps_glyph_fg() {
         let doc = painted_doc();
         let existing = *doc.cell(0, 5, 5).unwrap();
-        let mask = PlaneMask { glyph: false, bg: true };
+        let mask = PlaneMask {
+            glyph: false,
+            bg: true,
+        };
         let mut eraser = Eraser::new();
         let ctx = ctx(mask);
         eraser.update(ToolEvent::Press { x: 5, y: 5 }, &ctx, &doc);

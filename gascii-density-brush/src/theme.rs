@@ -68,7 +68,10 @@ mod tests {
         for t in [LIGHT, DARK] {
             let c = t.bg_hover;
             assert!(c.a() < 128, "bg_hover is not translucent (a={})", c.a());
-            assert!(c.r() <= c.a() && c.g() <= c.a() && c.b() <= c.a(), "bg_hover channel exceeds its alpha");
+            assert!(
+                c.r() <= c.a() && c.g() <= c.a() && c.b() <= c.a(),
+                "bg_hover channel exceeds its alpha"
+            );
         }
     }
 
@@ -108,13 +111,34 @@ mod tests {
             fg_inverse: Color32::from_rgb(0x1C, 0x1B, 0x19),
         };
         for (name, expected, actual) in [("light", host_light, LIGHT), ("dark", host_dark, DARK)] {
-            assert_eq!(actual.fg_text, expected.fg_text, "{name}: fg_text drifted from the host's copy");
-            assert_eq!(actual.fg_secondary, expected.fg_secondary, "{name}: fg_secondary drifted from the host's copy");
-            assert_eq!(actual.border_strong, expected.border_strong, "{name}: border_strong drifted from the host's copy");
-            assert_eq!(actual.border_soft, expected.border_soft, "{name}: border_soft drifted from the host's copy");
-            assert_eq!(actual.bg_hover, expected.bg_hover, "{name}: bg_hover drifted from the host's copy");
-            assert_eq!(actual.bg_inverse, expected.bg_inverse, "{name}: bg_inverse drifted from the host's copy");
-            assert_eq!(actual.fg_inverse, expected.fg_inverse, "{name}: fg_inverse drifted from the host's copy");
+            assert_eq!(
+                actual.fg_text, expected.fg_text,
+                "{name}: fg_text drifted from the host's copy"
+            );
+            assert_eq!(
+                actual.fg_secondary, expected.fg_secondary,
+                "{name}: fg_secondary drifted from the host's copy"
+            );
+            assert_eq!(
+                actual.border_strong, expected.border_strong,
+                "{name}: border_strong drifted from the host's copy"
+            );
+            assert_eq!(
+                actual.border_soft, expected.border_soft,
+                "{name}: border_soft drifted from the host's copy"
+            );
+            assert_eq!(
+                actual.bg_hover, expected.bg_hover,
+                "{name}: bg_hover drifted from the host's copy"
+            );
+            assert_eq!(
+                actual.bg_inverse, expected.bg_inverse,
+                "{name}: bg_inverse drifted from the host's copy"
+            );
+            assert_eq!(
+                actual.fg_inverse, expected.fg_inverse,
+                "{name}: fg_inverse drifted from the host's copy"
+            );
         }
     }
 }

@@ -53,7 +53,11 @@ impl FloatingStamp {
                     continue;
                 }
                 let idx = row as usize * self.patch.width as usize + col as usize;
-                out.push(PendingCell { x: dx as u16, y: dy as u16, cell: self.patch.cells[idx] });
+                out.push(PendingCell {
+                    x: dx as u16,
+                    y: dy as u16,
+                    cell: self.patch.cells[idx],
+                });
             }
         }
         out
@@ -79,7 +83,10 @@ impl FloatingStamp {
                 let (x, y) = (dx as u16, dy as u16);
                 let idx = row as usize * self.patch.width as usize + col as usize;
                 let after = self.patch.cells[idx];
-                let before = doc.cell_at(frame, layer, x, y).copied().unwrap_or(Cell::BLANK);
+                let before = doc
+                    .cell_at(frame, layer, x, y)
+                    .copied()
+                    .unwrap_or(Cell::BLANK);
                 touched.insert((x, y), (before, after));
             }
         }
@@ -89,7 +96,10 @@ impl FloatingStamp {
                     // A destination write already claimed this cell (an overlap) — it wins over
                     // the source's blank, per the drop's overlap-merge contract.
                     touched.entry((x, y)).or_insert_with(|| {
-                        let before = doc.cell_at(frame, layer, x, y).copied().unwrap_or(Cell::BLANK);
+                        let before = doc
+                            .cell_at(frame, layer, x, y)
+                            .copied()
+                            .unwrap_or(Cell::BLANK);
                         (before, Cell::BLANK)
                     });
                 }
@@ -99,7 +109,14 @@ impl FloatingStamp {
         let mut cell_edits: Vec<CellEdit> = touched
             .into_iter()
             .filter(|&(_, (before, after))| before != after)
-            .map(|((x, y), (before, after))| CellEdit { frame, layer, x, y, before, after })
+            .map(|((x, y), (before, after))| CellEdit {
+                frame,
+                layer,
+                x,
+                y,
+                before,
+                after,
+            })
             .collect();
         cell_edits.sort_by_key(|c| (c.y, c.x));
         (!cell_edits.is_empty()).then_some(Edit::Cells(cell_edits))
@@ -108,8 +125,13 @@ impl FloatingStamp {
 
 enum DragMode {
     Idle,
-    Marquee { anchor: (u16, u16) },
-    Move { grab: (u16, u16), orig_dest: (i32, i32) },
+    Marquee {
+        anchor: (u16, u16),
+    },
+    Move {
+        grab: (u16, u16),
+        orig_dest: (i32, i32),
+    },
 }
 
 /// Rectangular selection with move-to-floating-stamp and Delete. `resync` is deliberately left at
@@ -124,7 +146,12 @@ pub struct SelectionTool {
 
 impl Default for SelectionTool {
     fn default() -> Self {
-        SelectionTool { selection: None, float: None, mode: DragMode::Idle, pending: Vec::new() }
+        SelectionTool {
+            selection: None,
+            float: None,
+            mode: DragMode::Idle,
+            pending: Vec::new(),
+        }
     }
 }
 
@@ -134,18 +161,32 @@ impl SelectionTool {
     }
 
     fn rebuild_pending(&mut self) {
-        self.pending = self.float.as_ref().map(FloatingStamp::pending_cells).unwrap_or_default();
+        self.pending = self
+            .float
+            .as_ref()
+            .map(FloatingStamp::pending_cells)
+            .unwrap_or_default();
     }
 
     fn blank_region(doc: &Document, frame: usize, layer: usize, rect: CellRect) -> Option<Edit> {
         let mut cell_edits = Vec::new();
         for y in rect.y0..=rect.y1 {
             for x in rect.x0..=rect.x1 {
-                let before = doc.cell_at(frame, layer, x, y).copied().unwrap_or(Cell::BLANK);
+                let before = doc
+                    .cell_at(frame, layer, x, y)
+                    .copied()
+                    .unwrap_or(Cell::BLANK);
                 if before == Cell::BLANK {
                     continue;
                 }
-                cell_edits.push(CellEdit { frame, layer, x, y, before, after: Cell::BLANK });
+                cell_edits.push(CellEdit {
+                    frame,
+                    layer,
+                    x,
+                    y,
+                    before,
+                    after: Cell::BLANK,
+                });
             }
         }
         (!cell_edits.is_empty()).then_some(Edit::Cells(cell_edits))
@@ -165,12 +206,18 @@ impl Tool for SelectionTool {
                 if self.float.is_some() {
                     let regrab = self.float.as_ref().map(|f| (f.contains(x, y), f.dest));
                     if let Some((true, dest)) = regrab {
-                        self.mode = DragMode::Move { grab: (x, y), orig_dest: dest };
+                        self.mode = DragMode::Move {
+                            grab: (x, y),
+                            orig_dest: dest,
+                        };
                         return ToolResponse::Active;
                     }
                     // Click away from the float: drop it now, then start a fresh marquee at the
                     // click — mirrors TextTool::Press's same-call flush-then-relocate.
-                    let edit = self.float.take().and_then(|f| f.to_edit(doc, ctx.frame, ctx.layer));
+                    let edit = self
+                        .float
+                        .take()
+                        .and_then(|f| f.to_edit(doc, ctx.frame, ctx.layer));
                     self.mode = DragMode::Marquee { anchor: (x, y) };
                     self.selection = Some(CellRect::from_corners((x, y), (x, y)));
                     self.rebuild_pending();
@@ -180,8 +227,15 @@ impl Tool for SelectionTool {
                     if sel.contains(x, y) {
                         let patch = CellPatch::from_region(doc, sel, ctx.layer);
                         let dest = (sel.x0 as i32, sel.y0 as i32);
-                        self.float = Some(FloatingStamp { patch, source: Some(sel), dest });
-                        self.mode = DragMode::Move { grab: (x, y), orig_dest: dest };
+                        self.float = Some(FloatingStamp {
+                            patch,
+                            source: Some(sel),
+                            dest,
+                        });
+                        self.mode = DragMode::Move {
+                            grab: (x, y),
+                            orig_dest: dest,
+                        };
                         self.rebuild_pending();
                         return ToolResponse::Active;
                     }
@@ -238,7 +292,9 @@ impl Tool for SelectionTool {
                     let source = float.source;
                     self.selection = source;
                     self.rebuild_pending();
-                    ToolResponse::Commit(source.and_then(|src| Self::blank_region(doc, ctx.frame, ctx.layer, src)))
+                    ToolResponse::Commit(
+                        source.and_then(|src| Self::blank_region(doc, ctx.frame, ctx.layer, src)),
+                    )
                 } else if let Some(sel) = self.selection {
                     ToolResponse::Commit(Self::blank_region(doc, ctx.frame, ctx.layer, sel))
                 } else {
@@ -279,7 +335,11 @@ impl Tool for SelectionTool {
     }
 
     fn accept_stamp(&mut self, patch: CellPatch, at: (u16, u16), _doc: &Document) {
-        self.float = Some(FloatingStamp { patch, source: None, dest: (at.0 as i32, at.1 as i32) });
+        self.float = Some(FloatingStamp {
+            patch,
+            source: None,
+            dest: (at.0 as i32, at.1 as i32),
+        });
         self.selection = None;
         self.mode = DragMode::Idle;
         self.rebuild_pending();
@@ -294,7 +354,10 @@ impl Tool for SelectionTool {
         if marquee.is_none() && lifted_source.is_none() {
             return None;
         }
-        Some(SelectionView { marquee, lifted_source })
+        Some(SelectionView {
+            marquee,
+            lifted_source,
+        })
     }
 }
 
@@ -320,7 +383,11 @@ mod tests {
     }
 
     fn cell(ch: char) -> Cell {
-        Cell { ch, fg: Rgba(1, 2, 3, 255), bg: Rgba(4, 5, 6, 255) }
+        Cell {
+            ch,
+            fg: Rgba(1, 2, 3, 255),
+            bg: Rgba(4, 5, 6, 255),
+        }
     }
 
     fn filled_doc(w: u16, h: u16) -> Document {
@@ -350,7 +417,10 @@ mod tests {
         let mut sel = SelectionTool::new();
 
         sel.update(ToolEvent::Press { x: 999, y: 999 }, &tctx, &doc);
-        assert!(sel.selection_overlay().is_none(), "an OOB press must not start a marquee");
+        assert!(
+            sel.selection_overlay().is_none(),
+            "an OOB press must not start a marquee"
+        );
 
         sel.update(ToolEvent::Press { x: 1, y: 1 }, &tctx, &doc);
         sel.update(ToolEvent::Drag { x: 999, y: 999 }, &tctx, &doc);
@@ -359,7 +429,11 @@ mod tests {
             .selection_overlay()
             .and_then(|v| v.marquee)
             .expect("in-bounds press then OOB drag keeps a marquee");
-        assert_eq!((rect.x1, rect.y1), (4, 4), "the OOB drag corner clamps to the border");
+        assert_eq!(
+            (rect.x1, rect.y1),
+            (4, 4),
+            "the OOB drag corner clamps to the border"
+        );
     }
 
     #[test]
@@ -373,7 +447,10 @@ mod tests {
         sel.update(ToolEvent::Release, &tctx, &doc);
         let resp = sel.update(ToolEvent::Commit, &tctx, &doc);
         assert!(commit_edit(resp).is_none());
-        assert_eq!(doc, before, "a marquee alone must never mutate the document");
+        assert_eq!(
+            doc, before,
+            "a marquee alone must never mutate the document"
+        );
     }
 
     #[test]
@@ -387,10 +464,16 @@ mod tests {
         sel.update(ToolEvent::Release, &tctx, &doc);
         // Lift: press again inside the now-defined selection.
         sel.update(ToolEvent::Press { x: 3, y: 3 }, &tctx, &doc);
-        assert!(!sel.pending().is_empty(), "lifting should populate the float overlay");
+        assert!(
+            !sel.pending().is_empty(),
+            "lifting should populate the float overlay"
+        );
         // Drop without moving.
         let resp = sel.update(ToolEvent::Commit, &tctx, &doc);
-        assert!(commit_edit(resp).is_none(), "dropping at the same position must be a no-op edit");
+        assert!(
+            commit_edit(resp).is_none(),
+            "dropping at the same position must be a no-op edit"
+        );
         assert_eq!(doc, before);
     }
 
@@ -406,10 +489,17 @@ mod tests {
         sel.update(ToolEvent::Press { x: 3, y: 3 }, &tctx, &doc); // lift
         sel.update(ToolEvent::Drag { x: 4, y: 3 }, &tctx, &doc); // move +1 in x (partial overlap)
         let resp = sel.update(ToolEvent::Commit, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit") else { panic!("expected an Edit::Cells") };
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit") else {
+            panic!("expected an Edit::Cells")
+        };
 
-        let coords: std::collections::HashSet<(u16, u16)> = cells.iter().map(|c| (c.x, c.y)).collect();
-        assert_eq!(cells.len(), coords.len(), "each touched cell must appear exactly once");
+        let coords: std::collections::HashSet<(u16, u16)> =
+            cells.iter().map(|c| (c.x, c.y)).collect();
+        assert_eq!(
+            cells.len(),
+            coords.len(),
+            "each touched cell must appear exactly once"
+        );
         // Source columns 2..=4, dest columns 3..=5: union spans x in 2..=5.
         for c in &cells {
             assert!((2..=5).contains(&c.x) && (2..=4).contains(&c.y));
@@ -428,20 +518,34 @@ mod tests {
         sel.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &doc); // lift
         sel.update(ToolEvent::Drag { x: 10, y: 10 }, &tctx, &doc); // move far away (disjoint)
         let resp = sel.update(ToolEvent::Commit, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit") else { panic!("expected an Edit::Cells") };
-        assert_eq!(cells.len(), 8, "4 source cells blanked + 4 destination cells written, fully disjoint");
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit") else {
+            panic!("expected an Edit::Cells")
+        };
+        assert_eq!(
+            cells.len(),
+            8,
+            "4 source cells blanked + 4 destination cells written, fully disjoint"
+        );
 
         let mut history = crate::edit::History::new();
         let mut doc2 = doc.clone();
         history.apply(&mut doc2, Edit::Cells(cells));
         for y in 0..2u16 {
             for x in 0..2u16 {
-                assert_eq!(doc2.cell(0, x, y), Some(&Cell::BLANK), "source must be fully blanked");
+                assert_eq!(
+                    doc2.cell(0, x, y),
+                    Some(&Cell::BLANK),
+                    "source must be fully blanked"
+                );
             }
         }
         for y in 10..12u16 {
             for x in 10..12u16 {
-                assert_eq!(doc2.cell(0, x, y), doc.cell(0, x - 10, y - 10), "destination gets the lifted content");
+                assert_eq!(
+                    doc2.cell(0, x, y),
+                    doc.cell(0, x - 10, y - 10),
+                    "destination gets the lifted content"
+                );
             }
         }
     }
@@ -458,18 +562,26 @@ mod tests {
         sel.update(ToolEvent::Press { x: 3, y: 3 }, &tctx, &doc); // lift
         sel.update(ToolEvent::Drag { x: 6, y: 6 }, &tctx, &doc); // shift +3, pushes off the 5x5 canvas
         let resp = sel.update(ToolEvent::Commit, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit") else { panic!("expected an Edit::Cells") };
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit") else {
+            panic!("expected an Edit::Cells")
+        };
 
         // All 4 source cells must be blanked regardless of how much of the destination survived.
         for y in 3..5u16 {
             for x in 3..5u16 {
-                let e = cells.iter().find(|c| c.x == x && c.y == y).expect("source cell must be edited");
+                let e = cells
+                    .iter()
+                    .find(|c| c.x == x && c.y == y)
+                    .expect("source cell must be edited");
                 assert_eq!(e.after, Cell::BLANK);
             }
         }
         // No destination cell may land out of bounds.
         for c in &cells {
-            assert!(c.x < 5 && c.y < 5, "no clipped destination cell may reach the edit");
+            assert!(
+                c.x < 5 && c.y < 5,
+                "no clipped destination cell may reach the edit"
+            );
         }
     }
 
@@ -485,7 +597,9 @@ mod tests {
         sel.update(ToolEvent::Drag { x: 5, y: 5 }, &tctx, &doc); // move elsewhere
 
         let resp = sel.update(ToolEvent::Delete, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a blank-source edit") else { panic!("expected an Edit::Cells") };
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a blank-source edit") else {
+            panic!("expected an Edit::Cells")
+        };
         assert_eq!(cells.len(), 4);
         assert!(cells.iter().all(|c| c.after == Cell::BLANK));
         // The destination region (5,5)-(6,6) must be untouched — the float's content is discarded.
@@ -502,7 +616,9 @@ mod tests {
         sel.update(ToolEvent::Release, &tctx, &doc);
 
         let resp = sel.update(ToolEvent::Delete, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a blank edit") else { panic!("expected an Edit::Cells") };
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a blank edit") else {
+            panic!("expected an Edit::Cells")
+        };
         assert_eq!(cells.len(), 4);
         assert!(cells.iter().all(|c| c.after == Cell::BLANK));
     }
@@ -531,7 +647,10 @@ mod tests {
         let resp = sel.update(ToolEvent::Cancel, &tctx, &doc);
         assert!(matches!(resp, ToolResponse::Idle));
         assert!(sel.pending().is_empty());
-        assert_eq!(doc, before, "Cancel must never mutate the document — it was never touched while floating");
+        assert_eq!(
+            doc, before,
+            "Cancel must never mutate the document — it was never touched while floating"
+        );
         assert!(sel.selection_overlay().is_none());
     }
 
@@ -540,13 +659,23 @@ mod tests {
         let doc = filled_doc(10, 10);
         let tctx = ctx();
         let mut sel = SelectionTool::new();
-        let patch = CellPatch { width: 2, height: 2, cells: vec![cell('Q'); 4] };
+        let patch = CellPatch {
+            width: 2,
+            height: 2,
+            cells: vec![cell('Q'); 4],
+        };
         sel.accept_stamp(patch, (3, 3), &doc);
         assert_eq!(sel.pending().len(), 4);
 
         let resp = sel.update(ToolEvent::Commit, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a write edit") else { panic!("expected an Edit::Cells") };
-        assert_eq!(cells.len(), 4, "a pasted stamp has no source, so drop only writes the destination");
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a write edit") else {
+            panic!("expected an Edit::Cells")
+        };
+        assert_eq!(
+            cells.len(),
+            4,
+            "a pasted stamp has no source, so drop only writes the destination"
+        );
         for c in &cells {
             assert!((3..5).contains(&c.x) && (3..5).contains(&c.y));
             assert_eq!(c.after.ch, 'Q');
@@ -569,9 +698,14 @@ mod tests {
         doc.set_cell(0, 6, 6, externally_written);
 
         let resp = sel.update(ToolEvent::Commit, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit") else { panic!("expected an Edit::Cells") };
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit") else {
+            panic!("expected an Edit::Cells")
+        };
         let dest_edit = cells.iter().find(|c| c.x == 6 && c.y == 6).unwrap();
-        assert_eq!(dest_edit.before, externally_written, "before must reflect doc's post-mutation state");
+        assert_eq!(
+            dest_edit.before, externally_written,
+            "before must reflect doc's post-mutation state"
+        );
     }
 
     #[test]
@@ -588,11 +722,24 @@ mod tests {
         // Click far away from the floating stamp.
         let resp = sel.update(ToolEvent::Press { x: 9, y: 9 }, &tctx, &doc);
         let edit = commit_edit(resp).expect("click-away must drop the float as a committed edit");
-        let Edit::Cells(cells) = edit else { panic!("expected an Edit::Cells") };
-        assert!(cells.iter().any(|c| c.x == 5 && c.y == 5), "the drop must include the destination write");
+        let Edit::Cells(cells) = edit else {
+            panic!("expected an Edit::Cells")
+        };
+        assert!(
+            cells.iter().any(|c| c.x == 5 && c.y == 5),
+            "the drop must include the destination write"
+        );
 
         // A brand-new marquee now starts at the click point.
-        assert_eq!(sel.selection_overlay().unwrap().marquee, Some(CellRect { x0: 9, y0: 9, x1: 9, y1: 9 }));
+        assert_eq!(
+            sel.selection_overlay().unwrap().marquee,
+            Some(CellRect {
+                x0: 9,
+                y0: 9,
+                x1: 9,
+                y1: 9
+            })
+        );
         assert!(sel.pending().is_empty(), "no float remains after the drop");
     }
 
@@ -613,20 +760,40 @@ mod tests {
         sel.update(ToolEvent::Press { x: 1, y: 1 }, &tctx, &doc); // lift
         sel.update(ToolEvent::Drag { x: 6, y: 1 }, &tctx, &doc); // move +5 onto filled dest (6,1)-(7,1)
         let resp = sel.update(ToolEvent::Commit, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit") else { panic!("expected an Edit::Cells") };
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a combined edit") else {
+            panic!("expected an Edit::Cells")
+        };
 
-        let dest_blank = cells.iter().find(|c| c.x == 6 && c.y == 1).expect("dest cell under the float's Blank must be edited");
-        assert_eq!(dest_blank.after, Cell::BLANK, "a Blank patch cell must overwrite the destination, not leave it showing through");
-        assert_ne!(dest_blank.before, Cell::BLANK, "sanity: the destination cell actually had non-blank content before the drop");
+        let dest_blank = cells
+            .iter()
+            .find(|c| c.x == 6 && c.y == 1)
+            .expect("dest cell under the float's Blank must be edited");
+        assert_eq!(
+            dest_blank.after,
+            Cell::BLANK,
+            "a Blank patch cell must overwrite the destination, not leave it showing through"
+        );
+        assert_ne!(
+            dest_blank.before,
+            Cell::BLANK,
+            "sanity: the destination cell actually had non-blank content before the drop"
+        );
 
         let mut history = crate::edit::History::new();
         let mut doc2 = doc.clone();
         history.apply(&mut doc2, Edit::Cells(cells.clone()));
         assert_eq!(doc2.cell(0, 6, 1), Some(&Cell::BLANK));
-        assert_eq!(doc2.cell(0, 7, 1).unwrap().ch, before.cell(0, 2, 1).unwrap().ch, "the filled patch cell still lands normally");
+        assert_eq!(
+            doc2.cell(0, 7, 1).unwrap().ch,
+            before.cell(0, 2, 1).unwrap().ch,
+            "the filled patch cell still lands normally"
+        );
 
         assert!(history.undo(&mut doc2));
-        assert_eq!(doc2, before, "undo must restore the destination's original content byte-exact");
+        assert_eq!(
+            doc2, before,
+            "undo must restore the destination's original content byte-exact"
+        );
     }
 
     #[test]
@@ -638,14 +805,26 @@ mod tests {
         let before = doc.clone();
         let tctx = ctx();
         let mut sel = SelectionTool::new();
-        let patch = CellPatch { width: 2, height: 1, cells: vec![cell('Q'), Cell::BLANK] };
+        let patch = CellPatch {
+            width: 2,
+            height: 1,
+            cells: vec![cell('Q'), Cell::BLANK],
+        };
         sel.accept_stamp(patch, (3, 3), &doc);
         let resp = sel.update(ToolEvent::Commit, &tctx, &doc);
-        let Edit::Cells(cells) = commit_edit(resp).expect("expected a write edit") else { panic!("expected an Edit::Cells") };
+        let Edit::Cells(cells) = commit_edit(resp).expect("expected a write edit") else {
+            panic!("expected an Edit::Cells")
+        };
 
-        let blank_edit = cells.iter().find(|c| c.x == 4 && c.y == 3).expect("dest cell under the pasted Blank must be edited");
+        let blank_edit = cells
+            .iter()
+            .find(|c| c.x == 4 && c.y == 3)
+            .expect("dest cell under the pasted Blank must be edited");
         assert_eq!(blank_edit.after, Cell::BLANK);
-        let glyph_edit = cells.iter().find(|c| c.x == 3 && c.y == 3).expect("dest cell under the pasted glyph must be edited");
+        let glyph_edit = cells
+            .iter()
+            .find(|c| c.x == 3 && c.y == 3)
+            .expect("dest cell under the pasted glyph must be edited");
         assert_eq!(glyph_edit.after.ch, 'Q');
 
         let mut history = crate::edit::History::new();
@@ -653,7 +832,10 @@ mod tests {
         history.apply(&mut doc2, Edit::Cells(cells));
         assert_eq!(doc2.cell(0, 4, 3), Some(&Cell::BLANK));
         assert!(history.undo(&mut doc2));
-        assert_eq!(doc2, before, "undo must restore the destination's original content byte-exact");
+        assert_eq!(
+            doc2, before,
+            "undo must restore the destination's original content byte-exact"
+        );
     }
 
     #[test]
@@ -670,8 +852,14 @@ mod tests {
 
         // Press again inside the float's current position: must re-grab, not drop.
         let resp = sel.update(ToolEvent::Press { x: 5, y: 5 }, &tctx, &doc);
-        assert!(matches!(resp, ToolResponse::Active), "re-grabbing must not commit");
-        assert!(!sel.pending().is_empty(), "the float must still exist after a re-grab");
+        assert!(
+            matches!(resp, ToolResponse::Active),
+            "re-grabbing must not commit"
+        );
+        assert!(
+            !sel.pending().is_empty(),
+            "the float must still exist after a re-grab"
+        );
     }
 
     #[test]
@@ -692,7 +880,10 @@ mod tests {
         let resp = sel.update(ToolEvent::Commit, &tctx, &working);
         let edit = commit_edit(resp).expect("expected a combined edit");
         history.apply(&mut working, edit);
-        assert_ne!(working, before, "sanity: the move actually changed the document");
+        assert_ne!(
+            working, before,
+            "sanity: the move actually changed the document"
+        );
 
         assert!(history.undo(&mut working));
         assert_eq!(working, before, "a single undo must revert the entire move");
@@ -742,13 +933,24 @@ mod tests {
         let mut sel = SelectionTool::new();
 
         let resp = sel.update(ToolEvent::SelectAll, &tctx, &doc);
-        assert!(matches!(resp, ToolResponse::Idle), "SelectAll must never produce an Edit by itself");
+        assert!(
+            matches!(resp, ToolResponse::Idle),
+            "SelectAll must never produce an Edit by itself"
+        );
         assert_eq!(
             sel.selection_overlay().and_then(|v| v.marquee),
-            Some(CellRect { x0: 0, y0: 0, x1: 6, y1: 3 }),
+            Some(CellRect {
+                x0: 0,
+                y0: 0,
+                x1: 6,
+                y1: 3
+            }),
             "the marquee must span the document's full extent"
         );
-        assert_eq!(doc, before, "SelectAll alone must never mutate the document");
+        assert_eq!(
+            doc, before,
+            "SelectAll alone must never mutate the document"
+        );
     }
 
     #[test]
@@ -763,7 +965,12 @@ mod tests {
         sel.update(ToolEvent::SelectAll, &tctx, &doc);
         assert_eq!(
             sel.selection_overlay().and_then(|v| v.marquee),
-            Some(CellRect { x0: 0, y0: 0, x1: 9, y1: 9 }),
+            Some(CellRect {
+                x0: 0,
+                y0: 0,
+                x1: 9,
+                y1: 9
+            }),
             "SelectAll must replace whatever plain selection was already defined"
         );
     }
@@ -783,6 +990,9 @@ mod tests {
 
         let resp = sel.update(ToolEvent::SelectAll, &tctx, &doc);
         assert!(matches!(resp, ToolResponse::Idle));
-        assert!(!sel.pending().is_empty(), "the live float must survive SelectAll untouched");
+        assert!(
+            !sel.pending().is_empty(),
+            "the live float must survive SelectAll untouched"
+        );
     }
 }

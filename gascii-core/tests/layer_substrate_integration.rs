@@ -4,10 +4,11 @@
 //! round trip is byte-identical to the in-memory state that produced it.
 
 use gascii_core::{
-    add_frame, add_layer, clear_document, composite_cell, composite_frame, duplicate_layer, load_str, reorder_layer,
-    resize_document, save_string, set_layer_name, set_layer_visibility, AxisAnchor, BrushShape, Cell, CellEdit,
-    CellPatch, DensityMode, Document, Edit, Fixed, Frame, History, LayerOpError, Pencil, PlaneMask, ResizeAnchor,
-    ResizeError, Rgba, SelectionTool, Tool, ToolCtx, ToolEvent, ToolResponse,
+    add_frame, add_layer, clear_document, composite_cell, composite_frame, duplicate_layer,
+    load_str, reorder_layer, resize_document, save_string, set_layer_name, set_layer_visibility,
+    AxisAnchor, BrushShape, Cell, CellEdit, CellPatch, DensityMode, Document, Edit, Fixed, Frame,
+    History, LayerOpError, Pencil, PlaneMask, ResizeAnchor, ResizeError, Rgba, SelectionTool, Tool,
+    ToolCtx, ToolEvent, ToolResponse,
 };
 
 fn cell(ch: char, fg: Rgba, bg: Rgba) -> Cell {
@@ -15,7 +16,10 @@ fn cell(ch: char, fg: Rgba, bg: Rgba) -> Cell {
 }
 
 fn start() -> ResizeAnchor {
-    ResizeAnchor { h: AxisAnchor::Start, v: AxisAnchor::Start }
+    ResizeAnchor {
+        h: AxisAnchor::Start,
+        v: AxisAnchor::Start,
+    }
 }
 
 /// A plain, full-mask `ToolCtx` targeting `layer` — the shared shape every layer-op-interaction
@@ -67,11 +71,20 @@ fn add_draw_hide_save_load_and_composite_round_trip_both_layers_byte_exact() {
 
     let json = save_string(&doc);
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert!(value.get("frames").is_none(), "a single-frame document must still save through the v1 envelope");
-    assert!(value.get("layer_meta").is_some(), "the v1 envelope must now carry layer_meta");
+    assert!(
+        value.get("frames").is_none(),
+        "a single-frame document must still save through the v1 envelope"
+    );
+    assert!(
+        value.get("layer_meta").is_some(),
+        "the v1 envelope must now carry layer_meta"
+    );
 
     let loaded = load_str(&json).unwrap();
-    assert_eq!(loaded, before_round_trip, "the round trip must be byte-exact");
+    assert_eq!(
+        loaded, before_round_trip,
+        "the round trip must be byte-exact"
+    );
     assert_eq!(loaded.layer_count(), 2);
 
     // Both layers visible: composite sees layer 1's content on top.
@@ -82,7 +95,11 @@ fn add_draw_hide_save_load_and_composite_round_trip_both_layers_byte_exact() {
     let hide = set_layer_visibility(&loaded, 1, false).unwrap().unwrap();
     let mut loaded = loaded;
     History::new().apply(&mut loaded, hide);
-    assert_eq!(composite_cell(&loaded, 0, 3, 3), Cell::BLANK, "layer 1's marker must be excluded once hidden");
+    assert_eq!(
+        composite_cell(&loaded, 0, 3, 3),
+        Cell::BLANK,
+        "layer 1's marker must be excluded once hidden"
+    );
     let sheet = composite_frame(&loaded, 0).unwrap();
     assert_eq!(sheet[0][0].ch, 'a', "layer 0's marker still composites");
     assert_eq!(sheet[3][3], Cell::BLANK);
@@ -116,15 +133,27 @@ fn drawing_via_pencil_on_two_layers_then_reordering_then_undoing_the_full_stack_
     history.apply(&mut doc, e3);
     forward.push(doc.clone()); // depth 3: 'b' on layer 1
 
-    assert_eq!(doc.active_layer(), 1, "sanity: drawing on layer 1 via ctx.layer never moved the cursor further");
+    assert_eq!(
+        doc.active_layer(),
+        1,
+        "sanity: drawing on layer 1 via ctx.layer never moved the cursor further"
+    );
     let e4 = reorder_layer(&doc, 0, 1).unwrap().unwrap();
     history.apply(&mut doc, e4);
     forward.push(doc.clone()); // depth 4: layers swapped
 
     // The reorder both moved content and (since the cursor was sitting at the 'from' index after
     // being swapped in below) moved the active-layer cursor along with it.
-    assert_eq!(doc.cell_at(0, 1, 0, 0).unwrap().ch, 'a', "'a' followed the reorder from index 0 to index 1");
-    assert_eq!(doc.cell_at(0, 0, 3, 3).unwrap().ch, 'b', "'b' followed the reorder from index 1 to index 0");
+    assert_eq!(
+        doc.cell_at(0, 1, 0, 0).unwrap().ch,
+        'a',
+        "'a' followed the reorder from index 0 to index 1"
+    );
+    assert_eq!(
+        doc.cell_at(0, 0, 3, 3).unwrap().ch,
+        'b',
+        "'b' followed the reorder from index 1 to index 0"
+    );
 
     assert_eq!(forward.len(), 5);
 
@@ -132,7 +161,10 @@ fn drawing_via_pencil_on_two_layers_then_reordering_then_undoing_the_full_stack_
     // content, and the active_layer cursor) against the matching forward snapshot at each depth.
     for depth in (0..forward.len() - 1).rev() {
         assert!(history.undo(&mut doc), "undo must succeed at depth {depth}");
-        assert_eq!(doc, forward[depth], "undo landing at depth {depth} must match the forward snapshot exactly");
+        assert_eq!(
+            doc, forward[depth],
+            "undo landing at depth {depth} must match the forward snapshot exactly"
+        );
     }
     assert!(!history.can_undo());
     assert_eq!(doc, Document::new(4, 4));
@@ -140,7 +172,10 @@ fn drawing_via_pencil_on_two_layers_then_reordering_then_undoing_the_full_stack_
     // Redo forward, comparing against the same snapshots in the opposite direction.
     for (depth, snapshot) in forward.iter().enumerate().skip(1) {
         assert!(history.redo(&mut doc), "redo must succeed at depth {depth}");
-        assert_eq!(&doc, snapshot, "redo landing at depth {depth} must match the forward snapshot exactly");
+        assert_eq!(
+            &doc, snapshot,
+            "redo landing at depth {depth} must match the forward snapshot exactly"
+        );
     }
     assert!(!history.can_redo());
 }
@@ -153,7 +188,8 @@ fn drawing_via_pencil_on_two_layers_then_reordering_then_undoing_the_full_stack_
 /// `CellEdit.before` is always read fresh at `finish` time regardless of `resync`, so only a
 /// masked-off plane can actually expose this gap.
 #[test]
-fn a_layer_reorder_landing_mid_stroke_must_be_resynced_or_a_masked_off_plane_commits_the_wrong_layers_content() {
+fn a_layer_reorder_landing_mid_stroke_must_be_resynced_or_a_masked_off_plane_commits_the_wrong_layers_content(
+) {
     let color_p = Rgba(10, 10, 10, 255);
     let color_q = Rgba(50, 50, 50, 255);
 
@@ -163,13 +199,42 @@ fn a_layer_reorder_landing_mid_stroke_must_be_resynced_or_a_masked_off_plane_com
     history.apply(&mut doc, add);
 
     // Distinguishing bg at the same coordinate on each layer.
-    doc.set_cell(0, 2, 2, Cell { ch: 'o', fg: Rgba::WHITE, bg: color_p }); // layer 0
-    doc.set_cell(1, 2, 2, Cell { ch: 'o', fg: Rgba::WHITE, bg: color_q }); // layer 1
+    doc.set_cell(
+        0,
+        2,
+        2,
+        Cell {
+            ch: 'o',
+            fg: Rgba::WHITE,
+            bg: color_p,
+        },
+    ); // layer 0
+    doc.set_cell(
+        1,
+        2,
+        2,
+        Cell {
+            ch: 'o',
+            fg: Rgba::WHITE,
+            bg: color_q,
+        },
+    ); // layer 1
 
     // A stroke targeting layer index 1, bg masked off: it must preserve whatever bg is actually
     // there, never overwrite it.
-    let mask = PlaneMask { glyph: true, bg: false };
-    let stroke_ctx = ToolCtx { frame: 0, layer: 1, glyph: 'X', fg: Rgba::WHITE, bg: Rgba(200, 200, 200, 255), mask, ..tctx(1, 'X') };
+    let mask = PlaneMask {
+        glyph: true,
+        bg: false,
+    };
+    let stroke_ctx = ToolCtx {
+        frame: 0,
+        layer: 1,
+        glyph: 'X',
+        fg: Rgba::WHITE,
+        bg: Rgba(200, 200, 200, 255),
+        mask,
+        ..tctx(1, 'X')
+    };
     let mut stroke = Pencil::new();
     stroke.update(ToolEvent::Press { x: 2, y: 2 }, &stroke_ctx, &doc);
     // Internally pins before = layer index 1's pre-reorder cell (bg = color_q).
@@ -187,13 +252,18 @@ fn a_layer_reorder_landing_mid_stroke_must_be_resynced_or_a_masked_off_plane_com
     // The tool must be resynced against the mutation that landed underneath it.
     stroke.resync(&doc, 0, 1);
 
-    let ToolResponse::Commit(Some(finish_edit)) = stroke.update(ToolEvent::Release, &stroke_ctx, &doc) else {
+    let ToolResponse::Commit(Some(finish_edit)) =
+        stroke.update(ToolEvent::Release, &stroke_ctx, &doc)
+    else {
         panic!("expected a committed edit");
     };
     history.apply(&mut doc, finish_edit);
 
     let committed = doc.cell_at(0, 1, 2, 2).unwrap();
-    assert_eq!(committed.ch, 'X', "the unmasked glyph plane must carry the stroke's own write");
+    assert_eq!(
+        committed.ch, 'X',
+        "the unmasked glyph plane must carry the stroke's own write"
+    );
     assert_eq!(
         committed.bg, color_p,
         "the masked-off bg plane must preserve layer 1's post-reorder content (color_p), not the \
@@ -207,7 +277,8 @@ fn a_layer_reorder_landing_mid_stroke_must_be_resynced_or_a_masked_off_plane_com
 /// the same argument `drawing_via_pencil_on_two_layers_then_reordering_...` makes for cell content,
 /// applied here to `LayerMeta` and a duplicated layer instead.
 #[test]
-fn duplicate_layer_carries_visibility_and_a_set_layer_name_survives_an_interleaved_reorder_and_undo() {
+fn duplicate_layer_carries_visibility_and_a_set_layer_name_survives_an_interleaved_reorder_and_undo(
+) {
     let mut doc = Document::new(3, 3);
     let mut history = History::new();
     let mut forward = vec![doc.clone()]; // depth 0
@@ -229,17 +300,25 @@ fn duplicate_layer_carries_visibility_and_a_set_layer_name_survives_an_interleav
     history.apply(&mut doc, e3);
     forward.push(doc.clone()); // depth 3
     assert_eq!(doc.layer_count(), 3);
-    assert!(!doc.layer_visible(2), "duplicate_layer must carry the source's visibility into the clone");
+    assert!(
+        !doc.layer_visible(2),
+        "duplicate_layer must carry the source's visibility into the clone"
+    );
 
     // Reorder: move the duplicate (index 2) to the front. Layer indices addressing everything else
     // shift underneath whatever a *later* SetLayerName targets.
     let e4 = reorder_layer(&doc, 2, 0).unwrap().unwrap();
     history.apply(&mut doc, e4);
     forward.push(doc.clone()); // depth 4
-    assert!(!doc.layer_visible(0), "the duplicate's hidden visibility followed it to index 0");
+    assert!(
+        !doc.layer_visible(0),
+        "the duplicate's hidden visibility followed it to index 0"
+    );
 
     // A SetLayerName on the now-relocated duplicate, addressed by its *post-reorder* index.
-    let e5 = set_layer_name(&doc, 0, "Shading copy".to_string()).unwrap().unwrap();
+    let e5 = set_layer_name(&doc, 0, "Shading copy".to_string())
+        .unwrap()
+        .unwrap();
     history.apply(&mut doc, e5);
     forward.push(doc.clone()); // depth 5
     assert_eq!(doc.layer_name(0), Some("Shading copy"));
@@ -249,7 +328,10 @@ fn duplicate_layer_carries_visibility_and_a_set_layer_name_survives_an_interleav
     // Undo the full stack back to empty, comparing the entire Document at each depth.
     for depth in (0..forward.len() - 1).rev() {
         assert!(history.undo(&mut doc), "undo must succeed at depth {depth}");
-        assert_eq!(doc, forward[depth], "undo landing at depth {depth} must match the forward snapshot exactly");
+        assert_eq!(
+            doc, forward[depth],
+            "undo landing at depth {depth} must match the forward snapshot exactly"
+        );
     }
     assert!(!history.can_undo());
     assert_eq!(doc, Document::new(3, 3));
@@ -257,7 +339,10 @@ fn duplicate_layer_carries_visibility_and_a_set_layer_name_survives_an_interleav
     // Redo forward, comparing against the same snapshots in the opposite direction.
     for (depth, snapshot) in forward.iter().enumerate().skip(1) {
         assert!(history.redo(&mut doc), "redo must succeed at depth {depth}");
-        assert_eq!(&doc, snapshot, "redo landing at depth {depth} must match the forward snapshot exactly");
+        assert_eq!(
+            &doc, snapshot,
+            "redo landing at depth {depth} must match the forward snapshot exactly"
+        );
     }
     assert!(!history.can_redo());
 }
@@ -279,7 +364,12 @@ fn a_three_layer_document_with_distinct_content_names_and_visibility_round_trips
 
     let e2 = add_layer(&doc, 2).unwrap();
     history.apply(&mut doc, e2);
-    doc.set_cell(2, 2, 2, cell('c', Rgba(7, 8, 9, 255), Rgba(10, 11, 12, 255)));
+    doc.set_cell(
+        2,
+        2,
+        2,
+        cell('c', Rgba(7, 8, 9, 255), Rgba(10, 11, 12, 255)),
+    );
 
     let n1 = set_layer_name(&doc, 1, "Ink".to_string()).unwrap().unwrap();
     history.apply(&mut doc, n1);
@@ -293,11 +383,17 @@ fn a_three_layer_document_with_distinct_content_names_and_visibility_round_trips
 
     let json = save_string(&doc);
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(value["version"], 1, "a single-frame document must still be tagged version 1");
+    assert_eq!(
+        value["version"], 1,
+        "a single-frame document must still be tagged version 1"
+    );
     assert_eq!(value["layer_meta"].as_array().unwrap().len(), 3);
 
     let loaded = load_str(&json).unwrap();
-    assert_eq!(loaded, before_round_trip, "the full 3-layer document must round-trip byte-exact");
+    assert_eq!(
+        loaded, before_round_trip,
+        "the full 3-layer document must round-trip byte-exact"
+    );
     assert_eq!(loaded.layer_name(1), Some("Ink"));
     assert!(!loaded.layer_visible(2));
     assert!(loaded.layer_visible(0));
@@ -312,7 +408,8 @@ fn a_three_layer_document_with_distinct_content_names_and_visibility_round_trips
 /// documented default per-layer metadata (mirrors `frame_substrate_integration.rs`'s own
 /// `a_hand_authored_pre_frames_v1_fixture_...`, generalized to layers).
 #[test]
-fn a_hand_authored_pre_layers_v1_fixture_loads_with_byte_identical_cells_and_default_layer_metadata() {
+fn a_hand_authored_pre_layers_v1_fixture_loads_with_byte_identical_cells_and_default_layer_metadata(
+) {
     let json = r##"{
         "version": 1,
         "width": 2,
@@ -327,8 +424,15 @@ fn a_hand_authored_pre_layers_v1_fixture_loads_with_byte_identical_cells_and_def
     let doc = load_str(json).unwrap();
     assert_eq!(doc.layer_count(), 1);
     assert_eq!(doc.active_layer(), 0);
-    assert_eq!(doc.layer_name(0), Some("Layer 1"), "no layer_meta in the file — must fall back to the documented default name");
-    assert!(doc.layer_visible(0), "no layer_meta in the file — must fall back to the documented default (visible)");
+    assert_eq!(
+        doc.layer_name(0),
+        Some("Layer 1"),
+        "no layer_meta in the file — must fall back to the documented default name"
+    );
+    assert!(
+        doc.layer_visible(0),
+        "no layer_meta in the file — must fall back to the documented default (visible)"
+    );
     assert_eq!(doc.cell(0, 0, 0).unwrap().ch, 'a');
     assert_eq!(doc.cell(0, 1, 0).unwrap().ch, ' ');
     assert_eq!(doc.cell(0, 0, 1).unwrap().ch, ' ');
@@ -370,13 +474,28 @@ fn resizing_a_three_layer_document_then_undoing_restores_every_layers_cropped_co
     let resize_edit = resize_document(&doc, 2, 2, start()).unwrap().unwrap();
     history.apply(&mut doc, resize_edit);
     assert_eq!((doc.width, doc.height), (2, 2));
-    assert_eq!(doc.cell(0, 0, 0).unwrap().ch, 'a', "layer 0's top-left survives the crop");
-    assert_eq!(doc.cell(1, 0, 0), Some(&Cell::BLANK), "layer 1's only content ('e') was cropped away");
-    assert_eq!(doc.cell(2, 0, 0), Some(&Cell::BLANK), "layer 2's only content ('f') was cropped away");
+    assert_eq!(
+        doc.cell(0, 0, 0).unwrap().ch,
+        'a',
+        "layer 0's top-left survives the crop"
+    );
+    assert_eq!(
+        doc.cell(1, 0, 0),
+        Some(&Cell::BLANK),
+        "layer 1's only content ('e') was cropped away"
+    );
+    assert_eq!(
+        doc.cell(2, 0, 0),
+        Some(&Cell::BLANK),
+        "layer 2's only content ('f') was cropped away"
+    );
 
     // Undo restores every layer's cropped-away content exactly, not just one layer's.
     assert!(history.undo(&mut doc));
-    assert_eq!(doc, before_resize, "undo must restore all three layers' cropped content byte-exact");
+    assert_eq!(
+        doc, before_resize,
+        "undo must restore all three layers' cropped content byte-exact"
+    );
     assert_eq!(doc.cell(1, 4, 4).unwrap().ch, 'e');
     assert_eq!(doc.cell(2, 4, 4).unwrap().ch, 'f');
 
@@ -412,7 +531,10 @@ fn clearing_the_active_frame_blanks_all_three_layers_through_a_save_load_round_t
     let clear_edit = clear_document(&doc).unwrap();
     history.apply(&mut doc, clear_edit);
     for layer in 0..3 {
-        assert!(doc.layers()[layer].cells().iter().all(Cell::is_blank), "layer {layer} must be blanked");
+        assert!(
+            doc.layers()[layer].cells().iter().all(Cell::is_blank),
+            "layer {layer} must be blanked"
+        );
     }
 
     let loaded = load_str(&save_string(&doc)).unwrap();
@@ -454,25 +576,53 @@ fn selection_lift_move_drop_and_accept_stamp_paste_on_layer_1_leave_layer_0_byte
     };
     history.apply(&mut doc, move_edit);
 
-    assert_eq!(doc.cell_at(0, 1, 4, 4).unwrap().ch, 'b', "the moved content landed on layer 1");
-    assert_eq!(doc.layers()[0], layer0_before, "layer 0 must be untouched by a layer-1 move");
+    assert_eq!(
+        doc.cell_at(0, 1, 4, 4).unwrap().ch,
+        'b',
+        "the moved content landed on layer 1"
+    );
+    assert_eq!(
+        doc.layers()[0],
+        layer0_before,
+        "layer 0 must be untouched by a layer-1 move"
+    );
 
     // An external paste (accept_stamp) onto layer 1.
-    let patch = CellPatch { width: 1, height: 1, cells: vec![cell('c', Rgba(3, 3, 3, 255), Rgba::TRANSPARENT)] };
+    let patch = CellPatch {
+        width: 1,
+        height: 1,
+        cells: vec![cell('c', Rgba(3, 3, 3, 255), Rgba::TRANSPARENT)],
+    };
     sel.accept_stamp(patch, (0, 0), &doc);
     let ToolResponse::Commit(Some(paste_edit)) = sel.update(ToolEvent::Commit, &ctx1, &doc) else {
         panic!("expected a committed paste edit");
     };
     history.apply(&mut doc, paste_edit);
 
-    assert_eq!(doc.cell_at(0, 1, 0, 0).unwrap().ch, 'c', "the pasted content landed on layer 1");
-    assert_eq!(doc.layers()[0], layer0_before, "layer 0 must still be untouched after the paste");
+    assert_eq!(
+        doc.cell_at(0, 1, 0, 0).unwrap().ch,
+        'c',
+        "the pasted content landed on layer 1"
+    );
+    assert_eq!(
+        doc.layers()[0],
+        layer0_before,
+        "layer 0 must still be untouched after the paste"
+    );
 
     // Undo both edits: layer 0 was never touched at any point, and undo restores layer 1 exactly.
     assert!(history.undo(&mut doc));
     assert!(history.undo(&mut doc));
-    assert_eq!(doc.cell_at(0, 1, 1, 1).unwrap().ch, 'b', "undo must restore layer 1's original content");
-    assert_eq!(doc.layers()[0], layer0_before, "layer 0 must remain untouched through both undos");
+    assert_eq!(
+        doc.cell_at(0, 1, 1, 1).unwrap().ch,
+        'b',
+        "undo must restore layer 1's original content"
+    );
+    assert_eq!(
+        doc.layers()[0],
+        layer0_before,
+        "layer 0 must remain untouched through both undos"
+    );
 }
 
 // --- cap enforcement composed across seams, via legitimate ops ---
@@ -482,7 +632,8 @@ fn selection_lift_move_drop_and_accept_stamp_paste_on_layer_1_leave_layer_0_byte
 /// confirms the document is left completely unmodified and still fully usable (an ordinary cell
 /// edit and its undo still work), not just that the call returned `Err`.
 #[test]
-fn add_layer_rejection_after_legitimately_building_up_to_max_layers_leaves_the_document_and_history_fully_usable() {
+fn add_layer_rejection_after_legitimately_building_up_to_max_layers_leaves_the_document_and_history_fully_usable(
+) {
     let mut doc = Document::new(2, 2);
     let mut history = History::new();
     for _ in 0..Document::MAX_LAYERS - 1 {
@@ -494,10 +645,20 @@ fn add_layer_rejection_after_legitimately_building_up_to_max_layers_leaves_the_d
 
     let result = add_layer(&doc, 0);
     assert!(matches!(result, Err(LayerOpError::TooManyLayers { .. })));
-    assert_eq!(doc, before_rejection, "a rejected add_layer call must leave the document completely unmodified");
+    assert_eq!(
+        doc, before_rejection,
+        "a rejected add_layer call must leave the document completely unmodified"
+    );
 
     // Still fully usable afterward: an ordinary cell edit and its undo work cleanly.
-    let cell_edit = Edit::Cells(vec![CellEdit { frame: 0, layer: 0, x: 0, y: 0, before: Cell::BLANK, after: cell('z', Rgba::WHITE, Rgba::TRANSPARENT) }]);
+    let cell_edit = Edit::Cells(vec![CellEdit {
+        frame: 0,
+        layer: 0,
+        x: 0,
+        y: 0,
+        before: Cell::BLANK,
+        after: cell('z', Rgba::WHITE, Rgba::TRANSPARENT),
+    }]);
     history.apply(&mut doc, cell_edit);
     assert_eq!(doc.cell(0, 0, 0).unwrap().ch, 'z');
     assert!(history.undo(&mut doc));
@@ -523,12 +684,25 @@ fn layers_built_up_through_legitimate_add_layer_calls_across_two_frames_still_tr
         let edit = add_layer(&doc, 0).unwrap();
         history.apply(&mut doc, edit);
     }
-    assert_eq!(doc.layer_count(), 130, "1 original + 129 legitimately added");
+    assert_eq!(
+        doc.layer_count(),
+        130,
+        "1 original + 129 legitimately added"
+    );
     let before_resize_attempt = doc.clone();
 
     let started = std::time::Instant::now();
     let result = resize_document(&doc, Document::MAX_WIDTH, Document::MAX_HEIGHT, start());
-    assert!(started.elapsed() < std::time::Duration::from_millis(200), "must reject before allocating, not after");
-    assert!(matches!(result, Err(ResizeError::TotalCellBudgetExceeded { .. })));
-    assert_eq!(doc, before_resize_attempt, "a rejected resize must leave the document completely unmodified");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(200),
+        "must reject before allocating, not after"
+    );
+    assert!(matches!(
+        result,
+        Err(ResizeError::TotalCellBudgetExceeded { .. })
+    ));
+    assert_eq!(
+        doc, before_resize_attempt,
+        "a rejected resize must leave the document completely unmodified"
+    );
 }

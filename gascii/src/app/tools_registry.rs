@@ -98,7 +98,9 @@ impl ToolSlot {
     /// This slot's footprint for whatever it is currently bound to (the identity default for
     /// unsized kinds, which ignore it).
     pub fn stamp(&self) -> StampSettings {
-        sized_slot(self.kind).map(|i| self.stamps[i]).unwrap_or_default()
+        sized_slot(self.kind)
+            .map(|i| self.stamps[i])
+            .unwrap_or_default()
     }
 }
 
@@ -113,7 +115,10 @@ pub(crate) struct StampSettings {
 
 impl Default for StampSettings {
     fn default() -> Self {
-        StampSettings { size: 1, shape: BrushShape::default() }
+        StampSettings {
+            size: 1,
+            shape: BrushShape::default(),
+        }
     }
 }
 
@@ -149,7 +154,12 @@ pub(crate) fn tool_shows_hover(kind: ToolKind) -> bool {
 pub(super) struct InertTool;
 
 impl Tool for InertTool {
-    fn update(&mut self, _ev: ToolEvent, _ctx: &gascii_core::ToolCtx, _doc: &Document) -> ToolResponse {
+    fn update(
+        &mut self,
+        _ev: ToolEvent,
+        _ctx: &gascii_core::ToolCtx,
+        _doc: &Document,
+    ) -> ToolResponse {
         ToolResponse::Idle
     }
 
@@ -405,7 +415,10 @@ pub(super) fn validate_unique_tool_names(rows: &[ToolDef]) -> Result<(), String>
     let mut seen = std::collections::HashSet::new();
     for d in rows {
         if !seen.insert(d.name) {
-            return Err(format!("duplicate tool name {:?} — two rows registered the same name", d.name));
+            return Err(format!(
+                "duplicate tool name {:?} — two rows registered the same name",
+                d.name
+            ));
         }
     }
     Ok(())
@@ -414,11 +427,16 @@ pub(super) fn validate_unique_tool_names(rows: &[ToolDef]) -> Result<(), String>
 /// Two plugins persisting under the same `id` would make prefs resolution ambiguous — the first
 /// `position()` match wins and the second plugin's stored enabled state silently applies to the
 /// wrong one. Caught here, at registry-construction time, rather than silently.
-pub(super) fn validate_unique_plugin_ids(descriptors: &[gascii_plugin_api::PluginDescriptor]) -> Result<(), String> {
+pub(super) fn validate_unique_plugin_ids(
+    descriptors: &[gascii_plugin_api::PluginDescriptor],
+) -> Result<(), String> {
     let mut seen = std::collections::HashSet::new();
     for d in descriptors {
         if !seen.insert(d.id) {
-            return Err(format!("duplicate plugin id {:?} — two descriptors registered the same id", d.id));
+            return Err(format!(
+                "duplicate plugin id {:?} — two descriptors registered the same id",
+                d.id
+            ));
         }
     }
     Ok(())
@@ -431,7 +449,10 @@ pub(super) fn validate_unique_plugin_ids(descriptors: &[gascii_plugin_api::Plugi
 pub(super) enum ClaimSource {
     Chord(&'static str),
     Tool(&'static str),
-    Plugin { plugin: &'static str, action: &'static str },
+    Plugin {
+        plugin: &'static str,
+        action: &'static str,
+    },
 }
 
 impl std::fmt::Display for ClaimSource {
@@ -439,7 +460,9 @@ impl std::fmt::Display for ClaimSource {
         match self {
             ClaimSource::Chord(name) => write!(f, "chord {name:?}"),
             ClaimSource::Tool(name) => write!(f, "tool {name:?}"),
-            ClaimSource::Plugin { plugin, action } => write!(f, "plugin {plugin:?}'s {action:?} shortcut"),
+            ClaimSource::Plugin { plugin, action } => {
+                write!(f, "plugin {plugin:?}'s {action:?} shortcut")
+            }
         }
     }
 }
@@ -455,15 +478,27 @@ pub(super) struct KeyClaim {
 /// stays testable against a synthetic `rows` slice with no live registry.
 pub(super) fn key_claims(rows: &[ToolDef]) -> Vec<KeyClaim> {
     let mut claims: Vec<KeyClaim> = chords::reserved_chord_keys()
-        .map(|(key, name)| KeyClaim { key, source: ClaimSource::Chord(name) })
+        .map(|(key, name)| KeyClaim {
+            key,
+            source: ClaimSource::Chord(name),
+        })
         .collect();
     for d in rows {
-        claims.push(KeyClaim { key: d.key, source: ClaimSource::Tool(d.name) });
+        claims.push(KeyClaim {
+            key: d.key,
+            source: ClaimSource::Tool(d.name),
+        });
     }
     for descriptor in PLUGINS {
         for shortcut in (descriptor.shortcuts)() {
             for &key in shortcut.keys {
-                claims.push(KeyClaim { key, source: ClaimSource::Plugin { plugin: descriptor.name, action: shortcut.name } });
+                claims.push(KeyClaim {
+                    key,
+                    source: ClaimSource::Plugin {
+                        plugin: descriptor.name,
+                        action: shortcut.name,
+                    },
+                });
             }
         }
     }
@@ -479,7 +514,10 @@ pub(super) fn validate_key_claims(claims: &[KeyClaim]) -> Result<(), String> {
     for (i, a) in claims.iter().enumerate() {
         for b in &claims[i + 1..] {
             if a.key == b.key {
-                return Err(format!("key collision on {:?}: {} vs {}", a.key, a.source, b.source));
+                return Err(format!(
+                    "key collision on {:?}: {} vs {}",
+                    a.key, a.source, b.source
+                ));
             }
         }
     }
@@ -492,21 +530,32 @@ pub(super) fn validate_key_claims(claims: &[KeyClaim]) -> Result<(), String> {
 /// `plugin_slot` is the index into this same slice, so "every consumer iterates in the same order"
 /// is now structurally guaranteed rather than a convention two separately-written functions have to
 /// uphold by hand — there is no second, independently-iterated list left to drift from this one.
-pub(crate) const PLUGINS: &[gascii_plugin_api::PluginDescriptor] =
-    &[gascii_density_brush::DESCRIPTOR, gascii_anim::DESCRIPTOR, gascii_layers::DESCRIPTOR];
+pub(crate) const PLUGINS: &[gascii_plugin_api::PluginDescriptor] = &[
+    gascii_density_brush::DESCRIPTOR,
+    gascii_anim::DESCRIPTOR,
+    gascii_layers::DESCRIPTOR,
+];
 
 /// Folds every plugin's `wrap_renderer` over the host's own `NaiveRenderer`, innermost (the host's)
 /// first, in iteration order. A pure function of the plugins it's given — an iterator rather than
 /// `&GasciiApp`, so `rebuild_renderer`'s enabled filter composes in without allocating and tests
 /// can feed a synthetic list with no live app.
-pub(crate) fn build_renderer<'a>(plugins: impl Iterator<Item = &'a dyn Plugin>) -> Box<dyn CanvasRenderer> {
-    plugins.fold(Box::new(NaiveRenderer) as Box<dyn CanvasRenderer>, |r, p| p.wrap_renderer(r))
+pub(crate) fn build_renderer<'a>(
+    plugins: impl Iterator<Item = &'a dyn Plugin>,
+) -> Box<dyn CanvasRenderer> {
+    plugins.fold(
+        Box::new(NaiveRenderer) as Box<dyn CanvasRenderer>,
+        |r, p| p.wrap_renderer(r),
+    )
 }
 
 /// Merges one plugin-contributed capability bundle into a full `ToolDef` row. Identity is now the
 /// bundle's own name, wrapped in `ToolKind::Plugin` — the host mints no separate identifier and
 /// keeps no name-to-kind table; `stamp_slot` is left `None` here and filled by `assign_stamp_slots`.
-pub(super) fn merge_plugin_row(plugin_slot: usize, cap: &gascii_plugin_api::PluginToolCapabilities) -> ToolDef {
+pub(super) fn merge_plugin_row(
+    plugin_slot: usize,
+    cap: &gascii_plugin_api::PluginToolCapabilities,
+) -> ToolDef {
     ToolDef {
         kind: ToolKind::Plugin(cap.name),
         name: cap.name,
@@ -537,7 +586,10 @@ pub(crate) fn tools() -> &'static [ToolDef] {
 }
 
 pub(crate) fn tool_def(kind: ToolKind) -> &'static ToolDef {
-    tools().iter().find(|d| d.kind == kind).expect("tools() covers every ToolKind")
+    tools()
+        .iter()
+        .find(|d| d.kind == kind)
+        .expect("tools() covers every ToolKind")
 }
 
 /// Builds a fresh instance for `kind`. Total over `ToolKind` — `tools_table_lists_every_kind_

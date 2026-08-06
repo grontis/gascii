@@ -12,7 +12,11 @@ pub const HEIGHT: f32 = 30.0;
 pub(crate) fn mono(ui: &mut Ui, text: String, secondary: bool) {
     let t = theme::current(ui.ctx());
     let color = if secondary { t.fg_secondary } else { t.fg_text };
-    ui.label(egui::RichText::new(text).font(fonts::mono_id(fonts::size::LABEL)).color(color));
+    ui.label(
+        egui::RichText::new(text)
+            .font(fonts::mono_id(fonts::size::LABEL))
+            .color(color),
+    );
 }
 
 pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
@@ -39,12 +43,20 @@ pub fn show(ui: &mut Ui, app: &mut GasciiApp) {
     // idle screen — without it the last painted frame would show it indefinitely.
     if let Some((err, left)) = app.error_flash(std::time::Instant::now()) {
         let t = theme::current(ui.ctx());
-        ui.label(egui::RichText::new(err).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_error));
+        ui.label(
+            egui::RichText::new(err)
+                .font(fonts::mono_id(fonts::size::LABEL))
+                .color(t.fg_error),
+        );
         ui.ctx().request_repaint_after(left);
     }
 
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        mono(ui, format!("doc {}×{}", app.doc.width, app.doc.height), false);
+        mono(
+            ui,
+            format!("doc {}×{}", app.doc.width, app.doc.height),
+            false,
+        );
         ui.add_space(0.0);
         zoom_cluster(ui, app);
     });

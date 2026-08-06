@@ -42,15 +42,31 @@ impl gascii_plugin_api::PluginHost for HostFacts<'_> {
 /// Builds a `HostFacts` from an explicit `&Document` plus the app-level facts — never from
 /// `&GasciiApp` (see `HostFacts`'s own doc comment for why). `top_edit_id` is `self.history.
 /// top_edit_id()`, read at the same call site as the other two facts.
-pub(crate) fn host_facts<'a>(doc: &'a Document, stylus_detected: bool, bound: [&'static str; 2], top_edit_id: Option<u64>) -> HostFacts<'a> {
-    HostFacts { doc, stylus_detected, bound, top_edit_id }
+pub(crate) fn host_facts<'a>(
+    doc: &'a Document,
+    stylus_detected: bool,
+    bound: [&'static str; 2],
+    top_edit_id: Option<u64>,
+) -> HostFacts<'a> {
+    HostFacts {
+        doc,
+        stylus_detected,
+        bound,
+        top_edit_id,
+    }
 }
 
 /// The `stylus_detected`/`bound` half of `host_facts`'s arguments, computed from `app` in one
 /// place. Takes `&GasciiApp` and returns owned data only — its borrow of `app` ends the moment it
 /// returns, before the caller separately, disjointly borrows `app.doc`/`app.plugins`.
 pub(crate) fn host_context(app: &GasciiApp) -> (bool, [&'static str; 2]) {
-    (app.stylus_detected, [super::tool_def(app.slot(super::Binding::L).kind).name, super::tool_def(app.slot(super::Binding::R).kind).name])
+    (
+        app.stylus_detected,
+        [
+            super::tool_def(app.slot(super::Binding::L).kind).name,
+            super::tool_def(app.slot(super::Binding::R).kind).name,
+        ],
+    )
 }
 
 impl GasciiApp {
@@ -59,10 +75,9 @@ impl GasciiApp {
     /// seams refuse rather than landing changes on a frame the user can't currently see. Polled
     /// live — no cached flag to go stale between frames.
     pub(crate) fn editing_blocked(&self) -> bool {
-        self.plugins
-            .iter()
-            .enumerate()
-            .any(|(i, p)| self.plugin_runtime.get(i).is_none_or(|r| r.enabled) && p.blocks_editing())
+        self.plugins.iter().enumerate().any(|(i, p)| {
+            self.plugin_runtime.get(i).is_none_or(|r| r.enabled) && p.blocks_editing()
+        })
     }
 
     /// The standard refusal at an edit-initiation seam: flashes the shared message and reports
@@ -87,7 +102,12 @@ impl GasciiApp {
     /// originated failure reads identically to a host-originated one.
     pub(super) fn run_plugin_panels(&mut self, ui: &mut eframe::egui::Ui, kiosk: bool) {
         let (stylus_detected, bound) = host_context(self);
-        let host = host_facts(&self.doc, stylus_detected, bound, self.history.top_edit_id());
+        let host = host_facts(
+            &self.doc,
+            stylus_detected,
+            bound,
+            self.history.top_edit_id(),
+        );
         let mut outcomes = Vec::with_capacity(self.plugins.len());
         // A disabled plugin's panel is simply never declared — immediate mode reclaims its space
         // the same frame. `runtime` borrows only `self.plugin_runtime`, disjoint from `plugins`.
@@ -121,8 +141,12 @@ impl GasciiApp {
             }
             for prop in outcome.properties {
                 match prop {
-                    gascii_plugin_api::DocProperty::ActiveFrame(idx) => self.switch_active_frame(idx),
-                    gascii_plugin_api::DocProperty::ActiveLayer(idx) => self.switch_active_layer(idx),
+                    gascii_plugin_api::DocProperty::ActiveFrame(idx) => {
+                        self.switch_active_frame(idx)
+                    }
+                    gascii_plugin_api::DocProperty::ActiveLayer(idx) => {
+                        self.switch_active_layer(idx)
+                    }
                     gascii_plugin_api::DocProperty::LoopPlayback(loop_playback) => {
                         // A plain field write, not an `Edit` — matches `Document.loop_playback`'s
                         // own "set-and-forget, never History-tracked" contract (see

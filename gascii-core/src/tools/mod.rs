@@ -37,7 +37,10 @@ pub struct PlaneMask {
 }
 
 impl PlaneMask {
-    pub const ALL: PlaneMask = PlaneMask { glyph: true, bg: true };
+    pub const ALL: PlaneMask = PlaneMask {
+        glyph: true,
+        bg: true,
+    };
 }
 
 impl Default for PlaneMask {
@@ -157,8 +160,14 @@ pub enum Direction {
 /// literal syntax, which `#[non_exhaustive]` would forbid from outside the defining crate.
 #[derive(Clone, Copy, Debug)]
 pub enum ToolEvent {
-    Press { x: u16, y: u16 },
-    Drag { x: u16, y: u16 },
+    Press {
+        x: u16,
+        y: u16,
+    },
+    Drag {
+        x: u16,
+        y: u16,
+    },
     Release,
     Cancel,
     Char(char),
@@ -266,7 +275,12 @@ pub trait Tool {
 /// already matches the document (so a no-op gesture yields no empty undo entry). Shared by every
 /// tool whose commit is "diff the pending overlay against the current document" — fill,
 /// rectangle, line.
-pub(crate) fn diff_pending(pending: &[PendingCell], doc: &Document, frame: usize, layer: usize) -> Option<Edit> {
+pub(crate) fn diff_pending(
+    pending: &[PendingCell],
+    doc: &Document,
+    frame: usize,
+    layer: usize,
+) -> Option<Edit> {
     let mut cell_edits = Vec::with_capacity(pending.len());
     for p in pending {
         // The document can shrink between stamp and commit (a resize applied while a right-click
@@ -275,11 +289,21 @@ pub(crate) fn diff_pending(pending: &[PendingCell], doc: &Document, frame: usize
         if !doc.in_bounds(p.x, p.y) {
             continue;
         }
-        let before = doc.cell_at(frame, layer, p.x, p.y).copied().unwrap_or(Cell::BLANK);
+        let before = doc
+            .cell_at(frame, layer, p.x, p.y)
+            .copied()
+            .unwrap_or(Cell::BLANK);
         if before == p.cell {
             continue;
         }
-        cell_edits.push(CellEdit { frame, layer, x: p.x, y: p.y, before, after: p.cell });
+        cell_edits.push(CellEdit {
+            frame,
+            layer,
+            x: p.x,
+            y: p.y,
+            before,
+            after: p.cell,
+        });
     }
     (!cell_edits.is_empty()).then_some(Edit::Cells(cell_edits))
 }
@@ -362,14 +386,24 @@ impl FreehandStroke {
     /// same masked result is a no-op); load-bearing for a `proposed` that varies per revisit
     /// (the density brush). Returns whether `(x, y)` was in-bounds.
     #[allow(clippy::too_many_arguments)]
-    fn stamp(&mut self, x: u16, y: u16, proposed: Cell, mask: PlaneMask, doc: &Document, frame: usize, layer: usize) -> bool {
+    fn stamp(
+        &mut self,
+        x: u16,
+        y: u16,
+        proposed: Cell,
+        mask: PlaneMask,
+        doc: &Document,
+        frame: usize,
+        layer: usize,
+    ) -> bool {
         if !doc.in_bounds(x, y) {
             return false;
         }
-        let before = *self
-            .before
-            .entry((x, y))
-            .or_insert_with(|| doc.cell_at(frame, layer, x, y).copied().unwrap_or(Cell::BLANK));
+        let before = *self.before.entry((x, y)).or_insert_with(|| {
+            doc.cell_at(frame, layer, x, y)
+                .copied()
+                .unwrap_or(Cell::BLANK)
+        });
         let after = mask_apply(before, proposed, mask);
         match self.index.get(&(x, y)) {
             Some(&i) => {
@@ -388,11 +422,22 @@ impl FreehandStroke {
     /// The stroke's in-progress value for `(x,y)`: the pending overlay's value if touched already
     /// this stroke, else the document's untouched value. What `Buildup` reads to know "one step
     /// higher than what."
-    pub(crate) fn current(&self, x: u16, y: u16, doc: &Document, frame: usize, layer: usize) -> Cell {
+    pub(crate) fn current(
+        &self,
+        x: u16,
+        y: u16,
+        doc: &Document,
+        frame: usize,
+        layer: usize,
+    ) -> Cell {
         self.index
             .get(&(x, y))
             .map(|&i| self.pending[i].cell)
-            .unwrap_or_else(|| doc.cell_at(frame, layer, x, y).copied().unwrap_or(Cell::BLANK))
+            .unwrap_or_else(|| {
+                doc.cell_at(frame, layer, x, y)
+                    .copied()
+                    .unwrap_or(Cell::BLANK)
+            })
     }
 
     /// Stamps the full `ctx.size`/`ctx.shape` footprint around `(x, y)` — the sized-tool
@@ -438,11 +483,21 @@ impl FreehandStroke {
             if !doc.in_bounds(p.x, p.y) {
                 continue;
             }
-            let before = doc.cell_at(frame, layer, p.x, p.y).copied().unwrap_or(Cell::BLANK);
+            let before = doc
+                .cell_at(frame, layer, p.x, p.y)
+                .copied()
+                .unwrap_or(Cell::BLANK);
             if before == p.cell {
                 continue;
             }
-            cell_edits.push(CellEdit { frame, layer, x: p.x, y: p.y, before, after: p.cell });
+            cell_edits.push(CellEdit {
+                frame,
+                layer,
+                x: p.x,
+                y: p.y,
+                before,
+                after: p.cell,
+            });
         }
         self.pending.clear();
         self.index.clear();
@@ -477,7 +532,15 @@ impl FreehandStroke {
     /// a cell touched before the external mutation and never revisited would commit the superseded
     /// content back over it, on exactly the planes the mask promised not to write.
     pub(crate) fn resync(&mut self, doc: &Document, frame: usize, layer: usize) {
-        resync_pending(&mut self.before, &self.index, &mut self.pending, &self.sources, doc, frame, layer);
+        resync_pending(
+            &mut self.before,
+            &self.index,
+            &mut self.pending,
+            &self.sources,
+            doc,
+            frame,
+            layer,
+        );
     }
 }
 
@@ -495,7 +558,10 @@ pub(crate) fn resync_pending(
     layer: usize,
 ) {
     for (&(x, y), b) in before.iter_mut() {
-        *b = doc.cell_at(frame, layer, x, y).copied().unwrap_or(Cell::BLANK);
+        *b = doc
+            .cell_at(frame, layer, x, y)
+            .copied()
+            .unwrap_or(Cell::BLANK);
         if let Some(&i) = index.get(&(x, y)) {
             let (proposed, mask) = sources[i];
             pending[i].cell = mask_apply(*b, proposed, mask);
@@ -521,7 +587,10 @@ mod tests {
     fn mask_apply_all_false_is_identity_over_before() {
         let before = c('a', Rgba::WHITE, Rgba::TRANSPARENT);
         let proposed = c('b', Rgba(1, 2, 3, 255), Rgba(4, 5, 6, 255));
-        let mask = PlaneMask { glyph: false, bg: false };
+        let mask = PlaneMask {
+            glyph: false,
+            bg: false,
+        };
         assert_eq!(mask_apply(before, proposed, mask), before);
     }
 
@@ -536,7 +605,10 @@ mod tests {
     fn mask_apply_glyph_only_writes_glyph_and_its_text_color_but_not_bg() {
         let before = c('a', Rgba::WHITE, Rgba::TRANSPARENT);
         let proposed = c('b', Rgba(1, 2, 3, 255), Rgba(4, 5, 6, 255));
-        let mask = PlaneMask { glyph: true, bg: false };
+        let mask = PlaneMask {
+            glyph: true,
+            bg: false,
+        };
         let result = mask_apply(before, proposed, mask);
         assert_eq!(result.ch, 'b');
         assert_eq!(result.fg, proposed.fg, "text color follows the glyph");
@@ -547,10 +619,16 @@ mod tests {
     fn mask_apply_bg_only_writes_bg_but_leaves_glyph_and_its_text_color() {
         let before = c('a', Rgba::WHITE, Rgba::TRANSPARENT);
         let proposed = c('b', Rgba(1, 2, 3, 255), Rgba(4, 5, 6, 255));
-        let mask = PlaneMask { glyph: false, bg: true };
+        let mask = PlaneMask {
+            glyph: false,
+            bg: true,
+        };
         let result = mask_apply(before, proposed, mask);
         assert_eq!(result.ch, before.ch);
-        assert_eq!(result.fg, before.fg, "text color stays put when the glyph plane is off");
+        assert_eq!(
+            result.fg, before.fg,
+            "text color stays put when the glyph plane is off"
+        );
         assert_eq!(result.bg, proposed.bg);
     }
 
@@ -684,9 +762,16 @@ mod tests {
         let mut stroke = FreehandStroke::new();
         stroke.press(2, 2, proposed, &ctx, &big);
         stroke.drag(8, 2, proposed, &ctx, &big);
-        let edit = stroke.finish(&small, 0, 0).expect("in-bounds cells still commit");
-        let Edit::Cells(cells) = edit else { panic!("expected Edit::Cells") };
-        assert!(cells.iter().all(|e| e.x < 5 && e.y < 5), "no phantom out-of-bounds edits");
+        let edit = stroke
+            .finish(&small, 0, 0)
+            .expect("in-bounds cells still commit");
+        let Edit::Cells(cells) = edit else {
+            panic!("expected Edit::Cells")
+        };
+        assert!(
+            cells.iter().all(|e| e.x < 5 && e.y < 5),
+            "no phantom out-of-bounds edits"
+        );
         let xs: Vec<u16> = cells.iter().map(|e| e.x).collect();
         assert_eq!(xs.len(), 3, "only the surviving columns 2..=4 commit");
     }
@@ -705,9 +790,16 @@ mod tests {
         doc.set_cell_at(1, 0, 1, 1, c('B', Rgba::WHITE, Rgba::TRANSPARENT));
         doc.set_active_frame(0); // only the `frame` argument targets frame 1
 
-        let pending = vec![PendingCell { x: 1, y: 1, cell: c('C', Rgba::WHITE, Rgba::TRANSPARENT) }];
-        let edit = diff_pending(&pending, &doc, 1, 0).expect("the cell differs from frame 1's content");
-        let Edit::Cells(cells) = edit else { panic!("expected Edit::Cells") };
+        let pending = vec![PendingCell {
+            x: 1,
+            y: 1,
+            cell: c('C', Rgba::WHITE, Rgba::TRANSPARENT),
+        }];
+        let edit =
+            diff_pending(&pending, &doc, 1, 0).expect("the cell differs from frame 1's content");
+        let Edit::Cells(cells) = edit else {
+            panic!("expected Edit::Cells")
+        };
         assert_eq!(
             cells[0].before,
             c('B', Rgba::WHITE, Rgba::TRANSPARENT),
@@ -719,11 +811,21 @@ mod tests {
     fn diff_pending_drops_cells_beyond_a_shrunken_document() {
         let small = Document::new(5, 5);
         let pending = vec![
-            PendingCell { x: 2, y: 2, cell: c('#', Rgba::WHITE, Rgba::TRANSPARENT) },
-            PendingCell { x: 8, y: 2, cell: c('#', Rgba::WHITE, Rgba::TRANSPARENT) },
+            PendingCell {
+                x: 2,
+                y: 2,
+                cell: c('#', Rgba::WHITE, Rgba::TRANSPARENT),
+            },
+            PendingCell {
+                x: 8,
+                y: 2,
+                cell: c('#', Rgba::WHITE, Rgba::TRANSPARENT),
+            },
         ];
         let edit = diff_pending(&pending, &small, 0, 0).expect("the in-bounds cell still commits");
-        let Edit::Cells(cells) = edit else { panic!("expected Edit::Cells") };
+        let Edit::Cells(cells) = edit else {
+            panic!("expected Edit::Cells")
+        };
         assert_eq!(cells.len(), 1);
         assert_eq!((cells[0].x, cells[0].y), (2, 2));
     }
@@ -783,9 +885,20 @@ mod tests {
         assert_eq!(
             cells,
             set_of(&[
-                (4, 4), (5, 4), (6, 4), (7, 4),
-                (3, 5), (4, 5), (5, 5), (6, 5), (7, 5), (8, 5),
-                (4, 6), (5, 6), (6, 6), (7, 6),
+                (4, 4),
+                (5, 4),
+                (6, 4),
+                (7, 4),
+                (3, 5),
+                (4, 5),
+                (5, 5),
+                (6, 5),
+                (7, 5),
+                (8, 5),
+                (4, 6),
+                (5, 6),
+                (6, 6),
+                (7, 6),
             ])
         );
     }
@@ -797,7 +910,16 @@ mod tests {
         footprint((5, 5), 2, BrushShape::Square, &mut out);
         assert_eq!(
             set_of(&out),
-            set_of(&[(4, 5), (5, 5), (6, 5), (7, 5), (4, 6), (5, 6), (6, 6), (7, 6)])
+            set_of(&[
+                (4, 5),
+                (5, 5),
+                (6, 5),
+                (7, 5),
+                (4, 6),
+                (5, 6),
+                (6, 6),
+                (7, 6)
+            ])
         );
     }
 
@@ -808,7 +930,16 @@ mod tests {
         footprint((0, 0), 3, BrushShape::Square, &mut out);
         assert_eq!(
             set_of(&out),
-            set_of(&[(0, 0), (1, 0), (2, 0), (3, 0), (0, 1), (1, 1), (2, 1), (3, 1)])
+            set_of(&[
+                (0, 0),
+                (1, 0),
+                (2, 0),
+                (3, 0),
+                (0, 1),
+                (1, 1),
+                (2, 1),
+                (3, 1)
+            ])
         );
     }
 
@@ -818,8 +949,14 @@ mod tests {
         let mut out = Vec::new();
         footprint((10, 10), 5, BrushShape::Circle, &mut out);
         let cells = set_of(&out);
-        assert!(!cells.contains(&(6, 8)), "top-left corner must be outside the ellipse");
-        assert!(!cells.contains(&(15, 8)), "top-right corner must be outside the ellipse");
+        assert!(
+            !cells.contains(&(6, 8)),
+            "top-left corner must be outside the ellipse"
+        );
+        assert!(
+            !cells.contains(&(15, 8)),
+            "top-right corner must be outside the ellipse"
+        );
         assert!(cells.contains(&(10, 8)), "top edge midpoint is inside");
         assert!(cells.contains(&(6, 10)), "left edge midpoint is inside");
         assert!(cells.contains(&(15, 10)), "right edge midpoint is inside");
@@ -844,7 +981,13 @@ mod tests {
     #[test]
     fn freehand_stroke_resync_repins_before_after_an_external_mutation() {
         let mut doc = Document::new(20, 20);
-        let ctx = ToolCtx { mask: PlaneMask { glyph: false, bg: true }, ..sized_ctx() };
+        let ctx = ToolCtx {
+            mask: PlaneMask {
+                glyph: false,
+                bg: true,
+            },
+            ..sized_ctx()
+        };
         let proposed = c('#', Rgba::WHITE, Rgba(1, 2, 3, 255));
         let mut stroke = FreehandStroke::new();
         stroke.press(5, 5, proposed, &ctx, &doc); // pins before=(5,5), Blank; pending glyph = ' '
@@ -856,15 +999,29 @@ mod tests {
         doc.set_cell(0, 5, 5, externally_written);
         stroke.resync(&doc, 0, 0);
 
-        let edit = stroke.finish(&doc, 0, 0).expect("expected a committed edit");
-        let Edit::Cells(cells) = edit else { panic!("expected Edit::Cells") };
-        let touched = cells.iter().find(|e| (e.x, e.y) == (5, 5)).expect("(5,5) must still commit");
-        assert_eq!(touched.before, externally_written, "resync must re-pin before to doc's post-mutation value");
+        let edit = stroke
+            .finish(&doc, 0, 0)
+            .expect("expected a committed edit");
+        let Edit::Cells(cells) = edit else {
+            panic!("expected Edit::Cells")
+        };
+        let touched = cells
+            .iter()
+            .find(|e| (e.x, e.y) == (5, 5))
+            .expect("(5,5) must still commit");
+        assert_eq!(
+            touched.before, externally_written,
+            "resync must re-pin before to doc's post-mutation value"
+        );
         assert_eq!(
             touched.after.ch, 'Z',
             "the masked-off glyph plane must carry the externally-written content, not the stale pre-mutation Blank"
         );
-        assert_eq!(touched.after.bg, Rgba(1, 2, 3, 255), "the masked bg plane still carries the stroke's own write");
+        assert_eq!(
+            touched.after.bg,
+            Rgba(1, 2, 3, 255),
+            "the masked bg plane still carries the stroke's own write"
+        );
     }
 
     /// A stroke bound against a non-active frame must resync (re-pin `before`) against *that*
@@ -873,7 +1030,8 @@ mod tests {
     fn resync_repins_before_against_the_edited_frame_not_frame_zero() {
         let mut doc = Document::new(10, 10);
         let mut history = crate::edit::History::new();
-        let edit = crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(10, 10)).unwrap();
+        let edit =
+            crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(10, 10)).unwrap();
         history.apply(&mut doc, edit);
 
         let ctx = sized_ctx();
@@ -886,9 +1044,16 @@ mod tests {
         doc.set_cell_at(1, 0, 3, 3, externally_written);
         stroke.resync(&doc, 1, 0);
 
-        let edit = stroke.finish(&doc, 1, 0).expect("expected a committed edit");
-        let Edit::Cells(cells) = edit else { panic!("expected Edit::Cells") };
-        let touched = cells.iter().find(|e| (e.x, e.y) == (3, 3)).expect("(3,3) must still commit");
+        let edit = stroke
+            .finish(&doc, 1, 0)
+            .expect("expected a committed edit");
+        let Edit::Cells(cells) = edit else {
+            panic!("expected Edit::Cells")
+        };
+        let touched = cells
+            .iter()
+            .find(|e| (e.x, e.y) == (3, 3))
+            .expect("(3,3) must still commit");
         assert_eq!(touched.frame, 1);
         assert_eq!(
             touched.before, externally_written,

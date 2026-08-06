@@ -31,13 +31,18 @@ fn parse_hex_rgba(s: &str) -> Option<Rgba> {
 
 impl Serialize for Rgba {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&format!("#{:02X}{:02X}{:02X}{:02X}", self.0, self.1, self.2, self.3))
+        s.serialize_str(&format!(
+            "#{:02X}{:02X}{:02X}{:02X}",
+            self.0, self.1, self.2, self.3
+        ))
     }
 }
 impl<'de> Deserialize<'de> for Rgba {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
-        parse_hex_rgba(&s).ok_or_else(|| serde::de::Error::custom(format!("invalid color {s:?}, expected #RRGGBBAA")))
+        parse_hex_rgba(&s).ok_or_else(|| {
+            serde::de::Error::custom(format!("invalid color {s:?}, expected #RRGGBBAA"))
+        })
     }
 }
 
@@ -123,7 +128,10 @@ impl LayerMeta {
     /// `"Layer {index + 1}"`, visible — the name a freshly added layer or a synthesized-at-load
     /// placeholder both get.
     pub(crate) fn default_named(index: usize) -> Self {
-        LayerMeta { name: format!("Layer {}", index + 1), visible: true }
+        LayerMeta {
+            name: format!("Layer {}", index + 1),
+            visible: true,
+        }
     }
     /// Truncates `name` to `MAX_NAME_LEN` chars (never rejects — degrades sanely, same posture as
     /// `clamp_frame_duration_ms`), cutting on a char boundary so multi-byte glyphs never split.
@@ -153,14 +161,19 @@ pub struct Frame {
 }
 impl Frame {
     pub fn blank(width: u16, height: u16) -> Self {
-        Frame { layers: vec![Layer::blank(width, height)], duration_override: None }
+        Frame {
+            layers: vec![Layer::blank(width, height)],
+            duration_override: None,
+        }
     }
     /// A blank frame with exactly `layer_count` blank layers (at least 1) — for a caller (e.g. a
     /// new animation frame) that must match a document's *current* layer count rather than always
     /// assuming one, unlike `blank`.
     pub fn blank_with_layers(width: u16, height: u16, layer_count: usize) -> Self {
         Frame {
-            layers: (0..layer_count.max(1)).map(|_| Layer::blank(width, height)).collect(),
+            layers: (0..layer_count.max(1))
+                .map(|_| Layer::blank(width, height))
+                .collect(),
             duration_override: None,
         }
     }
@@ -309,7 +322,11 @@ impl Document {
             return false;
         }
         let i = self.index(x, y);
-        match self.layers_mut().get_mut(layer).and_then(|l| l.cells.get_mut(i)) {
+        match self
+            .layers_mut()
+            .get_mut(layer)
+            .and_then(|l| l.cells.get_mut(i))
+        {
             Some(slot) => {
                 *slot = value;
                 true
@@ -346,11 +363,22 @@ impl Document {
             return None;
         }
         let i = self.index(x, y);
-        self.frames.get(frame)?.layers.get(layer).and_then(|l| l.cells.get(i))
+        self.frames
+            .get(frame)?
+            .layers
+            .get(layer)
+            .and_then(|l| l.cells.get(i))
     }
     /// `pub(crate)`: only `History` (via `Edit::Cells`) and the format loader write cells against
     /// an explicit, possibly-non-active frame — every other caller goes through `set_cell`.
-    pub(crate) fn set_cell_at(&mut self, frame: usize, layer: usize, x: u16, y: u16, value: Cell) -> bool {
+    pub(crate) fn set_cell_at(
+        &mut self,
+        frame: usize,
+        layer: usize,
+        x: u16,
+        y: u16,
+        value: Cell,
+    ) -> bool {
         if !self.in_bounds(x, y) {
             return false;
         }
@@ -371,7 +399,9 @@ impl Document {
     /// `frame`'s own duration override if set, else the document-level default. `None` only for an
     /// out-of-bounds `frame`.
     pub fn resolved_frame_duration_ms(&self, frame: usize) -> Option<u32> {
-        self.frames.get(frame).map(|f| f.duration_override.unwrap_or(self.frame_duration_ms))
+        self.frames
+            .get(frame)
+            .map(|f| f.duration_override.unwrap_or(self.frame_duration_ms))
     }
 
     /// The document's own layer-count ground truth — `layer_meta.len()`, not any individual
@@ -441,14 +471,28 @@ mod tests {
 
     #[test]
     fn rgba_hex_serialize_known_values() {
-        assert_eq!(serde_json::to_string(&Rgba::WHITE).unwrap(), "\"#FFFFFFFF\"");
-        assert_eq!(serde_json::to_string(&Rgba::TRANSPARENT).unwrap(), "\"#00000000\"");
-        assert_eq!(serde_json::to_string(&Rgba(18, 52, 86, 120)).unwrap(), "\"#12345678\"");
+        assert_eq!(
+            serde_json::to_string(&Rgba::WHITE).unwrap(),
+            "\"#FFFFFFFF\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Rgba::TRANSPARENT).unwrap(),
+            "\"#00000000\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Rgba(18, 52, 86, 120)).unwrap(),
+            "\"#12345678\""
+        );
     }
 
     #[test]
     fn rgba_hex_round_trips() {
-        for c in [Rgba::WHITE, Rgba::TRANSPARENT, Rgba(1, 2, 3, 4), Rgba(255, 0, 128, 64)] {
+        for c in [
+            Rgba::WHITE,
+            Rgba::TRANSPARENT,
+            Rgba(1, 2, 3, 4),
+            Rgba(255, 0, 128, 64),
+        ] {
             let json = serde_json::to_string(&c).unwrap();
             let back: Rgba = serde_json::from_str(&json).unwrap();
             assert_eq!(c, back);
@@ -463,8 +507,17 @@ mod tests {
 
     #[test]
     fn rgba_hex_deserialize_rejects_malformed_strings() {
-        for bad in ["\"red\"", "\"#FFF\"", "\"FFFFFFFF\"", "\"#GGGGGGGG\"", "\"#FFFFFFFFFF\""] {
-            assert!(serde_json::from_str::<Rgba>(bad).is_err(), "expected {bad} to be rejected");
+        for bad in [
+            "\"red\"",
+            "\"#FFF\"",
+            "\"FFFFFFFF\"",
+            "\"#GGGGGGGG\"",
+            "\"#FFFFFFFFFF\"",
+        ] {
+            assert!(
+                serde_json::from_str::<Rgba>(bad).is_err(),
+                "expected {bad} to be rejected"
+            );
         }
     }
 
@@ -483,17 +536,17 @@ mod tests {
     #[test]
     fn rgba_hex_deserialize_rejects_a_battery_of_malformed_inputs() {
         let bad = [
-            "\"#€ABCDE\"",       // multi-byte UTF-8, byte-length 8, not char-length 8
-            "\"#日本語ABCDE\"",  // several multi-byte chars
+            "\"#€ABCDE\"",         // multi-byte UTF-8, byte-length 8, not char-length 8
+            "\"#日本語ABCDE\"",    // several multi-byte chars
             "\"#\u{0301}FFFFFF\"", // combining mark
             "\"#FFFFFF\u{200D}\"", // ZWJ
-            "\"\"",              // empty string
-            "\"#\"",             // just the prefix
-            "\"##FFFFFFF\"",     // double leading '#'
-            "\"# FFFFFF\"",      // whitespace where a hex digit is expected
-            "\"#-FFFFFFF\"",     // non-hex punctuation
-            "\"#+1234567\"",     // leading '+': from_str_radix's sign-stripping, not a hex digit
-            "42",                // not a string at all
+            "\"\"",                // empty string
+            "\"#\"",               // just the prefix
+            "\"##FFFFFFF\"",       // double leading '#'
+            "\"# FFFFFF\"",        // whitespace where a hex digit is expected
+            "\"#-FFFFFFF\"",       // non-hex punctuation
+            "\"#+1234567\"",       // leading '+': from_str_radix's sign-stripping, not a hex digit
+            "42",                  // not a string at all
             "null",
         ];
         for json in bad {
@@ -624,7 +677,11 @@ mod tests {
     #[test]
     fn cell_and_set_cell_address_the_active_frame_implicitly() {
         let mut doc = Document::new(4, 4);
-        let value = Cell { ch: 'x', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT };
+        let value = Cell {
+            ch: 'x',
+            fg: Rgba::WHITE,
+            bg: Rgba::TRANSPARENT,
+        };
         assert!(doc.set_cell(0, 1, 1, value));
         assert_eq!(doc.cell(0, 1, 1), Some(&value));
         // The same value, addressed explicitly against frame 0, matches.
@@ -634,7 +691,11 @@ mod tests {
     #[test]
     fn cell_at_addresses_an_explicit_frame_independent_of_active_frame() {
         let mut doc = Document::new(4, 4);
-        let value = Cell { ch: 'y', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT };
+        let value = Cell {
+            ch: 'y',
+            fg: Rgba::WHITE,
+            bg: Rgba::TRANSPARENT,
+        };
         assert!(doc.set_cell_at(0, 0, 2, 2, value));
         // Reading through the implicit, active-frame-addressed API sees the same write.
         assert_eq!(doc.cell(0, 2, 2), Some(&value));
@@ -645,7 +706,11 @@ mod tests {
     fn set_active_frame_rejects_an_out_of_bounds_index_and_leaves_the_cursor_unchanged() {
         let mut doc = Document::new(4, 4);
         assert!(!doc.set_active_frame(1), "only frame 0 exists");
-        assert_eq!(doc.active_frame(), 0, "cursor must be unchanged after a rejected set");
+        assert_eq!(
+            doc.active_frame(),
+            0,
+            "cursor must be unchanged after a rejected set"
+        );
     }
 
     #[test]
@@ -658,8 +723,15 @@ mod tests {
     #[test]
     fn resolved_frame_duration_ms_falls_back_to_the_document_default_when_no_override_is_set() {
         let doc = Document::new(4, 4);
-        assert_eq!(doc.resolved_frame_duration_ms(0), Some(Document::DEFAULT_FRAME_DURATION_MS));
-        assert_eq!(doc.resolved_frame_duration_ms(1), None, "out-of-bounds frame is None");
+        assert_eq!(
+            doc.resolved_frame_duration_ms(0),
+            Some(Document::DEFAULT_FRAME_DURATION_MS)
+        );
+        assert_eq!(
+            doc.resolved_frame_duration_ms(1),
+            None,
+            "out-of-bounds frame is None"
+        );
     }
 
     #[test]
@@ -699,7 +771,11 @@ mod tests {
     fn set_active_layer_rejects_an_out_of_bounds_index_and_leaves_the_cursor_unchanged() {
         let mut doc = Document::new(4, 4);
         assert!(!doc.set_active_layer(1), "only layer 0 exists");
-        assert_eq!(doc.active_layer(), 0, "cursor must be unchanged after a rejected set");
+        assert_eq!(
+            doc.active_layer(),
+            0,
+            "cursor must be unchanged after a rejected set"
+        );
     }
 
     #[test]
@@ -707,12 +783,19 @@ mod tests {
         let frame = Frame::blank_with_layers(3, 2, 4);
         assert_eq!(frame.layers.len(), 4);
         assert!(frame.layers.iter().all(|l| l.cells().len() == 6));
-        assert!(frame.layers.iter().all(|l| l.cells().iter().all(Cell::is_blank)));
+        assert!(frame
+            .layers
+            .iter()
+            .all(|l| l.cells().iter().all(Cell::is_blank)));
     }
 
     #[test]
     fn frame_blank_with_layers_clamps_a_zero_layer_count_up_to_one() {
         let frame = Frame::blank_with_layers(2, 2, 0);
-        assert_eq!(frame.layers.len(), 1, "a document must never have zero layers, even from a raw constructor call");
+        assert_eq!(
+            frame.layers.len(),
+            1,
+            "a document must never have zero layers, even from a raw constructor call"
+        );
     }
 }

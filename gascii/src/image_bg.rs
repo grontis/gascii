@@ -75,15 +75,23 @@ pub(crate) fn decode_image(bytes: &[u8]) -> Result<image::RgbaImage, String> {
         .map_err(|e| e.to_string())?;
     let (w, h) = reader.into_dimensions().map_err(|e| e.to_string())?;
     if u64::from(w) * u64::from(h) > MAX_IMAGE_PIXELS {
-        return Err(format!("image is too large ({w}x{h}); the limit is {MAX_IMAGE_PIXELS} pixels"));
+        return Err(format!(
+            "image is too large ({w}x{h}); the limit is {MAX_IMAGE_PIXELS} pixels"
+        ));
     }
-    let rgba = image::load_from_memory(bytes).map(|d| d.to_rgba8()).map_err(|e| e.to_string())?;
+    let rgba = image::load_from_memory(bytes)
+        .map(|d| d.to_rgba8())
+        .map_err(|e| e.to_string())?;
     Ok(match fit_dims(rgba.width(), rgba.height(), MAX_IMAGE_DIM) {
         // Resize in premultiplied space, like `rasterize_rgba8`'s Cover resize — straight-alpha
         // resampling lets transparent pixels' invisible RGB fringe into opaque neighbors.
         Some((nw, nh)) => {
-            let mut out =
-                image::imageops::resize(&premultiply(&rgba), nw, nh, image::imageops::FilterType::Triangle);
+            let mut out = image::imageops::resize(
+                &premultiply(&rgba),
+                nw,
+                nh,
+                image::imageops::FilterType::Triangle,
+            );
             for px in out.pixels_mut() {
                 px.0 = unpremultiply(px.0);
             }
@@ -139,7 +147,12 @@ pub(crate) fn fit_dims(w: u32, h: u32, max_dim: u32) -> Option<(u32, u32)> {
 /// (Contain — the trace overlay's fit): the whole image stays visible, undistorted, letterboxed on
 /// whichever axis doesn't fill the box. Returns `(offset_x, offset_y, width, height)`; both offsets
 /// are `>= 0`. `None` for any non-positive dimension (nothing to fit).
-pub(crate) fn fit_contain(img_w: u32, img_h: u32, avail_w: f32, avail_h: f32) -> Option<(f32, f32, f32, f32)> {
+pub(crate) fn fit_contain(
+    img_w: u32,
+    img_h: u32,
+    avail_w: f32,
+    avail_h: f32,
+) -> Option<(f32, f32, f32, f32)> {
     if img_w == 0 || img_h == 0 || avail_w <= 0.0 || avail_h <= 0.0 {
         return None;
     }
@@ -154,7 +167,12 @@ pub(crate) fn fit_contain(img_w: u32, img_h: u32, avail_w: f32, avail_h: f32) ->
 /// axis that overflows is cropped (its offset goes negative). Returns `(offset_x, offset_y, width,
 /// height)`. Differs from `fit_contain` only in using the larger of the two scale candidates
 /// (`max` instead of `min`). `None` for any non-positive dimension (nothing to fit).
-pub(crate) fn fit_cover(img_w: u32, img_h: u32, avail_w: f32, avail_h: f32) -> Option<(f32, f32, f32, f32)> {
+pub(crate) fn fit_cover(
+    img_w: u32,
+    img_h: u32,
+    avail_w: f32,
+    avail_h: f32,
+) -> Option<(f32, f32, f32, f32)> {
     if img_w == 0 || img_h == 0 || avail_w <= 0.0 || avail_h <= 0.0 {
         return None;
     }
@@ -176,10 +194,16 @@ mod tests {
     #[test]
     fn fit_contain_square_into_wide_letterboxes_horizontally() {
         let (ox, oy, w, h) = fit_contain(100, 100, 200.0, 100.0).unwrap();
-        assert!((w - 100.0).abs() < EPS && (h - 100.0).abs() < EPS, "fits the full square inside the height");
+        assert!(
+            (w - 100.0).abs() < EPS && (h - 100.0).abs() < EPS,
+            "fits the full square inside the height"
+        );
         assert!(oy.abs() < EPS, "no vertical letterbox");
         assert!(ox > EPS, "horizontal letterbox on both sides");
-        assert!(ox + w <= 200.0 + EPS, "must fit inside the box, not overflow it");
+        assert!(
+            ox + w <= 200.0 + EPS,
+            "must fit inside the box, not overflow it"
+        );
     }
 
     /// A 2:1 image fit inside a 1:1 box: the box's width is now the constraining axis, so the
@@ -190,7 +214,10 @@ mod tests {
         assert!((w - 100.0).abs() < EPS && (h - 50.0).abs() < EPS);
         assert!(ox.abs() < EPS, "no horizontal letterbox");
         assert!(oy > EPS, "vertical letterbox on both sides");
-        assert!(oy + h <= 100.0 + EPS, "must fit inside the box, not overflow it");
+        assert!(
+            oy + h <= 100.0 + EPS,
+            "must fit inside the box, not overflow it"
+        );
     }
 
     /// A same-aspect image fits the box exactly: no letterbox on either axis, offsets both ~0.
@@ -221,7 +248,11 @@ mod tests {
             px.0 = [10, 20, 30, 255];
         }
         let mut bytes = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).unwrap();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
 
         let decoded = decode_image(&bytes).expect("a valid in-memory PNG must decode");
         assert_eq!((decoded.width(), decoded.height()), (3, 2));
@@ -241,9 +272,11 @@ mod tests {
     #[test]
     fn decode_image_rejects_an_over_cap_declared_size_before_decoding() {
         fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
-            const TABLE: [u32; 16] =
-                [0, 0x1db71064, 0x3b6e20c8, 0x26d930ac, 0x76dc4190, 0x6b6b51f4, 0x4db26158, 0x5005713c,
-                 0xedb88320, 0xf00f9344, 0xd6d6a3e8, 0xcb61b38c, 0x9b64c2b0, 0x86d3d2d4, 0xa00ae278, 0xbdbdf21c];
+            const TABLE: [u32; 16] = [
+                0, 0x1db71064, 0x3b6e20c8, 0x26d930ac, 0x76dc4190, 0x6b6b51f4, 0x4db26158,
+                0x5005713c, 0xedb88320, 0xf00f9344, 0xd6d6a3e8, 0xcb61b38c, 0x9b64c2b0, 0x86d3d2d4,
+                0xa00ae278, 0xbdbdf21c,
+            ];
             let mut crc = 0xffff_ffffu32;
             for &b in kind.iter().chain(data) {
                 crc = TABLE[((crc ^ u32::from(b)) & 0x0f) as usize] ^ (crc >> 4);
@@ -267,7 +300,10 @@ mod tests {
         bytes.extend(chunk(b"IEND", &[]));
 
         let err = decode_image(&bytes).expect_err("a 10-gigapixel declaration must be rejected");
-        assert!(err.contains("too large"), "must be the size cap, not a decode error: {err}");
+        assert!(
+            err.contains("too large"),
+            "must be the size cap, not a decode error: {err}"
+        );
     }
 
     /// An image over `MAX_IMAGE_DIM` on one axis (but under the pixel cap) decodes and comes back
@@ -276,11 +312,18 @@ mod tests {
     fn decode_image_downscales_an_oversized_axis_to_fit_max_dim() {
         let img = image::RgbaImage::new(MAX_IMAGE_DIM + 96, 64);
         let mut bytes = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).unwrap();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
 
         let decoded = decode_image(&bytes).expect("under the pixel cap: must decode, not reject");
         assert_eq!(decoded.width(), MAX_IMAGE_DIM);
-        assert!(decoded.height() < 64, "the short axis must shrink by the same scale");
+        assert!(
+            decoded.height() < 64,
+            "the short axis must shrink by the same scale"
+        );
     }
 
     /// The downscale must run in premultiplied space: a transparent pixel's invisible RGB must
@@ -292,10 +335,18 @@ mod tests {
         let w = MAX_IMAGE_DIM * 2;
         let mut img = image::RgbaImage::new(w, 1);
         for (x, _, px) in img.enumerate_pixels_mut() {
-            px.0 = if x < w / 2 { [255, 0, 0, 255] } else { [0, 255, 0, 0] };
+            px.0 = if x < w / 2 {
+                [255, 0, 0, 255]
+            } else {
+                [0, 255, 0, 0]
+            };
         }
         let mut bytes = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).unwrap();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
 
         let decoded = decode_image(&bytes).expect("under the pixel cap: must decode");
         assert_eq!(decoded.width(), MAX_IMAGE_DIM);
@@ -319,7 +370,11 @@ mod tests {
         assert_eq!(fit_dims(8192, 4096, 4096), Some((4096, 2048)));
         assert_eq!(fit_dims(4096, 8192, 4096), Some((2048, 4096)));
         let (w, h) = fit_dims(100_000, 1, 4096).unwrap();
-        assert_eq!((w, h), (4096, 1), "a sliver's short axis must clamp to 1, not round to 0");
+        assert_eq!(
+            (w, h),
+            (4096, 1),
+            "a sliver's short axis must clamp to 1, not round to 0"
+        );
     }
 
     /// The `jpeg` Cargo feature is new in this change (`Cargo.toml`'s `image` dep gained it
@@ -338,8 +393,11 @@ mod tests {
         // before encoding, matching how a real-world .jpg (never RGBA) would arrive.
         let rgb = image::DynamicImage::from(img).into_rgb8();
         let mut bytes = Vec::new();
-        rgb.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Jpeg)
-            .expect("the jpeg feature must actually encode, not just be declared in Cargo.toml");
+        rgb.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Jpeg,
+        )
+        .expect("the jpeg feature must actually encode, not just be declared in Cargo.toml");
 
         let decoded = decode_image(&bytes).expect("a valid in-memory JPEG must decode");
         assert_eq!((decoded.width(), decoded.height()), (4, 3));
@@ -351,9 +409,18 @@ mod tests {
     #[test]
     fn fit_contain_of_a_1x1_pixel_source_scales_up_to_fill_the_smaller_box_dimension() {
         let (ox, oy, w, h) = fit_contain(1, 1, 200.0, 100.0).unwrap();
-        assert!((w - 100.0).abs() < EPS && (h - 100.0).abs() < EPS, "a 1x1 source is square, so it scales to the smaller box axis");
-        assert!(oy.abs() < EPS, "no vertical letterbox: the box's height is the constraining axis");
-        assert!(ox > EPS && ox + w <= 200.0 + EPS, "centered horizontally, still fully inside the box");
+        assert!(
+            (w - 100.0).abs() < EPS && (h - 100.0).abs() < EPS,
+            "a 1x1 source is square, so it scales to the smaller box axis"
+        );
+        assert!(
+            oy.abs() < EPS,
+            "no vertical letterbox: the box's height is the constraining axis"
+        );
+        assert!(
+            ox > EPS && ox + w <= 200.0 + EPS,
+            "centered horizontally, still fully inside the box"
+        );
     }
 
     /// An extreme aspect-ratio source (1000:1) fit into a square box exercises the far end of the
@@ -362,10 +429,19 @@ mod tests {
     #[test]
     fn fit_contain_of_an_extreme_aspect_ratio_source_still_fits_inside_the_box_on_both_axes() {
         let (ox, oy, w, h) = fit_contain(1000, 1, 100.0, 100.0).unwrap();
-        assert!((w - 100.0).abs() < EPS, "width fills the box: the box's width is the constraining axis");
-        assert!(h > 0.0 && h < 1.0, "height collapses to a sliver but must stay positive");
+        assert!(
+            (w - 100.0).abs() < EPS,
+            "width fills the box: the box's width is the constraining axis"
+        );
+        assert!(
+            h > 0.0 && h < 1.0,
+            "height collapses to a sliver but must stay positive"
+        );
         assert!(ox.abs() < EPS, "no horizontal letterbox");
-        assert!(oy > EPS && oy + h <= 100.0 + EPS, "vertical letterbox centers the sliver, still inside the box");
+        assert!(
+            oy > EPS && oy + h <= 100.0 + EPS,
+            "vertical letterbox centers the sliver, still inside the box"
+        );
     }
 
     /// A 1:1 image covering a 2:1 box: Cover uses the *larger* scale candidate, so the box's width
@@ -376,16 +452,31 @@ mod tests {
     fn fit_cover_square_into_wide_fills_width_and_crops_height() {
         let (ox, oy, w, h) = fit_cover(100, 100, 200.0, 100.0).unwrap();
         assert!((w - 200.0).abs() < EPS, "width fills the box exactly");
-        assert!(h > 100.0 + EPS, "height overflows the box — this is the cropped axis");
-        assert!(ox.abs() < EPS, "no horizontal crop: width fit the box exactly");
-        assert!(oy < -EPS, "vertical offset goes negative: the overflow is centered and cropped");
+        assert!(
+            h > 100.0 + EPS,
+            "height overflows the box — this is the cropped axis"
+        );
+        assert!(
+            ox.abs() < EPS,
+            "no horizontal crop: width fit the box exactly"
+        );
+        assert!(
+            oy < -EPS,
+            "vertical offset goes negative: the overflow is centered and cropped"
+        );
 
         // Contrast with fit_contain on the identical inputs: min-scale letterboxes horizontally
         // instead, the opposite axis.
         let (cox, coy, cw, ch) = fit_contain(100, 100, 200.0, 100.0).unwrap();
-        assert!(cw < w, "contain's fitted size must be smaller than cover's on the scaled axis");
+        assert!(
+            cw < w,
+            "contain's fitted size must be smaller than cover's on the scaled axis"
+        );
         assert!(ch < h);
-        assert!(coy.abs() < EPS && cox > EPS, "contain letterboxes horizontally instead of cropping vertically");
+        assert!(
+            coy.abs() < EPS && cox > EPS,
+            "contain letterboxes horizontally instead of cropping vertically"
+        );
     }
 
     /// A 2:1 image covering a 1:1 box: the box's height is now what the image fills exactly, and
@@ -395,9 +486,18 @@ mod tests {
     fn fit_cover_wide_into_square_fills_height_and_crops_width() {
         let (ox, oy, w, h) = fit_cover(200, 100, 100.0, 100.0).unwrap();
         assert!((h - 100.0).abs() < EPS, "height fills the box exactly");
-        assert!(w > 100.0 + EPS, "width overflows the box — this is the cropped axis");
-        assert!(oy.abs() < EPS, "no vertical crop: height fit the box exactly");
-        assert!(ox < -EPS, "horizontal offset goes negative: the overflow is centered and cropped");
+        assert!(
+            w > 100.0 + EPS,
+            "width overflows the box — this is the cropped axis"
+        );
+        assert!(
+            oy.abs() < EPS,
+            "no vertical crop: height fit the box exactly"
+        );
+        assert!(
+            ox < -EPS,
+            "horizontal offset goes negative: the overflow is centered and cropped"
+        );
     }
 
     /// A same-aspect image covers the box exactly: no crop on either axis, offsets both ~0 — an

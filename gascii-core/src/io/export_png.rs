@@ -10,8 +10,17 @@ pub const MAX_PNG_PIXELS: u64 = 100_000_000;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PngExportError {
     ZeroScale,
-    TooLarge { width_px: u64, height_px: u64, max_pixels: u64 },
-    TooManyFrames { frame_px_w: u64, frame_px_h: u64, frame_count: usize, max_pixels: u64 },
+    TooLarge {
+        width_px: u64,
+        height_px: u64,
+        max_pixels: u64,
+    },
+    TooManyFrames {
+        frame_px_w: u64,
+        frame_px_h: u64,
+        frame_count: usize,
+        max_pixels: u64,
+    },
 }
 
 /// Computes target pixel dimensions for a `width x height` cell document at `cell_px` pixels per
@@ -20,14 +29,22 @@ pub enum PngExportError {
 /// is the untrusted piece — a user-chosen scale that, multiplied against a max-size document, can
 /// overflow or demand an enormous allocation. All multiplication happens in `u64` to stay
 /// overflow-safe regardless of input.
-pub fn validate_png_dimensions(width: u16, height: u16, cell_px: u32) -> Result<(u32, u32), PngExportError> {
+pub fn validate_png_dimensions(
+    width: u16,
+    height: u16,
+    cell_px: u32,
+) -> Result<(u32, u32), PngExportError> {
     if cell_px == 0 {
         return Err(PngExportError::ZeroScale);
     }
     let w = width as u64 * cell_px as u64;
     let h = height as u64 * cell_px as u64;
     if w > u32::MAX as u64 || h > u32::MAX as u64 || w.saturating_mul(h) > MAX_PNG_PIXELS {
-        return Err(PngExportError::TooLarge { width_px: w, height_px: h, max_pixels: MAX_PNG_PIXELS });
+        return Err(PngExportError::TooLarge {
+            width_px: w,
+            height_px: h,
+            max_pixels: MAX_PNG_PIXELS,
+        });
     }
     Ok((w as u32, h as u32))
 }
@@ -47,7 +64,9 @@ pub fn validate_gif_dimensions(
     frame_count: usize,
 ) -> Result<(u32, u32), PngExportError> {
     let (w, h) = validate_png_dimensions(width, height, cell_px)?;
-    let total = (w as u64).saturating_mul(h as u64).saturating_mul(frame_count as u64);
+    let total = (w as u64)
+        .saturating_mul(h as u64)
+        .saturating_mul(frame_count as u64);
     if total > MAX_PNG_PIXELS {
         return Err(PngExportError::TooManyFrames {
             frame_px_w: w as u64,
@@ -73,7 +92,11 @@ pub fn validate_spritesheet_dimensions(
     let w = frame_px_w as u64 * cols as u64;
     let h = frame_px_h as u64 * rows as u64;
     if w > u32::MAX as u64 || h > u32::MAX as u64 || w.saturating_mul(h) > MAX_PNG_PIXELS {
-        return Err(PngExportError::TooLarge { width_px: w, height_px: h, max_pixels: MAX_PNG_PIXELS });
+        return Err(PngExportError::TooLarge {
+            width_px: w,
+            height_px: h,
+            max_pixels: MAX_PNG_PIXELS,
+        });
     }
     Ok((w as u32, h as u32))
 }
@@ -84,7 +107,10 @@ mod tests {
 
     #[test]
     fn zero_scale_is_rejected() {
-        assert_eq!(validate_png_dimensions(80, 25, 0), Err(PngExportError::ZeroScale));
+        assert_eq!(
+            validate_png_dimensions(80, 25, 0),
+            Err(PngExportError::ZeroScale)
+        );
     }
 
     #[test]
@@ -112,9 +138,13 @@ mod tests {
     #[test]
     fn overflow_safe_multiplication_never_panics_on_extreme_inputs() {
         // u16::MAX dims x a large cell_px must not panic — only ever accept or cleanly reject.
-        let result = std::panic::catch_unwind(|| validate_png_dimensions(u16::MAX, u16::MAX, u32::MAX));
+        let result =
+            std::panic::catch_unwind(|| validate_png_dimensions(u16::MAX, u16::MAX, u32::MAX));
         assert!(result.is_ok(), "must not panic");
-        assert!(matches!(result.unwrap(), Err(PngExportError::TooLarge { .. })));
+        assert!(matches!(
+            result.unwrap(),
+            Err(PngExportError::TooLarge { .. })
+        ));
     }
 
     #[test]
@@ -131,7 +161,10 @@ mod tests {
     fn width_or_height_exceeding_u32_max_pixels_is_rejected_without_panicking() {
         let result = std::panic::catch_unwind(|| validate_png_dimensions(u16::MAX, 1, u32::MAX));
         assert!(result.is_ok());
-        assert!(matches!(result.unwrap(), Err(PngExportError::TooLarge { .. })));
+        assert!(matches!(
+            result.unwrap(),
+            Err(PngExportError::TooLarge { .. })
+        ));
     }
 
     /// A max-size document at the largest offered UI preset (48px/cell, `PNG_SCALE_PRESETS` in
@@ -148,7 +181,8 @@ mod tests {
     /// is a public `gascii-core` function any caller could call directly) must not panic and must
     /// not authorize a pixel buffer for a nonsensical degenerate request.
     #[test]
-    fn zero_width_or_zero_height_does_not_panic_and_reports_a_zero_sized_result_rather_than_erroring() {
+    fn zero_width_or_zero_height_does_not_panic_and_reports_a_zero_sized_result_rather_than_erroring(
+    ) {
         // Not rejected as an error today (only cell_px==0 and the pixel cap are checked) — this
         // test locks in that documented current behavior (0 pixels is trivially under the cap) so
         // a future change to add a width/height==0 check is a deliberate, visible decision, not an
@@ -178,15 +212,22 @@ mod tests {
 
     #[test]
     fn validate_gif_dimensions_overflow_safe_on_extreme_inputs() {
-        let result =
-            std::panic::catch_unwind(|| validate_gif_dimensions(u16::MAX, u16::MAX, u32::MAX, usize::MAX));
+        let result = std::panic::catch_unwind(|| {
+            validate_gif_dimensions(u16::MAX, u16::MAX, u32::MAX, usize::MAX)
+        });
         assert!(result.is_ok(), "must not panic");
-        assert!(matches!(result.unwrap(), Err(PngExportError::TooLarge { .. } | PngExportError::TooManyFrames { .. })));
+        assert!(matches!(
+            result.unwrap(),
+            Err(PngExportError::TooLarge { .. } | PngExportError::TooManyFrames { .. })
+        ));
     }
 
     #[test]
     fn a_zero_scale_gif_request_is_rejected_the_same_as_a_zero_scale_png_request() {
-        assert_eq!(validate_gif_dimensions(80, 25, 0, 10), Err(PngExportError::ZeroScale));
+        assert_eq!(
+            validate_gif_dimensions(80, 25, 0, 10),
+            Err(PngExportError::ZeroScale)
+        );
     }
 
     // `validate_spritesheet_dimensions` tests — mirrors `validate_png_dimensions`'s own shapes.
@@ -209,9 +250,13 @@ mod tests {
 
     #[test]
     fn validate_spritesheet_dimensions_overflow_safe_on_extreme_inputs() {
-        let result =
-            std::panic::catch_unwind(|| validate_spritesheet_dimensions(u32::MAX, u32::MAX, u32::MAX, u32::MAX));
+        let result = std::panic::catch_unwind(|| {
+            validate_spritesheet_dimensions(u32::MAX, u32::MAX, u32::MAX, u32::MAX)
+        });
         assert!(result.is_ok(), "must not panic");
-        assert!(matches!(result.unwrap(), Err(PngExportError::TooLarge { .. })));
+        assert!(matches!(
+            result.unwrap(),
+            Err(PngExportError::TooLarge { .. })
+        ));
     }
 }

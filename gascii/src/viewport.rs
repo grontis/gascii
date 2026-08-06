@@ -170,8 +170,13 @@ impl Viewport {
                 .iter()
                 .position(|&s| s > fit + SNAP)
                 .unwrap_or(ZOOM_SCALES.len() - 1),
-            (Some(fit), -1) => ZOOM_SCALES.iter().rposition(|&s| s < fit - SNAP).unwrap_or(0),
-            (None, d) => (self.zoom_step as i32 + d).clamp(0, ZOOM_SCALES.len() as i32 - 1) as usize,
+            (Some(fit), -1) => ZOOM_SCALES
+                .iter()
+                .rposition(|&s| s < fit - SNAP)
+                .unwrap_or(0),
+            (None, d) => {
+                (self.zoom_step as i32 + d).clamp(0, ZOOM_SCALES.len() as i32 - 1) as usize
+            }
             _ => return,
         };
         let left_fit = self.fit_scale.take().is_some();
@@ -226,7 +231,10 @@ impl Viewport {
             (available.x - margin * 2.0).max(1.0),
             (available.y - margin * 2.0).max(1.0),
         );
-        let (w, h) = (doc_extent.width.max(1) as f32, doc_extent.height.max(1) as f32);
+        let (w, h) = (
+            doc_extent.width.max(1) as f32,
+            doc_extent.height.max(1) as f32,
+        );
         let (min_scale, max_scale) = (ZOOM_SCALES[0], ZOOM_SCALES[ZOOM_SCALES.len() - 1]);
 
         let measure = |scale: f32| {
@@ -252,8 +260,15 @@ impl Viewport {
         self.fit_scale = Some(scale);
         // The ladder position a later manual step zooms from: the largest preset not above the
         // fit, so `-` always shrinks and `+` always grows from what's on screen.
-        self.zoom_step = ZOOM_SCALES.iter().rposition(|&z| z <= scale + 1e-3).unwrap_or(0);
-        self.cached_cell = Some((self.scale().to_bits(), ctx.pixels_per_point().to_bits(), cell));
+        self.zoom_step = ZOOM_SCALES
+            .iter()
+            .rposition(|&z| z <= scale + 1e-3)
+            .unwrap_or(0);
+        self.cached_cell = Some((
+            self.scale().to_bits(),
+            ctx.pixels_per_point().to_bits(),
+            cell,
+        ));
 
         let doc_w = w * cell.x;
         let doc_h = h * cell.y;
@@ -285,7 +300,10 @@ mod tests {
     }
     /// A doc extent generous enough not to constrain tests that aren't exercising bounds-clamping.
     fn big_doc() -> DocExtent {
-        DocExtent { width: 1000, height: 1000 }
+        DocExtent {
+            width: 1000,
+            height: 1000,
+        }
     }
 
     #[test]
@@ -301,11 +319,18 @@ mod tests {
     fn viewport_cell_grid_impl_matches_its_inherent_methods() {
         use gascii_plugin_api::CellGrid;
 
-        let vp = Viewport { zoom_step: 2, pan: Vec2::new(12.0, -7.0), ..Viewport::default() };
+        let vp = Viewport {
+            zoom_step: 2,
+            pan: Vec2::new(12.0, -7.0),
+            ..Viewport::default()
+        };
         let grid: &dyn CellGrid = &vp;
 
         assert_eq!(grid.font_px(), vp.font_px());
-        assert_eq!(grid.cell_to_screen(5, 9, cell(), origin()), vp.cell_to_screen(5, 9, cell(), origin()));
+        assert_eq!(
+            grid.cell_to_screen(5, 9, cell(), origin()),
+            vp.cell_to_screen(5, 9, cell(), origin())
+        );
     }
 
     #[test]
@@ -345,7 +370,10 @@ mod tests {
     #[test]
     fn screen_to_cell_out_of_doc_bounds_is_none() {
         let vp = Viewport::default();
-        let doc_extent = DocExtent { width: 80, height: 25 };
+        let doc_extent = DocExtent {
+            width: 80,
+            height: 25,
+        };
 
         // Just inside the last in-bounds cell (79, 24) at 10x20 cell size.
         let inside = vp.cell_to_screen(79, 24, cell(), origin()) + Vec2::new(1.0, 1.0);
@@ -357,16 +385,25 @@ mod tests {
         // One cell past the right edge and one cell past the bottom edge — both out of bounds
         // even though they resolve to valid, in-range-looking floor()'d coordinates.
         let past_right = vp.cell_to_screen(80, 0, cell(), origin()) + Vec2::new(1.0, 1.0);
-        assert_eq!(vp.screen_to_cell(past_right, cell(), origin(), doc_extent), None);
+        assert_eq!(
+            vp.screen_to_cell(past_right, cell(), origin(), doc_extent),
+            None
+        );
 
         let past_bottom = vp.cell_to_screen(0, 25, cell(), origin()) + Vec2::new(1.0, 1.0);
-        assert_eq!(vp.screen_to_cell(past_bottom, cell(), origin(), doc_extent), None);
+        assert_eq!(
+            vp.screen_to_cell(past_bottom, cell(), origin(), doc_extent),
+            None
+        );
     }
 
     #[test]
     fn visible_cell_rect_clamps_to_doc_bounds() {
         let vp = Viewport::default();
-        let doc_extent = DocExtent { width: 5, height: 3 };
+        let doc_extent = DocExtent {
+            width: 5,
+            height: 3,
+        };
         // clip much larger than doc
         let clip = Rect::from_min_max(Pos2::new(-50.0, -50.0), Pos2::new(500.0, 500.0));
         let (x0, y0, x1, y1) = vp.visible_cell_rect(clip, cell(), origin(), doc_extent);
@@ -376,7 +413,10 @@ mod tests {
     #[test]
     fn visible_cell_rect_partial_clip() {
         let vp = Viewport::default();
-        let doc_extent = DocExtent { width: 100, height: 100 };
+        let doc_extent = DocExtent {
+            width: 100,
+            height: 100,
+        };
         // clip covers roughly cells [1,3) x [0,2)
         let clip = Rect::from_min_max(Pos2::new(10.0, 0.0), Pos2::new(29.0, 39.0));
         let (x0, y0, x1, y1) = vp.visible_cell_rect(clip, cell(), origin(), doc_extent);
@@ -389,7 +429,10 @@ mod tests {
     #[test]
     fn screen_to_cell_clamped_matches_screen_to_cell_inside_bounds() {
         let vp = Viewport::default();
-        let doc_extent = DocExtent { width: 80, height: 25 };
+        let doc_extent = DocExtent {
+            width: 80,
+            height: 25,
+        };
         let p = vp.cell_to_screen(10, 5, cell(), origin()) + Vec2::new(1.0, 1.0);
         let unclamped = vp.screen_to_cell(p, cell(), origin(), doc_extent);
         let clamped = vp.screen_to_cell_clamped(p, cell(), origin(), doc_extent);
@@ -399,7 +442,10 @@ mod tests {
     #[test]
     fn screen_to_cell_clamped_left_or_above_origin_clamps_to_zero() {
         let vp = Viewport::default();
-        let doc_extent = DocExtent { width: 80, height: 25 };
+        let doc_extent = DocExtent {
+            width: 80,
+            height: 25,
+        };
         assert_eq!(
             vp.screen_to_cell_clamped(Pos2::new(-100.0, 5.0), cell(), origin(), doc_extent),
             (0, 0)
@@ -413,7 +459,10 @@ mod tests {
     #[test]
     fn screen_to_cell_clamped_past_right_or_bottom_clamps_to_max() {
         let vp = Viewport::default();
-        let doc_extent = DocExtent { width: 80, height: 25 };
+        let doc_extent = DocExtent {
+            width: 80,
+            height: 25,
+        };
         assert_eq!(
             vp.screen_to_cell_clamped(Pos2::new(100_000.0, 5.0), cell(), origin(), doc_extent),
             (79, 0)
@@ -423,22 +472,41 @@ mod tests {
             (0, 24)
         );
         assert_eq!(
-            vp.screen_to_cell_clamped(Pos2::new(100_000.0, 100_000.0), cell(), origin(), doc_extent),
+            vp.screen_to_cell_clamped(
+                Pos2::new(100_000.0, 100_000.0),
+                cell(),
+                origin(),
+                doc_extent
+            ),
             (79, 24)
         );
     }
 
     #[test]
     fn screen_to_cell_clamped_consistent_across_zoom_steps() {
-        let doc_extent = DocExtent { width: 40, height: 20 };
+        let doc_extent = DocExtent {
+            width: 40,
+            height: 20,
+        };
         for zoom_step in 0..ZOOM_SCALES.len() {
-            let vp = Viewport { zoom_step, ..Viewport::default() };
+            let vp = Viewport {
+                zoom_step,
+                ..Viewport::default()
+            };
             let cell = Vec2::new(10.0 * vp.scale(), 20.0 * vp.scale());
             let p = vp.cell_to_screen(5, 5, cell, origin()) + Vec2::new(1.0, 1.0);
-            assert_eq!(vp.screen_to_cell_clamped(p, cell, origin(), doc_extent), (5, 5));
+            assert_eq!(
+                vp.screen_to_cell_clamped(p, cell, origin(), doc_extent),
+                (5, 5)
+            );
             // off-canvas stays clamped to the last valid cell at every zoom step
             assert_eq!(
-                vp.screen_to_cell_clamped(Pos2::new(1_000_000.0, 1_000_000.0), cell, origin(), doc_extent),
+                vp.screen_to_cell_clamped(
+                    Pos2::new(1_000_000.0, 1_000_000.0),
+                    cell,
+                    origin(),
+                    doc_extent
+                ),
                 (39, 19)
             );
         }
@@ -483,7 +551,11 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(
             vp.cached_cell,
-            Some((vp.scale().to_bits(), ctx.pixels_per_point().to_bits(), first))
+            Some((
+                vp.scale().to_bits(),
+                ctx.pixels_per_point().to_bits(),
+                first
+            ))
         );
     }
 
@@ -503,14 +575,25 @@ mod tests {
         ctx.set_pixels_per_point(new_ppp);
         // `set_pixels_per_point` only takes effect at the start of the next pass.
         let _ = ctx.run_ui(egui::RawInput::default(), |_ui| {});
-        assert_eq!(ctx.pixels_per_point(), new_ppp, "DPI change should be active after a pass");
-        assert_ne!(new_ppp.to_bits(), ppp_bits_before, "sanity: ppp actually changed");
+        assert_eq!(
+            ctx.pixels_per_point(),
+            new_ppp,
+            "DPI change should be active after a pass"
+        );
+        assert_ne!(
+            new_ppp.to_bits(),
+            ppp_bits_before,
+            "sanity: ppp actually changed"
+        );
 
         let _ = vp.cell_size(&ctx);
         let (scale_after, ppp_bits_after, _) =
             vp.cached_cell.expect("cache populated after second call");
 
-        assert_eq!(scale_after, scale_before, "the scale is unchanged in this scenario");
+        assert_eq!(
+            scale_after, scale_before,
+            "the scale is unchanged in this scenario"
+        );
         assert_eq!(
             ppp_bits_after,
             new_ppp.to_bits(),
@@ -526,12 +609,15 @@ mod tests {
     fn fit_to_window_picks_expected_step_and_centers() {
         let ctx = headless_ctx_with_canvas_font();
         let mut vp = Viewport::default();
-        let doc_extent = DocExtent { width: 80, height: 25 };
+        let doc_extent = DocExtent {
+            width: 80,
+            height: 25,
+        };
 
         let cell_at_default = vp.cell_size(&ctx); // real Iosevka Fixed metrics at scale 1.0
-        // Shrink the window to 60% of what's needed at the default zoom (index 2, scale 1.0).
-        // At scale 0.75 (index 1) that's still 75% of full width/height needed — doesn't fit.
-        // At scale 0.5 (index 0) that's 50% needed — fits. So step 0 is the expected winner.
+                                                  // Shrink the window to 60% of what's needed at the default zoom (index 2, scale 1.0).
+                                                  // At scale 0.75 (index 1) that's still 75% of full width/height needed — doesn't fit.
+                                                  // At scale 0.5 (index 0) that's 50% needed — fits. So step 0 is the expected winner.
         let available = Vec2::new(
             cell_at_default.x * doc_extent.width as f32 * 0.6,
             cell_at_default.y * doc_extent.height as f32 * 0.6,
@@ -539,13 +625,22 @@ mod tests {
 
         vp.fit_to_window(available, 0.0, doc_extent, &ctx);
 
-        assert_eq!(vp.zoom_step, 0, "expected the smallest zoom step to fit the shrunk window");
+        assert_eq!(
+            vp.zoom_step, 0,
+            "expected the smallest zoom step to fit the shrunk window"
+        );
 
         let cell = vp.cell_size(&ctx);
         let doc_w = doc_extent.width as f32 * cell.x;
         let doc_h = doc_extent.height as f32 * cell.y;
-        assert!(doc_w <= available.x + 0.5, "fitted width should not exceed available width");
-        assert!(doc_h <= available.y + 0.5, "fitted height should not exceed available height");
+        assert!(
+            doc_w <= available.x + 0.5,
+            "fitted width should not exceed available width"
+        );
+        assert!(
+            doc_h <= available.y + 0.5,
+            "fitted height should not exceed available height"
+        );
 
         let expected_pan = Vec2::new((available.x - doc_w) / 2.0, (available.y - doc_h) / 2.0);
         assert!(
@@ -566,32 +661,50 @@ mod tests {
         let old_step = vp.zoom_step;
 
         let cursor = Pos2::new(45.0, 65.0);
-        let before = vp.screen_to_cell(cursor, cell(), origin(), big_doc()).unwrap();
+        let before = vp
+            .screen_to_cell(cursor, cell(), origin(), big_doc())
+            .unwrap();
 
         vp.zoom_at(cursor, 1, cell(), origin());
         let ratio = ZOOM_SCALES[vp.zoom_step] / ZOOM_SCALES[old_step];
         let new_cell = Vec2::new(cell().x * ratio, cell().y * ratio);
-        let after = vp.screen_to_cell(cursor, new_cell, origin(), big_doc()).unwrap();
+        let after = vp
+            .screen_to_cell(cursor, new_cell, origin(), big_doc())
+            .unwrap();
 
-        assert_eq!(after, before, "anchor should survive a single zoom after a manual pan");
+        assert_eq!(
+            after, before,
+            "anchor should survive a single zoom after a manual pan"
+        );
     }
 
     #[test]
     fn zoom_at_keeps_anchor_close_across_full_zoom_range() {
         // Walks the anchor-under-cursor invariant through every zoom step, bottom to top and
         // back, emulating the next-frame cell-size re-measurement at each step.
-        let mut vp = Viewport { zoom_step: 0, ..Viewport::default() };
+        let mut vp = Viewport {
+            zoom_step: 0,
+            ..Viewport::default()
+        };
         let cursor = Pos2::new(45.0, 65.0);
         let mut current_cell = cell();
-        let before = vp.screen_to_cell(cursor, current_cell, origin(), big_doc()).unwrap();
+        let before = vp
+            .screen_to_cell(cursor, current_cell, origin(), big_doc())
+            .unwrap();
 
         for _ in 0..(ZOOM_SCALES.len() - 1) {
             let old_scale = vp.scale();
             vp.zoom_at(cursor, 1, current_cell, origin());
             let ratio = vp.scale() / old_scale;
             current_cell = Vec2::new(current_cell.x * ratio, current_cell.y * ratio);
-            let after = vp.screen_to_cell(cursor, current_cell, origin(), big_doc()).unwrap();
-            assert_eq!(after, before, "anchor drifted zooming IN at zoom_step {}", vp.zoom_step);
+            let after = vp
+                .screen_to_cell(cursor, current_cell, origin(), big_doc())
+                .unwrap();
+            assert_eq!(
+                after, before,
+                "anchor drifted zooming IN at zoom_step {}",
+                vp.zoom_step
+            );
         }
         assert_eq!(vp.zoom_step, ZOOM_SCALES.len() - 1);
 
@@ -600,8 +713,14 @@ mod tests {
             vp.zoom_at(cursor, -1, current_cell, origin());
             let ratio = vp.scale() / old_scale;
             current_cell = Vec2::new(current_cell.x * ratio, current_cell.y * ratio);
-            let after = vp.screen_to_cell(cursor, current_cell, origin(), big_doc()).unwrap();
-            assert_eq!(after, before, "anchor drifted zooming OUT at zoom_step {}", vp.zoom_step);
+            let after = vp
+                .screen_to_cell(cursor, current_cell, origin(), big_doc())
+                .unwrap();
+            assert_eq!(
+                after, before,
+                "anchor drifted zooming OUT at zoom_step {}",
+                vp.zoom_step
+            );
         }
         assert_eq!(vp.zoom_step, 0);
     }
@@ -609,14 +728,29 @@ mod tests {
     #[test]
     fn fit_to_window_contains_full_doc_when_a_fit_exists() {
         let ctx = headless_ctx_with_canvas_font();
-        let mut probe = Viewport { zoom_step: 0, ..Viewport::default() };
+        let mut probe = Viewport {
+            zoom_step: 0,
+            ..Viewport::default()
+        };
         let min_cell = probe.cell_size(&ctx);
 
         let doc_extents = [
-            DocExtent { width: 80, height: 25 },
-            DocExtent { width: 200, height: 100 },
-            DocExtent { width: 1024, height: 1024 },
-            DocExtent { width: 1, height: 1 },
+            DocExtent {
+                width: 80,
+                height: 25,
+            },
+            DocExtent {
+                width: 200,
+                height: 100,
+            },
+            DocExtent {
+                width: 1024,
+                height: 1024,
+            },
+            DocExtent {
+                width: 1,
+                height: 1,
+            },
         ];
         for doc_extent in doc_extents {
             // Generous margin above the step-0 lower bound so a fit is unambiguously possible.
@@ -653,14 +787,20 @@ mod tests {
     #[test]
     fn fit_margin_insets_the_fit_but_leaves_the_document_centered() {
         let ctx = headless_ctx_with_canvas_font();
-        let doc_extent = DocExtent { width: 80, height: 25 };
+        let doc_extent = DocExtent {
+            width: 80,
+            height: 25,
+        };
         let available = Vec2::new(1000.0, 700.0);
         const MARGIN: f32 = 28.0;
 
         let mut vp = Viewport::default();
         vp.fit_to_window(available, MARGIN, doc_extent, &ctx);
         let cell = vp.cell_size(&ctx);
-        let (doc_w, doc_h) = (doc_extent.width as f32 * cell.x, doc_extent.height as f32 * cell.y);
+        let (doc_w, doc_h) = (
+            doc_extent.width as f32 * cell.x,
+            doc_extent.height as f32 * cell.y,
+        );
 
         // Still centred in the FULL area, not in the inset one.
         assert!(
@@ -672,12 +812,18 @@ mod tests {
             "the margin pushed the document off-centre vertically"
         );
         // And the margin is real: the desk still shows on every side.
-        assert!(vp.pan.x >= MARGIN && vp.pan.y >= MARGIN, "the card butts against the panel edge");
+        assert!(
+            vp.pan.x >= MARGIN && vp.pan.y >= MARGIN,
+            "the card butts against the panel edge"
+        );
 
         // A margin large enough to matter must be able to force a smaller step than no margin does.
         let mut tight = Viewport::default();
         tight.fit_to_window(available, 0.0, doc_extent, &ctx);
-        assert!(vp.zoom_step <= tight.zoom_step, "the margin must never pick a LARGER step");
+        assert!(
+            vp.zoom_step <= tight.zoom_step,
+            "the margin must never pick a LARGER step"
+        );
     }
 
     /// The reason fit is continuous: a window 1.3× the doc's size at 100% must fit near 130%,
@@ -687,7 +833,10 @@ mod tests {
     fn fit_to_window_fills_the_window_beyond_the_preset_ladder() {
         let ctx = headless_ctx_with_canvas_font();
         let mut vp = Viewport::default();
-        let doc_extent = DocExtent { width: 120, height: 40 };
+        let doc_extent = DocExtent {
+            width: 120,
+            height: 40,
+        };
 
         let cell_at_100 = vp.cell_size(&ctx);
         let available = Vec2::new(
@@ -696,7 +845,11 @@ mod tests {
         );
         vp.fit_to_window(available, 0.0, doc_extent, &ctx);
 
-        assert!(vp.scale() > 1.0 + 0.1, "fit stayed on the preset ladder: {}", vp.scale());
+        assert!(
+            vp.scale() > 1.0 + 0.1,
+            "fit stayed on the preset ladder: {}",
+            vp.scale()
+        );
 
         let cell = vp.cell_size(&ctx);
         let doc_w = doc_extent.width as f32 * cell.x;
@@ -715,7 +868,10 @@ mod tests {
     fn manual_zoom_from_a_fitted_scale_snaps_to_the_preset_ladder() {
         let ctx = headless_ctx_with_canvas_font();
         let mut vp = Viewport::default();
-        let doc_extent = DocExtent { width: 80, height: 25 };
+        let doc_extent = DocExtent {
+            width: 80,
+            height: 25,
+        };
 
         let cell_at_100 = vp.cell_size(&ctx);
         let available = Vec2::new(
@@ -725,17 +881,28 @@ mod tests {
 
         vp.fit_to_window(available, 0.0, doc_extent, &ctx);
         let fitted = vp.scale();
-        assert!(fitted > 1.0 && fitted < 1.5, "test setup: fit should land between presets, got {fitted}");
+        assert!(
+            fitted > 1.0 && fitted < 1.5,
+            "test setup: fit should land between presets, got {fitted}"
+        );
         assert_eq!(vp.zoom_step, 1, "the ladder position under the fit is 100%");
 
         let cell = vp.cell_size(&ctx);
         vp.zoom_at(Pos2::new(50.0, 50.0), 1, cell, origin());
-        assert_eq!(vp.scale(), 1.5, "stepping up from the fit snaps to the next preset above");
+        assert_eq!(
+            vp.scale(),
+            1.5,
+            "stepping up from the fit snaps to the next preset above"
+        );
 
         vp.fit_to_window(available, 0.0, doc_extent, &ctx);
         let cell = vp.cell_size(&ctx);
         vp.zoom_at(Pos2::new(50.0, 50.0), -1, cell, origin());
-        assert_eq!(vp.scale(), 1.0, "stepping down from the fit snaps to the next preset below");
+        assert_eq!(
+            vp.scale(),
+            1.0,
+            "stepping down from the fit snaps to the next preset below"
+        );
     }
 
     #[test]
@@ -744,12 +911,18 @@ mod tests {
         // smaller than the doc at every zoom step, `fit_to_window` degrades to the smallest step
         // and the doc overflows the window (negative pan) — containment is not guaranteed here.
         let ctx = headless_ctx_with_canvas_font();
-        let doc_extent = DocExtent { width: 1024, height: 1024 };
+        let doc_extent = DocExtent {
+            width: 1024,
+            height: 1024,
+        };
         let available = Vec2::new(10.0, 10.0); // far smaller than the doc even at the smallest step
         let mut vp = Viewport::default();
         vp.fit_to_window(available, 0.0, doc_extent, &ctx);
 
-        assert_eq!(vp.zoom_step, 0, "falls back to the smallest zoom step when nothing fits");
+        assert_eq!(
+            vp.zoom_step, 0,
+            "falls back to the smallest zoom step when nothing fits"
+        );
         let cell = vp.cell_size(&ctx);
         let doc_w = doc_extent.width as f32 * cell.x;
         let doc_h = doc_extent.height as f32 * cell.y;
@@ -766,13 +939,24 @@ mod tests {
 
     #[test]
     fn boundary_cell_round_trip_across_zoom_steps_and_pan_offsets() {
-        let doc_extent = DocExtent { width: 80, height: 25 };
+        let doc_extent = DocExtent {
+            width: 80,
+            height: 25,
+        };
         let boundary_cells = [(0u16, 0u16), (79, 0), (0, 24), (79, 24)];
-        let pans = [Vec2::ZERO, Vec2::new(37.5, -12.25), Vec2::new(-500.0, 500.0)];
+        let pans = [
+            Vec2::ZERO,
+            Vec2::new(37.5, -12.25),
+            Vec2::new(-500.0, 500.0),
+        ];
 
         for zoom_step in 0..ZOOM_SCALES.len() {
             for &pan in &pans {
-                let vp = Viewport { zoom_step, pan, ..Viewport::default() };
+                let vp = Viewport {
+                    zoom_step,
+                    pan,
+                    ..Viewport::default()
+                };
                 let cell = Vec2::new(10.0 * vp.scale(), 20.0 * vp.scale());
                 for &(x, y) in &boundary_cells {
                     let p = vp.cell_to_screen(x, y, cell, origin());

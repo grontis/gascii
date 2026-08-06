@@ -5,7 +5,10 @@
 
 use std::collections::HashSet;
 
-use super::{diff_pending, footprint, line_cells, mask_apply, PendingCell, Tool, ToolCtx, ToolEvent, ToolResponse};
+use super::{
+    diff_pending, footprint, line_cells, mask_apply, PendingCell, Tool, ToolCtx, ToolEvent,
+    ToolResponse,
+};
 use crate::join::{join, ArmSet};
 use crate::model::{Cell, Document};
 
@@ -46,7 +49,10 @@ impl Line {
             if !doc.in_bounds(x, y) {
                 continue;
             }
-            let before = doc.cell_at(ctx.frame, ctx.layer, x, y).copied().unwrap_or(Cell::BLANK);
+            let before = doc
+                .cell_at(ctx.frame, ctx.layer, x, y)
+                .copied()
+                .unwrap_or(Cell::BLANK);
             let ch = if horizontal {
                 join(before.ch, ArmSet::E.union(ArmSet::W), ctx.glyph)
             } else if vertical {
@@ -54,8 +60,16 @@ impl Line {
             } else {
                 ctx.glyph // diagonal: no single-line box glyph, stamp directly
             };
-            let proposed = Cell { ch, fg: ctx.fg, bg: ctx.bg };
-            self.pending.push(PendingCell { x, y, cell: mask_apply(before, proposed, ctx.mask) });
+            let proposed = Cell {
+                ch,
+                fg: ctx.fg,
+                bg: ctx.bg,
+            };
+            self.pending.push(PendingCell {
+                x,
+                y,
+                cell: mask_apply(before, proposed, ctx.mask),
+            });
         }
         self.buf = buf;
     }
@@ -71,9 +85,20 @@ impl Line {
                 if !doc.in_bounds(fx, fy) || !self.seen.insert((fx, fy)) {
                     continue;
                 }
-                let before = doc.cell_at(ctx.frame, ctx.layer, fx, fy).copied().unwrap_or(Cell::BLANK);
-                let proposed = Cell { ch: ctx.glyph, fg: ctx.fg, bg: ctx.bg };
-                self.pending.push(PendingCell { x: fx, y: fy, cell: mask_apply(before, proposed, ctx.mask) });
+                let before = doc
+                    .cell_at(ctx.frame, ctx.layer, fx, fy)
+                    .copied()
+                    .unwrap_or(Cell::BLANK);
+                let proposed = Cell {
+                    ch: ctx.glyph,
+                    fg: ctx.fg,
+                    bg: ctx.bg,
+                };
+                self.pending.push(PendingCell {
+                    x: fx,
+                    y: fy,
+                    cell: mask_apply(before, proposed, ctx.mask),
+                });
             }
         }
         self.fp = fp;
@@ -116,7 +141,9 @@ impl Tool for Line {
     }
 
     fn resync(&mut self, doc: &Document, frame: usize, layer: usize) {
-        let Some((cur, mut ctx)) = self.cur.clone() else { return };
+        let Some((cur, mut ctx)) = self.cur.clone() else {
+            return;
+        };
         ctx.frame = frame;
         ctx.layer = layer;
         self.recompute(cur, &ctx, doc);
@@ -146,7 +173,14 @@ mod tests {
 
     fn drag(doc: &Document, tctx: &ToolCtx, from: (u16, u16), to: (u16, u16)) -> Line {
         let mut line = Line::new();
-        line.update(ToolEvent::Press { x: from.0, y: from.1 }, tctx, doc);
+        line.update(
+            ToolEvent::Press {
+                x: from.0,
+                y: from.1,
+            },
+            tctx,
+            doc,
+        );
         line.update(ToolEvent::Drag { x: to.0, y: to.1 }, tctx, doc);
         line
     }
@@ -182,21 +216,42 @@ mod tests {
     #[test]
     fn diagonal_line_stamps_the_active_glyph_with_no_join() {
         let mut doc = Document::new(10, 10);
-        doc.set_cell(0, 2, 2, Cell { ch: '│', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            2,
+            2,
+            Cell {
+                ch: '│',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         let tctx = ctx(PlaneMask::ALL, '@');
         let mut line = drag(&doc, &tctx, (2, 2), (6, 6));
         let resp = line.update(ToolEvent::Release, &tctx, &doc);
         let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
             panic!("expected a committed edit");
         };
-        assert!(cells.iter().all(|c| c.after.ch == '@'), "a diagonal run must stamp the glyph directly, never join");
+        assert!(
+            cells.iter().all(|c| c.after.ch == '@'),
+            "a diagonal run must stamp the glyph directly, never join"
+        );
     }
 
     #[test]
     fn horizontal_line_joins_a_crossing_vertical_run() {
         let mut doc = Document::new(10, 10);
         for y in 0..10u16 {
-            doc.set_cell(0, 5, y, Cell { ch: '│', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+            doc.set_cell(
+                0,
+                5,
+                y,
+                Cell {
+                    ch: '│',
+                    fg: Rgba::WHITE,
+                    bg: Rgba::TRANSPARENT,
+                },
+            );
         }
         let tctx = ctx(PlaneMask::ALL, '#');
         let mut line = drag(&doc, &tctx, (2, 3), (8, 3));
@@ -225,7 +280,16 @@ mod tests {
     fn thick_line_stamps_the_glyph_directly_with_no_join_and_no_duplicates() {
         let mut doc = Document::new(10, 10);
         for y in 0..10u16 {
-            doc.set_cell(0, 5, y, Cell { ch: '│', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+            doc.set_cell(
+                0,
+                5,
+                y,
+                Cell {
+                    ch: '│',
+                    fg: Rgba::WHITE,
+                    bg: Rgba::TRANSPARENT,
+                },
+            );
         }
         let mut tctx = ctx(PlaneMask::ALL, '#');
         tctx.size = 3;
@@ -238,7 +302,10 @@ mod tests {
         // Aspect-corrected footprints (6 wide, 3 tall) widen the 7-column run to columns 0..=11,
         // clipped to the doc's 0..=9, and rows 2..=4: 10×3 cells, every one '#', no box-joins.
         assert_eq!(cells.len(), 30);
-        assert!(cells.iter().all(|c| c.after.ch == '#'), "size>1 must stamp the glyph, never join");
+        assert!(
+            cells.iter().all(|c| c.after.ch == '#'),
+            "size>1 must stamp the glyph, never join"
+        );
         let mut coords: Vec<(u16, u16)> = cells.iter().map(|c| (c.x, c.y)).collect();
         coords.sort();
         coords.dedup();
@@ -272,10 +339,21 @@ mod tests {
     fn a_stroke_tools_committed_cell_edit_reads_before_from_the_ctx_frame_it_was_drawn_against() {
         let mut doc = Document::new(10, 10);
         let mut history = crate::edit::History::new();
-        let edit = crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(10, 10)).unwrap();
+        let edit =
+            crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(10, 10)).unwrap();
         history.apply(&mut doc, edit);
         for y in 0..10u16 {
-            doc.set_cell_at(1, 0, 5, y, Cell { ch: '│', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+            doc.set_cell_at(
+                1,
+                0,
+                5,
+                y,
+                Cell {
+                    ch: '│',
+                    fg: Rgba::WHITE,
+                    bg: Rgba::TRANSPARENT,
+                },
+            );
         }
         doc.set_active_frame(0); // only ctx.frame targets frame 1
 
@@ -287,7 +365,10 @@ mod tests {
             panic!("expected a committed edit");
         };
         let crossing = cells.iter().find(|c| c.x == 5 && c.y == 3).unwrap();
-        assert_eq!(crossing.after.ch, '┼', "the join read must consult frame 1's content, not frame 0's blank active frame");
+        assert_eq!(
+            crossing.after.ch, '┼',
+            "the join read must consult frame 1's content, not frame 0's blank active frame"
+        );
         assert!(cells.iter().all(|c| c.frame == 1));
     }
 
@@ -298,11 +379,23 @@ mod tests {
     fn resync_after_external_clear_recomputes_joins_against_the_mutated_document() {
         let mut doc = Document::new(10, 10);
         for y in 0..10u16 {
-            doc.set_cell(0, 5, y, Cell { ch: '│', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+            doc.set_cell(
+                0,
+                5,
+                y,
+                Cell {
+                    ch: '│',
+                    fg: Rgba::WHITE,
+                    bg: Rgba::TRANSPARENT,
+                },
+            );
         }
         let tctx = ctx(PlaneMask::ALL, '#');
         let mut line = drag(&doc, &tctx, (2, 3), (8, 3));
-        assert!(line.pending().iter().any(|p| p.cell.ch == '┼'), "crossing joins pre-mutation");
+        assert!(
+            line.pending().iter().any(|p| p.cell.ch == '┼'),
+            "crossing joins pre-mutation"
+        );
 
         // Simulate a Clear landing after the final Drag.
         for y in 0..10u16 {

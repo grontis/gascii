@@ -16,9 +16,12 @@ const PANEL_W: f32 = crate::panel::PANEL_W + 60.0;
 
 pub(crate) fn show(ui: &mut Ui, doc: &Document) -> PanelOutcome {
     let mut outcome = PanelOutcome::default();
-    egui::Panel::right("gascii_layers_panel_kiosk").frame(crate::panel::panel_frame(ui.ctx())).exact_size(PANEL_W).show(ui, |ui| {
-        outcome = crate::panel::body(ui, doc, TOUCH_ROW_H, TOUCH_CONTROL_H);
-    });
+    egui::Panel::right("gascii_layers_panel_kiosk")
+        .frame(crate::panel::panel_frame(ui.ctx()))
+        .exact_size(PANEL_W)
+        .show(ui, |ui| {
+            outcome = crate::panel::body(ui, doc, TOUCH_ROW_H, TOUCH_CONTROL_H);
+        });
     outcome
 }
 

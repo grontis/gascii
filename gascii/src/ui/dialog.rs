@@ -5,7 +5,9 @@
 //! polls raw pointer/keyboard state instead, so it does not stop there — every caller here also
 //! needs an explicit flag gate through `GasciiApp::modal_open()` (see that function's doc comment).
 
-use eframe::egui::{self, Align2, Color32, CornerRadius, Frame, Id, Margin, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+use eframe::egui::{
+    self, Align2, Color32, CornerRadius, Frame, Id, Margin, Pos2, Rect, Sense, Stroke, Ui, Vec2,
+};
 
 use super::theme::{self, Tokens};
 use super::widgets;
@@ -31,7 +33,12 @@ pub struct DialogResponse<R> {
 /// Draws one themed modal: a pinstriped title strip with a close box, then `body` inside the
 /// standard content margin. `id` must be unique per concurrently-open dialog (there is at most one
 /// in this app, but `egui::Modal` itself is keyed by it).
-pub fn modal<R>(ctx: &egui::Context, id: &str, title: &str, body: impl FnOnce(&mut Ui) -> R) -> DialogResponse<R> {
+pub fn modal<R>(
+    ctx: &egui::Context,
+    id: &str,
+    title: &str,
+    body: impl FnOnce(&mut Ui) -> R,
+) -> DialogResponse<R> {
     let t = theme::current(ctx);
     // Resolves to whichever theme is currently active, so this inherits the same hard offset
     // shadow `Tokens::visuals` already registered for popups — no separate shadow token.
@@ -84,8 +91,19 @@ fn title_strip(ui: &mut Ui, t: &Tokens, title: &str) -> bool {
         (Color32::TRANSPARENT, t.fg_text)
     };
     painter.rect_filled(close_rect, 0.0, fill);
-    painter.rect_stroke(close_rect, 0.0, Stroke::new(1.0, t.border_strong), egui::StrokeKind::Inside);
-    painter.text(close_rect.center(), Align2::CENTER_CENTER, "×", fonts::mono_id(fonts::size::CAPTION), fg);
+    painter.rect_stroke(
+        close_rect,
+        0.0,
+        Stroke::new(1.0, t.border_strong),
+        egui::StrokeKind::Inside,
+    );
+    painter.text(
+        close_rect.center(),
+        Align2::CENTER_CENTER,
+        "×",
+        fonts::mono_id(fonts::size::CAPTION),
+        fg,
+    );
 
     let font = fonts::ui_semibold_id(fonts::size::BODY);
     let title_w = painter
@@ -93,7 +111,13 @@ fn title_strip(ui: &mut Ui, t: &Tokens, title: &str) -> bool {
         .size()
         .x;
     let title_rect = Rect::from_center_size(rect.center(), Vec2::new(title_w + 20.0, TITLE_H));
-    painter.text(title_rect.center(), Align2::CENTER_CENTER, title, font, t.fg_text);
+    painter.text(
+        title_rect.center(),
+        Align2::CENTER_CENTER,
+        title,
+        font,
+        t.fg_text,
+    );
 
     let band = |from: f32, to: f32| {
         if to - from > 8.0 {
@@ -170,7 +194,9 @@ mod tests {
         let ctx = egui::Context::default();
         crate::fonts::install_fonts(&ctx);
         let mut action = None;
-        let _ = ctx.run_ui(enter_pressed_input(), |ui| action = Some(buttons(ui, "Cancel", "Create")));
+        let _ = ctx.run_ui(enter_pressed_input(), |ui| {
+            action = Some(buttons(ui, "Cancel", "Create"))
+        });
         assert_eq!(action, Some(DialogAction::Confirm));
     }
 
@@ -181,7 +207,9 @@ mod tests {
         let ctx = egui::Context::default();
         crate::fonts::install_fonts(&ctx);
         let mut action = None;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| action = Some(buttons(ui, "Cancel", "Create")));
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            action = Some(buttons(ui, "Cancel", "Create"))
+        });
         assert_eq!(action, Some(DialogAction::None));
     }
 }

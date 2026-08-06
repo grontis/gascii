@@ -4,7 +4,9 @@
 
 use std::collections::HashMap;
 
-use super::{mask_apply, Direction, PendingCell, PlaneMask, Tool, ToolCtx, ToolEvent, ToolResponse};
+use super::{
+    mask_apply, Direction, PendingCell, PlaneMask, Tool, ToolCtx, ToolEvent, ToolResponse,
+};
 use crate::edit::{CellEdit, Edit};
 use crate::model::{Cell, Document};
 
@@ -25,11 +27,23 @@ pub(crate) struct TextBurst {
 
 impl TextBurst {
     #[allow(clippy::too_many_arguments)]
-    fn write(&mut self, x: u16, y: u16, proposed: Cell, mask: PlaneMask, doc: &Document, frame: usize, layer: usize) {
+    fn write(
+        &mut self,
+        x: u16,
+        y: u16,
+        proposed: Cell,
+        mask: PlaneMask,
+        doc: &Document,
+        frame: usize,
+        layer: usize,
+    ) {
         if !doc.in_bounds(x, y) {
             return;
         }
-        let doc_before = doc.cell_at(frame, layer, x, y).copied().unwrap_or(Cell::BLANK);
+        let doc_before = doc
+            .cell_at(frame, layer, x, y)
+            .copied()
+            .unwrap_or(Cell::BLANK);
         // mask_apply always references doc_before (the pre-burst value), never a prior in-burst
         // write, so a masked-off plane shows the untouched original regardless of how many times
         // the unmasked plane(s) get overwritten within one burst.
@@ -52,7 +66,14 @@ impl TextBurst {
             if before == p.cell {
                 continue;
             }
-            cell_edits.push(CellEdit { frame, layer, x: p.x, y: p.y, before, after: p.cell });
+            cell_edits.push(CellEdit {
+                frame,
+                layer,
+                x: p.x,
+                y: p.y,
+                before,
+                after: p.cell,
+            });
         }
         self.pending.clear();
         self.index.clear();
@@ -70,7 +91,15 @@ impl TextBurst {
     /// called whenever `doc` changes underneath this burst via a path other than the burst's own
     /// writes (a redo, or another binding's commit or flush).
     fn resync(&mut self, doc: &Document, frame: usize, layer: usize) {
-        super::resync_pending(&mut self.before, &self.index, &mut self.pending, &self.sources, doc, frame, layer);
+        super::resync_pending(
+            &mut self.before,
+            &self.index,
+            &mut self.pending,
+            &self.sources,
+            doc,
+            frame,
+            layer,
+        );
     }
 }
 
@@ -105,30 +134,42 @@ impl Tool for TextTool {
                 ToolResponse::Commit(edit)
             }
             ToolEvent::Char(ch) => {
-                let Some((cx, cy)) = self.cursor else { return ToolResponse::Idle };
+                let Some((cx, cy)) = self.cursor else {
+                    return ToolResponse::Idle;
+                };
                 if crate::palette::validate_width(ch).is_err() {
                     return ToolResponse::Active; // rejected: cursor does not advance
                 }
                 if cx >= doc.width {
                     return ToolResponse::Active; // stopped at right edge, no wrap
                 }
-                let proposed = Cell { ch, fg: ctx.fg, bg: ctx.bg };
-                self.burst.write(cx, cy, proposed, ctx.mask, doc, ctx.frame, ctx.layer);
+                let proposed = Cell {
+                    ch,
+                    fg: ctx.fg,
+                    bg: ctx.bg,
+                };
+                self.burst
+                    .write(cx, cy, proposed, ctx.mask, doc, ctx.frame, ctx.layer);
                 self.cursor = Some((cx + 1, cy));
                 ToolResponse::Active
             }
             ToolEvent::Backspace => {
-                let Some((cx, cy)) = self.cursor else { return ToolResponse::Idle };
+                let Some((cx, cy)) = self.cursor else {
+                    return ToolResponse::Idle;
+                };
                 if cx == 0 || cx == self.start_x {
                     return ToolResponse::Active; // anchor column or left edge: no-op
                 }
                 let nx = cx - 1;
-                self.burst.write(nx, cy, Cell::BLANK, ctx.mask, doc, ctx.frame, ctx.layer);
+                self.burst
+                    .write(nx, cy, Cell::BLANK, ctx.mask, doc, ctx.frame, ctx.layer);
                 self.cursor = Some((nx, cy));
                 ToolResponse::Active
             }
             ToolEvent::Enter => {
-                let Some((_, cy)) = self.cursor else { return ToolResponse::Idle };
+                let Some((_, cy)) = self.cursor else {
+                    return ToolResponse::Idle;
+                };
                 self.cursor = if cy + 1 < doc.height {
                     Some((self.start_x, cy + 1))
                 } else {
@@ -137,7 +178,9 @@ impl Tool for TextTool {
                 ToolResponse::Active
             }
             ToolEvent::Arrow(dir) => {
-                let Some((cx, cy)) = self.cursor else { return ToolResponse::Idle };
+                let Some((cx, cy)) = self.cursor else {
+                    return ToolResponse::Idle;
+                };
                 self.cursor = Some(match dir {
                     Direction::Left => (cx.saturating_sub(1), cy),
                     Direction::Right => ((cx + 1).min(doc.width.saturating_sub(1)), cy),
@@ -152,7 +195,10 @@ impl Tool for TextTool {
                 self.cursor = None;
                 ToolResponse::Idle
             }
-            ToolEvent::Drag { .. } | ToolEvent::Release | ToolEvent::Delete | ToolEvent::SelectAll => {
+            ToolEvent::Drag { .. }
+            | ToolEvent::Release
+            | ToolEvent::Delete
+            | ToolEvent::SelectAll => {
                 ToolResponse::Active // irrelevant here
             }
         }
@@ -206,7 +252,18 @@ mod tests {
         tool.update(ToolEvent::Press { x: 5, y: 5 }, &tctx, &doc);
         tool.update(ToolEvent::Char('a'), &tctx, &doc);
         assert_eq!(tool.pending().len(), 1);
-        assert_eq!(tool.pending()[0], PendingCell { x: 5, y: 5, cell: Cell { ch: 'a', fg: tctx.fg, bg: tctx.bg } });
+        assert_eq!(
+            tool.pending()[0],
+            PendingCell {
+                x: 5,
+                y: 5,
+                cell: Cell {
+                    ch: 'a',
+                    fg: tctx.fg,
+                    bg: tctx.bg
+                }
+            }
+        );
     }
 
     #[test]
@@ -220,7 +277,9 @@ mod tests {
         }
         let resp = tool.update(ToolEvent::Commit, &tctx, &doc);
         let edit = commit_edit(resp).expect("expected a committed edit");
-        let Edit::Cells(cells) = edit else { panic!("expected an Edit::Cells") };
+        let Edit::Cells(cells) = edit else {
+            panic!("expected an Edit::Cells")
+        };
         assert_eq!(cells.len(), 3);
         let mut chars: Vec<char> = cells.iter().map(|c| c.after.ch).collect();
         chars.sort();
@@ -238,9 +297,15 @@ mod tests {
         tool.update(ToolEvent::Char('b'), &tctx, &doc);
         let resp = tool.update(ToolEvent::Commit, &tctx, &doc);
         let edit = commit_edit(resp).unwrap();
-        let Edit::Cells(cells) = edit else { panic!("expected an Edit::Cells") };
+        let Edit::Cells(cells) = edit else {
+            panic!("expected an Edit::Cells")
+        };
         let b_cell = cells.iter().find(|c| c.after.ch == 'b').unwrap();
-        assert_eq!((b_cell.x, b_cell.y), (5, 1), "Enter must return to the anchor column, not 0");
+        assert_eq!(
+            (b_cell.x, b_cell.y),
+            (5, 1),
+            "Enter must return to the anchor column, not 0"
+        );
     }
 
     #[test]
@@ -264,7 +329,10 @@ mod tests {
         tool.update(ToolEvent::Char('x'), &tctx, &doc); // cursor at (3,2)
         tool.update(ToolEvent::Backspace, &tctx, &doc); // deletes (2,2), cursor back to (2,2)
         let resp = tool.update(ToolEvent::Commit, &tctx, &doc);
-        assert!(commit_edit(resp).is_none(), "typed then backspaced back to Blank is a no-op edit");
+        assert!(
+            commit_edit(resp).is_none(),
+            "typed then backspaced back to Blank is a no-op edit"
+        );
     }
 
     #[test]
@@ -325,9 +393,14 @@ mod tests {
         tool.update(ToolEvent::Char('b'), &tctx, &doc); // no-op: cursor.x >= width
         let resp = tool.update(ToolEvent::Commit, &tctx, &doc);
         let edit = commit_edit(resp).unwrap();
-        let Edit::Cells(cells) = edit else { panic!("expected an Edit::Cells") };
+        let Edit::Cells(cells) = edit else {
+            panic!("expected an Edit::Cells")
+        };
         assert_eq!(cells.len(), 1);
-        assert_eq!(cells[0].after.ch, 'a', "second Char must not overwrite — cursor already past width");
+        assert_eq!(
+            cells[0].after.ch, 'a',
+            "second Char must not overwrite — cursor already past width"
+        );
     }
 
     #[test]
@@ -375,7 +448,9 @@ mod tests {
         tool.update(ToolEvent::Char('a'), &tctx, &doc);
         let resp = tool.update(ToolEvent::Press { x: 10, y: 10 }, &tctx, &doc);
         let edit = commit_edit(resp).expect("click-away must flush the old burst");
-        let Edit::Cells(cells) = edit else { panic!("expected an Edit::Cells") };
+        let Edit::Cells(cells) = edit else {
+            panic!("expected an Edit::Cells")
+        };
         assert_eq!(cells.len(), 1);
         assert_eq!((cells[0].x, cells[0].y), (0, 0));
 
@@ -394,14 +469,18 @@ mod tests {
         tool.update(ToolEvent::Char('a'), &tctx, &doc); // cursor -> (1,0)
         let resp = tool.update(ToolEvent::Commit, &tctx, &doc);
         let first_edit = commit_edit(resp).unwrap();
-        let Edit::Cells(first_cells) = first_edit else { panic!("expected an Edit::Cells") };
+        let Edit::Cells(first_cells) = first_edit else {
+            panic!("expected an Edit::Cells")
+        };
         assert_eq!(first_cells.len(), 1);
 
         // Cursor stays put (no Press happened), so typing lands at (1,0), a fresh burst.
         tool.update(ToolEvent::Char('b'), &tctx, &doc);
         let resp2 = tool.update(ToolEvent::Commit, &tctx, &doc);
         let second_edit = commit_edit(resp2).unwrap();
-        let Edit::Cells(second_cells) = second_edit else { panic!("expected an Edit::Cells") };
+        let Edit::Cells(second_cells) = second_edit else {
+            panic!("expected an Edit::Cells")
+        };
         assert_eq!(second_cells.len(), 1);
         assert_eq!((second_cells[0].x, second_cells[0].y), (1, 0));
         assert_eq!(second_cells[0].after.ch, 'b');
@@ -418,7 +497,11 @@ mod tests {
         tool.update(ToolEvent::Char('a'), &tctx, &doc);
         assert_eq!(tool.caret(), Some((6, 5)), "caret advances with typing");
         tool.update(ToolEvent::Enter, &tctx, &doc);
-        assert_eq!(tool.caret(), Some((5, 6)), "Enter returns to the anchor column");
+        assert_eq!(
+            tool.caret(),
+            Some((5, 6)),
+            "Enter returns to the anchor column"
+        );
         tool.update(ToolEvent::Cancel, &tctx, &doc);
         assert_eq!(tool.caret(), None, "cancel clears the caret");
     }
@@ -442,8 +525,20 @@ mod tests {
     #[test]
     fn pending_reflects_masked_result_mid_burst() {
         let mut doc = Document::new(20, 20);
-        doc.set_cell(0, 4, 4, Cell { ch: 'x', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) });
-        let mask = PlaneMask { glyph: true, bg: false };
+        doc.set_cell(
+            0,
+            4,
+            4,
+            Cell {
+                ch: 'x',
+                fg: Rgba(9, 9, 9, 255),
+                bg: Rgba(8, 8, 8, 255),
+            },
+        );
+        let mask = PlaneMask {
+            glyph: true,
+            bg: false,
+        };
         let mut tool = TextTool::new();
         let tctx = ctx(mask);
         tool.update(ToolEvent::Press { x: 4, y: 4 }, &tctx, &doc);
@@ -451,8 +546,16 @@ mod tests {
         let pending = tool.pending();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].cell.ch, 'Q');
-        assert_eq!(pending[0].cell.fg, Rgba(1, 2, 3, 255), "text color follows the glyph plane");
-        assert_eq!(pending[0].cell.bg, Rgba(8, 8, 8, 255), "bg masked off: keeps existing");
+        assert_eq!(
+            pending[0].cell.fg,
+            Rgba(1, 2, 3, 255),
+            "text color follows the glyph plane"
+        );
+        assert_eq!(
+            pending[0].cell.bg,
+            Rgba(8, 8, 8, 255),
+            "bg masked off: keeps existing"
+        );
     }
 
     /// Targeted unit test for `resync` itself: after an external mutation to a cell the burst has
@@ -469,15 +572,24 @@ mod tests {
 
         // Simulate an external mutation (e.g. a mid-burst History::redo) landing on the same cell,
         // bypassing the burst entirely.
-        let externally_written = Cell { ch: 'Z', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) };
+        let externally_written = Cell {
+            ch: 'Z',
+            fg: Rgba(9, 9, 9, 255),
+            bg: Rgba(8, 8, 8, 255),
+        };
         doc.set_cell(0, 5, 5, externally_written);
         tool.resync(&doc, 0, 0);
 
         let resp = tool.update(ToolEvent::Commit, &tctx, &doc);
         let edit = commit_edit(resp).unwrap();
-        let Edit::Cells(cells) = edit else { panic!("expected an Edit::Cells") };
+        let Edit::Cells(cells) = edit else {
+            panic!("expected an Edit::Cells")
+        };
         assert_eq!(cells.len(), 1);
-        assert_eq!(cells[0].before, externally_written, "resync must re-pin before to doc's post-mutation value");
+        assert_eq!(
+            cells[0].before, externally_written,
+            "resync must re-pin before to doc's post-mutation value"
+        );
         assert_eq!(cells[0].after.ch, 'a');
     }
 
@@ -491,13 +603,28 @@ mod tests {
         tool.update(ToolEvent::Press { x: 5, y: 5 }, &tctx, &doc);
         tool.update(ToolEvent::Char('a'), &tctx, &doc); // touches only (5,5)
 
-        doc.set_cell(0, 6, 6, Cell { ch: 'Z', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            6,
+            6,
+            Cell {
+                ch: 'Z',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         tool.resync(&doc, 0, 0); // must not start tracking (6,6)
 
         let resp = tool.update(ToolEvent::Commit, &tctx, &doc);
         let edit = commit_edit(resp).unwrap();
-        let Edit::Cells(cells) = edit else { panic!("expected an Edit::Cells") };
-        assert_eq!(cells.len(), 1, "resync must not pull in cells the burst never touched");
+        let Edit::Cells(cells) = edit else {
+            panic!("expected an Edit::Cells")
+        };
+        assert_eq!(
+            cells.len(),
+            1,
+            "resync must not pull in cells the burst never touched"
+        );
         assert_eq!((cells[0].x, cells[0].y), (5, 5));
     }
 
@@ -512,9 +639,19 @@ mod tests {
         tool.update(ToolEvent::Char('b'), &tctx, &doc); // rewrites (5,5)='b' again
         let resp = tool.update(ToolEvent::Commit, &tctx, &doc);
         let edit = commit_edit(resp).unwrap();
-        let Edit::Cells(cells) = edit else { panic!("expected an Edit::Cells") };
-        assert_eq!(cells.len(), 1, "one cell touched three times within a burst is still one CellEdit");
-        assert_eq!(cells[0].before, Cell::BLANK, "before must be the pre-burst value, not an intermediate");
+        let Edit::Cells(cells) = edit else {
+            panic!("expected an Edit::Cells")
+        };
+        assert_eq!(
+            cells.len(),
+            1,
+            "one cell touched three times within a burst is still one CellEdit"
+        );
+        assert_eq!(
+            cells[0].before,
+            Cell::BLANK,
+            "before must be the pre-burst value, not an intermediate"
+        );
         assert_eq!(cells[0].after.ch, 'b');
     }
 }

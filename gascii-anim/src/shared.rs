@@ -106,7 +106,10 @@ mod tests {
         let a = SharedState::new();
         let b = a.clone();
         b.borrow_mut().playing = true;
-        assert!(a.borrow().playing, "a clone must observe the other clone's write");
+        assert!(
+            a.borrow().playing,
+            "a clone must observe the other clone's write"
+        );
     }
 
     #[test]
@@ -119,12 +122,19 @@ mod tests {
         }
         assert!(s.borrow().playing);
         assert_eq!(s.borrow().playback_frame, 3);
-        assert_eq!(s.borrow().elapsed_ms, 0.0, "starting must reset the elapsed clock");
+        assert_eq!(
+            s.borrow().elapsed_ms,
+            0.0,
+            "starting must reset the elapsed clock"
+        );
 
         s.borrow_mut().playback_frame = 5; // playback advanced
         let frozen = s.borrow_mut().pause_playback();
         assert!(!s.borrow().playing);
-        assert_eq!(frozen, 5, "pause must report the frame it froze on, for the cursor park");
+        assert_eq!(
+            frozen, 5,
+            "pause must report the frame it froze on, for the cursor park"
+        );
     }
 
     #[test]
@@ -134,6 +144,9 @@ mod tests {
         assert!(!inner.playing);
         assert!(!inner.space_hold_active);
         assert!(!inner.space_hold_saw_primary_press);
-        assert!(inner.was_focused, "starts focused, matching GasciiApp::was_focused's own default");
+        assert!(
+            inner.was_focused,
+            "starts focused, matching GasciiApp::was_focused's own default"
+        );
     }
 }

@@ -7,9 +7,9 @@
 //! tools).
 
 use gascii_core::{
-    footprint, load_str, save_string, AxisAnchor, BrushShape, Buildup, Cell, DensityBrush, DensityMode,
-    Document, Edit, Eraser, Fixed, History, Line, Pencil, PlaneMask, ResizeAnchor, Rgba, Tool, ToolCtx,
-    ToolEvent, ToolResponse, resize_document,
+    footprint, load_str, resize_document, save_string, AxisAnchor, BrushShape, Buildup, Cell,
+    DensityBrush, DensityMode, Document, Edit, Eraser, Fixed, History, Line, Pencil, PlaneMask,
+    ResizeAnchor, Rgba, Tool, ToolCtx, ToolEvent, ToolResponse,
 };
 
 fn sized_ctx(glyph: char, size: u16, shape: BrushShape) -> ToolCtx {
@@ -46,9 +46,18 @@ fn raw_shaped_pencil_press_stamps_a_horizontal_run_not_the_aspect_corrected_box(
     let tctx = sized_ctx('#', 3, BrushShape::Raw);
     pencil.update(ToolEvent::Press { x: 10, y: 10 }, &tctx, &doc);
     let cells = commit_cells(pencil.update(ToolEvent::Release, &tctx, &doc));
-    assert_eq!(cells.len(), 3, "Raw size-3 press must cover exactly a 1x3 horizontal run, not Square's 3x6 box");
+    assert_eq!(
+        cells.len(),
+        3,
+        "Raw size-3 press must cover exactly a 1x3 horizontal run, not Square's 3x6 box"
+    );
     for c in &cells {
-        assert!((9..=11).contains(&c.x) && c.y == 10, "cell ({},{}) outside the expected 1x3 run", c.x, c.y);
+        assert!(
+            (9..=11).contains(&c.x) && c.y == 10,
+            "cell ({},{}) outside the expected 1x3 run",
+            c.x,
+            c.y
+        );
     }
 }
 
@@ -61,7 +70,11 @@ fn raw_shaped_pencil_press_at_the_corner_clips_the_run_to_the_grid() {
     let tctx = sized_ctx('#', 3, BrushShape::Raw);
     pencil.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &doc);
     let cells = commit_cells(pencil.update(ToolEvent::Release, &tctx, &doc));
-    assert_eq!(cells.len(), 2, "Raw's 1x3 run clips to 2 cells at the left edge, not Square's 8");
+    assert_eq!(
+        cells.len(),
+        2,
+        "Raw's 1x3 run clips to 2 cells at the left edge, not Square's 8"
+    );
     for c in &cells {
         assert!(c.x <= 1 && c.y == 0);
     }
@@ -72,21 +85,48 @@ fn raw_shaped_eraser_press_clears_a_horizontal_run_and_nothing_outside_it() {
     let mut doc = Document::new(20, 20);
     for y in 8..13u16 {
         for x in 8..13u16 {
-            doc.set_cell(0, x, y, Cell { ch: 'Q', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) });
+            doc.set_cell(
+                0,
+                x,
+                y,
+                Cell {
+                    ch: 'Q',
+                    fg: Rgba(9, 9, 9, 255),
+                    bg: Rgba(8, 8, 8, 255),
+                },
+            );
         }
     }
     let mut eraser = Eraser::new();
     let tctx = sized_ctx('#', 3, BrushShape::Raw);
     eraser.update(ToolEvent::Press { x: 10, y: 10 }, &tctx, &doc);
     let cells = commit_cells(eraser.update(ToolEvent::Release, &tctx, &doc));
-    assert_eq!(cells.len(), 3, "Raw size-3 erase must clear exactly the 1x3 run, not a wider aspect-corrected box");
+    assert_eq!(
+        cells.len(),
+        3,
+        "Raw size-3 erase must clear exactly the 1x3 run, not a wider aspect-corrected box"
+    );
     for c in &cells {
         assert!((9..=11).contains(&c.x) && c.y == 10);
         assert_eq!(c.after, Cell::BLANK);
     }
     // Rows above/below the erased run must survive untouched.
-    assert_eq!(doc.cell(0, 10, 9), Some(&Cell { ch: 'Q', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) }));
-    assert_eq!(doc.cell(0, 10, 11), Some(&Cell { ch: 'Q', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) }));
+    assert_eq!(
+        doc.cell(0, 10, 9),
+        Some(&Cell {
+            ch: 'Q',
+            fg: Rgba(9, 9, 9, 255),
+            bg: Rgba(8, 8, 8, 255)
+        })
+    );
+    assert_eq!(
+        doc.cell(0, 10, 11),
+        Some(&Cell {
+            ch: 'Q',
+            fg: Rgba(9, 9, 9, 255),
+            bg: Rgba(8, 8, 8, 255)
+        })
+    );
 }
 
 #[test]
@@ -96,7 +136,16 @@ fn raw_shaped_thick_line_sweeps_a_single_row_and_still_never_joins() {
     // (Raw included) still stamps the glyph directly with no join, matching `line.rs`'s own
     // `thick_line_stamps_the_glyph_directly_with_no_join_and_no_duplicates` (which uses Square).
     for y in 0..30u16 {
-        doc.set_cell(0, 15, y, Cell { ch: '│', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            15,
+            y,
+            Cell {
+                ch: '│',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
     }
     let tctx = sized_ctx('#', 3, BrushShape::Raw);
     let mut line = Line::new();
@@ -104,7 +153,10 @@ fn raw_shaped_thick_line_sweeps_a_single_row_and_still_never_joins() {
     line.update(ToolEvent::Drag { x: 25, y: 15 }, &tctx, &doc);
     let cells = commit_cells(line.update(ToolEvent::Release, &tctx, &doc));
 
-    assert!(cells.iter().all(|c| c.after.ch == '#'), "size>1 Raw must stamp the glyph directly, never join");
+    assert!(
+        cells.iter().all(|c| c.after.ch == '#'),
+        "size>1 Raw must stamp the glyph directly, never join"
+    );
     // Raw's footprint has no vertical extent, so the swept run stays a single row (y=15) widened
     // by 1 cell on each end (the first/last stamp's own 3-wide run) -- narrower than Square's
     // multi-row aspect-corrected sweep.
@@ -133,17 +185,31 @@ fn raw_shaped_wide_buildup_drag_advances_the_single_row_exactly_once_per_pass() 
         brush.update(ToolEvent::Drag { x, y: 2 }, &tctx, &doc);
     }
     let resp = brush.update(ToolEvent::Release, &tctx, &doc);
-    let ToolResponse::Commit(Some(edit)) = resp else { panic!("expected a committed edit") };
+    let ToolResponse::Commit(Some(edit)) = resp else {
+        panic!("expected a committed edit")
+    };
     let mut history = History::new();
     history.apply(&mut doc, edit);
 
     // Raw's footprint has no vertical extent, so only row y=2 (cols 1..=9) advances.
     for x in 1..=9u16 {
-        assert_eq!(doc.cell(0, x, 2).unwrap().ch, 'a', "cell ({x},2) must advance exactly once");
+        assert_eq!(
+            doc.cell(0, x, 2).unwrap().ch,
+            'a',
+            "cell ({x},2) must advance exactly once"
+        );
     }
     // Rows above/below the single swept row (inside Square's wider band) must be untouched.
-    assert_eq!(doc.cell(0, 5, 1), Some(&Cell::BLANK), "row 1 is outside Raw's single-row footprint");
-    assert_eq!(doc.cell(0, 5, 3), Some(&Cell::BLANK), "row 3 is outside Raw's single-row footprint");
+    assert_eq!(
+        doc.cell(0, 5, 1),
+        Some(&Cell::BLANK),
+        "row 1 is outside Raw's single-row footprint"
+    );
+    assert_eq!(
+        doc.cell(0, 5, 3),
+        Some(&Cell::BLANK),
+        "row 3 is outside Raw's single-row footprint"
+    );
 }
 
 #[test]
@@ -156,16 +222,24 @@ fn raw_shaped_footprint_directly_at_sizes_4_and_5_is_still_a_single_row_of_exact
 
     footprint((10, 10), 4, BrushShape::Raw, &mut out);
     assert_eq!(
-        out.iter().copied().collect::<std::collections::HashSet<_>>(),
-        [(9, 10), (10, 10), (11, 10), (12, 10)].into_iter().collect(),
+        out.iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>(),
+        [(9, 10), (10, 10), (11, 10), (12, 10)]
+            .into_iter()
+            .collect(),
         "size 4 Raw must be a single right-biased row of exactly 4 cells"
     );
     assert_eq!(out.len(), 4);
 
     footprint((10, 10), 5, BrushShape::Raw, &mut out);
     assert_eq!(
-        out.iter().copied().collect::<std::collections::HashSet<_>>(),
-        [(8, 10), (9, 10), (10, 10), (11, 10), (12, 10)].into_iter().collect(),
+        out.iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>(),
+        [(8, 10), (9, 10), (10, 10), (11, 10), (12, 10)]
+            .into_iter()
+            .collect(),
         "size 5 Raw must be a single symmetric row of exactly 5 cells"
     );
     assert_eq!(out.len(), 5);
@@ -182,9 +256,18 @@ fn raw_shaped_pencil_press_size_4_at_the_bottom_right_grid_corner_clips_the_run_
     pencil.update(ToolEvent::Press { x: 19, y: 19 }, &tctx, &doc);
     let cells = commit_cells(pencil.update(ToolEvent::Release, &tctx, &doc));
     // hlo=-1, hhi=2 around x=19 -> x in 18..=21; 20 and 21 fall outside the 20-wide document.
-    assert_eq!(cells.len(), 2, "Raw's size-4 run clips to 2 cells at the right document edge");
+    assert_eq!(
+        cells.len(),
+        2,
+        "Raw's size-4 run clips to 2 cells at the right document edge"
+    );
     for c in &cells {
-        assert!((18..=19).contains(&c.x) && c.y == 19, "cell ({},{}) outside the expected clipped run", c.x, c.y);
+        assert!(
+            (18..=19).contains(&c.x) && c.y == 19,
+            "cell ({},{}) outside the expected clipped run",
+            c.x,
+            c.y
+        );
     }
 }
 
@@ -197,7 +280,16 @@ fn raw_shaped_eraser_size_5_press_near_the_document_edge_clips_the_run_but_never
     let mut doc = Document::new(20, 20);
     for y in 14..=16u16 {
         for x in 14..20u16 {
-            doc.set_cell(0, x, y, Cell { ch: 'Q', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) });
+            doc.set_cell(
+                0,
+                x,
+                y,
+                Cell {
+                    ch: 'Q',
+                    fg: Rgba(9, 9, 9, 255),
+                    bg: Rgba(8, 8, 8, 255),
+                },
+            );
         }
     }
     let mut eraser = Eraser::new();
@@ -205,7 +297,11 @@ fn raw_shaped_eraser_size_5_press_near_the_document_edge_clips_the_run_but_never
     eraser.update(ToolEvent::Press { x: 18, y: 15 }, &tctx, &doc);
     let cells = commit_cells(eraser.update(ToolEvent::Release, &tctx, &doc));
     // hlo=-2, hhi=2 around x=18 -> x in 16..=20; 20 falls outside the 20-wide document.
-    assert_eq!(cells.len(), 4, "Raw's size-5 run clips to 4 cells at the right document edge");
+    assert_eq!(
+        cells.len(),
+        4,
+        "Raw's size-5 run clips to 4 cells at the right document edge"
+    );
     for c in &cells {
         assert!((16..=19).contains(&c.x) && c.y == 15);
         assert_eq!(c.after, Cell::BLANK);
@@ -213,8 +309,22 @@ fn raw_shaped_eraser_size_5_press_near_the_document_edge_clips_the_run_but_never
     // Rows above/below the erased row must survive untouched, including their own edge-adjacent
     // cells -- proving the clip is horizontal-only, not a footprint that also lost vertical extent.
     for x in 14..20u16 {
-        assert_eq!(doc.cell(0, x, 14), Some(&Cell { ch: 'Q', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) }));
-        assert_eq!(doc.cell(0, x, 16), Some(&Cell { ch: 'Q', fg: Rgba(9, 9, 9, 255), bg: Rgba(8, 8, 8, 255) }));
+        assert_eq!(
+            doc.cell(0, x, 14),
+            Some(&Cell {
+                ch: 'Q',
+                fg: Rgba(9, 9, 9, 255),
+                bg: Rgba(8, 8, 8, 255)
+            })
+        );
+        assert_eq!(
+            doc.cell(0, x, 16),
+            Some(&Cell {
+                ch: 'Q',
+                fg: Rgba(9, 9, 9, 255),
+                bg: Rgba(8, 8, 8, 255)
+            })
+        );
     }
 }
 
@@ -239,20 +349,41 @@ fn every_non_start_anchor_preserves_a_custom_background_through_resize_and_undo_
     ] {
         let mut doc = Document::new(4, 4);
         doc.background = Rgba(10, 20, 30, 255);
-        doc.set_cell(0, 1, 1, Cell { ch: 'm', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            1,
+            1,
+            Cell {
+                ch: 'm',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         let mut history = History::new();
         let anchor = ResizeAnchor { h, v };
 
         let grow = resize_document(&doc, 9, 9, anchor).unwrap().unwrap();
         history.apply(&mut doc, grow);
-        assert_eq!(doc.background, Rgba(10, 20, 30, 255), "h={h:?} v={v:?}: grow must not touch background");
+        assert_eq!(
+            doc.background,
+            Rgba(10, 20, 30, 255),
+            "h={h:?} v={v:?}: grow must not touch background"
+        );
 
         assert!(history.undo(&mut doc));
-        assert_eq!(doc.background, Rgba(10, 20, 30, 255), "h={h:?} v={v:?}: undo must not touch background");
+        assert_eq!(
+            doc.background,
+            Rgba(10, 20, 30, 255),
+            "h={h:?} v={v:?}: undo must not touch background"
+        );
         assert_eq!((doc.width, doc.height), (4, 4));
 
         assert!(history.redo(&mut doc));
-        assert_eq!(doc.background, Rgba(10, 20, 30, 255), "h={h:?} v={v:?}: redo must not touch background");
+        assert_eq!(
+            doc.background,
+            Rgba(10, 20, 30, 255),
+            "h={h:?} v={v:?}: redo must not touch background"
+        );
         assert_eq!((doc.width, doc.height), (9, 9));
     }
 }
@@ -263,13 +394,26 @@ fn every_non_start_anchor_preserves_a_custom_background_through_resize_and_undo_
 fn a_center_anchored_resize_then_save_load_round_trips_a_custom_background_exactly() {
     let mut doc = Document::new(3, 3);
     doc.background = Rgba(200, 50, 5, 255);
-    doc.set_cell(0, 1, 1, Cell { ch: 'z', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
-    let anchor = ResizeAnchor { h: AxisAnchor::Center, v: AxisAnchor::Center };
+    doc.set_cell(
+        0,
+        1,
+        1,
+        Cell {
+            ch: 'z',
+            fg: Rgba::WHITE,
+            bg: Rgba::TRANSPARENT,
+        },
+    );
+    let anchor = ResizeAnchor {
+        h: AxisAnchor::Center,
+        v: AxisAnchor::Center,
+    };
     let edit = resize_document(&doc, 7, 7, anchor).unwrap().unwrap();
     let mut history = History::new();
     history.apply(&mut doc, edit);
 
-    let loaded = load_str(&save_string(&doc)).expect("a background-carrying resized doc must save and reload");
+    let loaded = load_str(&save_string(&doc))
+        .expect("a background-carrying resized doc must save and reload");
     assert_eq!(loaded, doc, "byte-exact round trip, background included");
     assert_eq!(loaded.background, Rgba(200, 50, 5, 255));
 }
@@ -284,15 +428,29 @@ fn a_legacy_file_with_no_background_field_loads_as_opaque_black_then_survives_an
     value.as_object_mut().unwrap().remove("background");
     let json = serde_json::to_string(&value).unwrap();
     let mut loaded = load_str(&json).expect("a pre-background file must still load");
-    assert_eq!(loaded.background, Rgba(0, 0, 0, 255), "sanity: legacy file defaults to opaque black");
+    assert_eq!(
+        loaded.background,
+        Rgba(0, 0, 0, 255),
+        "sanity: legacy file defaults to opaque black"
+    );
 
-    let anchor = ResizeAnchor { h: AxisAnchor::End, v: AxisAnchor::Center };
+    let anchor = ResizeAnchor {
+        h: AxisAnchor::End,
+        v: AxisAnchor::Center,
+    };
     let edit = resize_document(&loaded, 8, 6, anchor).unwrap().unwrap();
     let mut history = History::new();
     history.apply(&mut loaded, edit);
-    assert_eq!(loaded.background, Rgba(0, 0, 0, 255), "resize must not disturb the legacy-defaulted background");
+    assert_eq!(
+        loaded.background,
+        Rgba(0, 0, 0, 255),
+        "resize must not disturb the legacy-defaulted background"
+    );
     assert_eq!((loaded.width, loaded.height), (8, 6));
 
     let round_tripped = load_str(&save_string(&loaded)).unwrap();
-    assert_eq!(round_tripped, loaded, "the now-resized, previously-legacy document must still round-trip byte-exact");
+    assert_eq!(
+        round_tripped, loaded,
+        "the now-resized, previously-legacy document must still round-trip byte-exact"
+    );
 }

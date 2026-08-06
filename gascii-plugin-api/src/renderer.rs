@@ -59,7 +59,12 @@ mod tests {
         let grid = FakeGrid;
         let cell = Vec2::new(10.0, 20.0);
         let origin = Pos2::new(5.0, 5.0);
-        let r = CellRect { x0: 2, y0: 3, x1: 6, y1: 8 };
+        let r = CellRect {
+            x0: 2,
+            y0: 3,
+            x1: 6,
+            y1: 8,
+        };
 
         let expect_min = grid.cell_to_screen(r.x0, r.y0, cell, origin);
         let expect_max = grid.cell_to_screen(r.x1 + 1, r.y1 + 1, cell, origin);

@@ -78,7 +78,9 @@ mod tests {
         let host = FakeHost(Document::default_document());
         let ctx = egui::Context::default();
         let mut outcome = None;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| outcome = Some(p.panel(ui, false, &host)));
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            outcome = Some(p.panel(ui, false, &host))
+        });
         let outcome = outcome.unwrap();
         assert!(outcome.edits.is_empty());
         assert!(outcome.properties.is_empty());
@@ -90,7 +92,9 @@ mod tests {
         let host = FakeHost(Document::default_document());
         let ctx = egui::Context::default();
         let mut outcome = None;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| outcome = Some(p.panel(ui, true, &host)));
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            outcome = Some(p.panel(ui, true, &host))
+        });
         let outcome = outcome.unwrap();
         assert!(outcome.edits.is_empty());
         assert!(outcome.properties.is_empty());

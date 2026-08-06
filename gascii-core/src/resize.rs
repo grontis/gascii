@@ -4,16 +4,24 @@
 //! already uses rather than mutating `Document` directly.
 
 use crate::edit::{DocSnapshot, Edit};
-use crate::model::{Cell, Document, DocExtent, Frame, Layer};
+use crate::model::{Cell, DocExtent, Document, Frame, Layer};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ResizeError {
     ZeroExtent,
-    TooLarge { width: u16, height: u16, max_width: u16, max_height: u16 },
+    TooLarge {
+        width: u16,
+        height: u16,
+        max_width: u16,
+        max_height: u16,
+    },
     /// The joint `frame_count x layers-per-frame x new_width x new_height` budget
     /// `Document::MAX_TOTAL_CELLS` bounds — mirrors `frame_ops::FrameOpError::TotalCellBudgetExceeded`,
     /// the resize-time counterpart of the same check.
-    TotalCellBudgetExceeded { total_cells: u128, max: usize },
+    TotalCellBudgetExceeded {
+        total_cells: u128,
+        max: usize,
+    },
 }
 
 /// Where existing content lands on one axis when that axis's extent changes. `Start` is the
@@ -84,11 +92,17 @@ pub fn resize_document(
     }
     let total = total_cells_at(doc, new_width, new_height);
     if total > Document::MAX_TOTAL_CELLS as u128 {
-        return Err(ResizeError::TotalCellBudgetExceeded { total_cells: total, max: Document::MAX_TOTAL_CELLS });
+        return Err(ResizeError::TotalCellBudgetExceeded {
+            total_cells: total,
+            max: Document::MAX_TOTAL_CELLS,
+        });
     }
     let dx = axis_offset(anchor.h, doc.width, new_width);
     let dy = axis_offset(anchor.v, doc.height, new_height);
-    let before = DocSnapshot { extent: doc.extent(), frames: doc.frames.clone() };
+    let before = DocSnapshot {
+        extent: doc.extent(),
+        frames: doc.frames.clone(),
+    };
     let after_frames = doc
         .frames
         .iter()
@@ -102,7 +116,10 @@ pub fn resize_document(
         })
         .collect();
     let after = DocSnapshot {
-        extent: DocExtent { width: new_width, height: new_height },
+        extent: DocExtent {
+            width: new_width,
+            height: new_height,
+        },
         frames: after_frames,
     };
     Ok(Some(Edit::Resize { before, after }))
@@ -111,7 +128,15 @@ pub fn resize_document(
 /// Blits `old`'s cells into a `new_w x new_h` buffer, each source `(x, y)` landing at `(x + dx, y +
 /// dy)`. A source cell is copied only when both its source and destination coordinates are
 /// in-bounds; every other destination cell stays `Cell::BLANK`.
-fn resize_layer(old: &Layer, old_w: u16, old_h: u16, new_w: u16, new_h: u16, dx: i32, dy: i32) -> Layer {
+fn resize_layer(
+    old: &Layer,
+    old_w: u16,
+    old_h: u16,
+    new_w: u16,
+    new_h: u16,
+    dx: i32,
+    dy: i32,
+) -> Layer {
     let mut cells = vec![Cell::BLANK; new_w as usize * new_h as usize];
     let old_cells = old.cells();
     for y in 0..old_h {
@@ -139,7 +164,11 @@ mod tests {
     use crate::model::Rgba;
 
     fn cell(ch: char) -> Cell {
-        Cell { ch, fg: Rgba::WHITE, bg: Rgba::TRANSPARENT }
+        Cell {
+            ch,
+            fg: Rgba::WHITE,
+            bg: Rgba::TRANSPARENT,
+        }
     }
 
     fn start() -> ResizeAnchor {
@@ -210,7 +239,10 @@ mod tests {
         history.apply(&mut doc, edit);
         assert_eq!(doc.width, 2);
         assert!(history.undo(&mut doc));
-        assert_eq!(doc, before, "undo must resurrect the cropped-away cells exactly");
+        assert_eq!(
+            doc, before,
+            "undo must resurrect the cropped-away cells exactly"
+        );
     }
 
     #[test]
@@ -222,8 +254,14 @@ mod tests {
     #[test]
     fn zero_width_or_height_is_rejected() {
         let doc = Document::new(10, 10);
-        assert_eq!(resize_document(&doc, 0, 10, start()), Err(ResizeError::ZeroExtent));
-        assert_eq!(resize_document(&doc, 10, 0, start()), Err(ResizeError::ZeroExtent));
+        assert_eq!(
+            resize_document(&doc, 0, 10, start()),
+            Err(ResizeError::ZeroExtent)
+        );
+        assert_eq!(
+            resize_document(&doc, 10, 0, start()),
+            Err(ResizeError::ZeroExtent)
+        );
     }
 
     #[test]
@@ -231,7 +269,10 @@ mod tests {
         let doc = Document::new(10, 10);
         let started = std::time::Instant::now();
         let result = resize_document(&doc, u16::MAX, u16::MAX, start());
-        assert!(started.elapsed() < std::time::Duration::from_millis(200), "must reject before allocating, not after");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "must reject before allocating, not after"
+        );
         assert_eq!(
             result,
             Err(ResizeError::TooLarge {
@@ -248,17 +289,28 @@ mod tests {
     /// at its current tiny extent, so it was never rejected on the way in) must be rejected before
     /// `resize_document` allocates any resized layer.
     #[test]
-    fn resize_toward_the_extent_cap_is_rejected_before_allocating_when_the_joint_budget_would_be_exceeded() {
+    fn resize_toward_the_extent_cap_is_rejected_before_allocating_when_the_joint_budget_would_be_exceeded(
+    ) {
         let mut doc = Document::new(2, 2);
         for _ in 0..Document::MAX_LAYERS {
             doc.layers_mut().push(Layer::blank(2, 2));
         }
-        assert_eq!(doc.layers().len(), Document::MAX_LAYERS + 1, "one layer over MAX_LAYERS, cheap at this tiny extent");
+        assert_eq!(
+            doc.layers().len(),
+            Document::MAX_LAYERS + 1,
+            "one layer over MAX_LAYERS, cheap at this tiny extent"
+        );
 
         let started = std::time::Instant::now();
         let result = resize_document(&doc, Document::MAX_WIDTH, Document::MAX_HEIGHT, start());
-        assert!(started.elapsed() < std::time::Duration::from_millis(200), "must reject before allocating, not after");
-        assert!(matches!(result, Err(ResizeError::TotalCellBudgetExceeded { .. })));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "must reject before allocating, not after"
+        );
+        assert!(matches!(
+            result,
+            Err(ResizeError::TotalCellBudgetExceeded { .. })
+        ));
     }
 
     #[test]
@@ -346,7 +398,10 @@ mod tests {
         doc.set_cell(0, 3, 3, cell('k'));
         doc.set_cell(0, 4, 4, cell('z'));
         doc.set_cell(0, 0, 0, cell('x')); // will be cropped away
-        let anchor = ResizeAnchor { h: AxisAnchor::End, v: AxisAnchor::End };
+        let anchor = ResizeAnchor {
+            h: AxisAnchor::End,
+            v: AxisAnchor::End,
+        };
         let edit = resize_document(&doc, 2, 2, anchor).unwrap().unwrap();
         let mut history = History::new();
         history.apply(&mut doc, edit);
@@ -364,11 +419,18 @@ mod tests {
         // on the end side.
         let mut doc = Document::new(1, 1);
         doc.set_cell(0, 0, 0, cell('m'));
-        let anchor = ResizeAnchor { h: AxisAnchor::Center, v: AxisAnchor::Start };
+        let anchor = ResizeAnchor {
+            h: AxisAnchor::Center,
+            v: AxisAnchor::Start,
+        };
         let edit = resize_document(&doc, 4, 1, anchor).unwrap().unwrap();
         let mut history = History::new();
         history.apply(&mut doc, edit);
-        assert_eq!(doc.cell(0, 1, 0), Some(&cell('m')), "content should land at the truncated offset 1");
+        assert_eq!(
+            doc.cell(0, 1, 0),
+            Some(&cell('m')),
+            "content should land at the truncated offset 1"
+        );
         assert_eq!(doc.cell(0, 0, 0), Some(&Cell::BLANK));
         assert_eq!(doc.cell(0, 2, 0), Some(&Cell::BLANK));
         assert_eq!(doc.cell(0, 3, 0), Some(&Cell::BLANK));
@@ -386,11 +448,18 @@ mod tests {
         for (x, ch) in ['a', 'b', 'c', 'd', 'e'].into_iter().enumerate() {
             doc.set_cell(0, x as u16, 0, cell(ch));
         }
-        let anchor = ResizeAnchor { h: AxisAnchor::Center, v: AxisAnchor::Start };
+        let anchor = ResizeAnchor {
+            h: AxisAnchor::Center,
+            v: AxisAnchor::Start,
+        };
         let edit = resize_document(&doc, 2, 1, anchor).unwrap().unwrap();
         let mut history = History::new();
         history.apply(&mut doc, edit);
-        assert_eq!(doc.cell(0, 0, 0), Some(&cell('b')), "kept region starts at old column 1");
+        assert_eq!(
+            doc.cell(0, 0, 0),
+            Some(&cell('b')),
+            "kept region starts at old column 1"
+        );
         assert_eq!(doc.cell(0, 1, 0), Some(&cell('c')));
 
         // And the round trip restores every cropped cell byte-exact.
@@ -405,7 +474,10 @@ mod tests {
         let mut doc = Document::new(4, 4);
         doc.set_cell(0, 0, 0, cell('a'));
         doc.set_cell(0, 3, 3, cell('z')); // will be cropped on the shrinking axis
-        let anchor = ResizeAnchor { h: AxisAnchor::End, v: AxisAnchor::Start };
+        let anchor = ResizeAnchor {
+            h: AxisAnchor::End,
+            v: AxisAnchor::Start,
+        };
         // width shrinks 4 -> 2 (End anchored: keep the rightmost 2 columns), height grows 4 -> 6.
         let edit = resize_document(&doc, 2, 6, anchor).unwrap().unwrap();
         let mut history = History::new();
@@ -421,7 +493,10 @@ mod tests {
         let mut doc = Document::new(3, 3);
         doc.set_cell(0, 1, 1, cell('m'));
         let before = doc.clone();
-        let anchor = ResizeAnchor { h: AxisAnchor::Center, v: AxisAnchor::End };
+        let anchor = ResizeAnchor {
+            h: AxisAnchor::Center,
+            v: AxisAnchor::End,
+        };
         let edit = resize_document(&doc, 7, 7, anchor).unwrap().unwrap();
         let mut history = History::new();
         history.apply(&mut doc, edit);
@@ -448,8 +523,20 @@ mod tests {
         let edit = resize_document(&doc, 6, 4, start()).unwrap().unwrap();
         history.apply(&mut doc, edit);
 
-        assert_eq!(doc.cell_at(0, 0, 0, 0), Some(&cell('a')), "frame 0's content stays top-left anchored");
-        assert_eq!(doc.cell_at(1, 0, 1, 1), Some(&cell('z')), "frame 1 must be resized too, not left at its old extent");
-        assert_eq!(doc.frame_layers(1).unwrap()[0].cells().len(), 24, "frame 1 must be resized to the new 6x4 extent");
+        assert_eq!(
+            doc.cell_at(0, 0, 0, 0),
+            Some(&cell('a')),
+            "frame 0's content stays top-left anchored"
+        );
+        assert_eq!(
+            doc.cell_at(1, 0, 1, 1),
+            Some(&cell('z')),
+            "frame 1 must be resized too, not left at its old extent"
+        );
+        assert_eq!(
+            doc.frame_layers(1).unwrap()[0].cells().len(),
+            24,
+            "frame 1 must be resized to the new 6x4 extent"
+        );
     }
 }

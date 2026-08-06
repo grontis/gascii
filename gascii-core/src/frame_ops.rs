@@ -7,15 +7,27 @@ use crate::model::{Document, Frame};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FrameOpError {
-    IndexOutOfBounds { index: usize, frame_count: usize },
-    TooManyFrames { found: usize, max: usize },
+    IndexOutOfBounds {
+        index: usize,
+        frame_count: usize,
+    },
+    TooManyFrames {
+        found: usize,
+        max: usize,
+    },
     /// `remove_frame` refuses to remove a document's only frame — a document with zero frames
     /// must stay unreachable.
     LastFrame,
-    TotalCellBudgetExceeded { total_cells: u128, max: usize },
+    TotalCellBudgetExceeded {
+        total_cells: u128,
+        max: usize,
+    },
     /// A single inserted frame's own `layers.len()` exceeds `Document::MAX_LAYERS` — independent of
     /// the joint budget above, which only bounds the sum across every frame.
-    TooManyLayers { found: usize, max: usize },
+    TooManyLayers {
+        found: usize,
+        max: usize,
+    },
 }
 
 /// How `active` shifts when the element at `removed` is taken out via `Vec::remove`, given the
@@ -53,9 +65,7 @@ fn total_cells(doc: &Document, extra_layers_total: usize) -> u128 {
     let existing_layers: usize = (0..doc.frame_count())
         .map(|i| doc.frame(i).map(|f| f.layers.len()).unwrap_or(0))
         .sum();
-    (existing_layers as u128 + extra_layers_total as u128)
-        * doc.width as u128
-        * doc.height as u128
+    (existing_layers as u128 + extra_layers_total as u128) * doc.width as u128 * doc.height as u128
 }
 
 fn check_caps(
@@ -65,14 +75,23 @@ fn check_caps(
     inserted_frame_layers: usize,
 ) -> Result<(), FrameOpError> {
     if new_frame_count > Document::MAX_FRAMES {
-        return Err(FrameOpError::TooManyFrames { found: new_frame_count, max: Document::MAX_FRAMES });
+        return Err(FrameOpError::TooManyFrames {
+            found: new_frame_count,
+            max: Document::MAX_FRAMES,
+        });
     }
     if inserted_frame_layers > Document::MAX_LAYERS {
-        return Err(FrameOpError::TooManyLayers { found: inserted_frame_layers, max: Document::MAX_LAYERS });
+        return Err(FrameOpError::TooManyLayers {
+            found: inserted_frame_layers,
+            max: Document::MAX_LAYERS,
+        });
     }
     let total = total_cells(doc, extra_layers_total);
     if total > Document::MAX_TOTAL_CELLS as u128 {
-        return Err(FrameOpError::TotalCellBudgetExceeded { total_cells: total, max: Document::MAX_TOTAL_CELLS });
+        return Err(FrameOpError::TotalCellBudgetExceeded {
+            total_cells: total,
+            max: Document::MAX_TOTAL_CELLS,
+        });
     }
     Ok(())
 }
@@ -89,18 +108,30 @@ fn check_caps(
 /// `structural_edit_is_valid`) — that's the defense against an `Edit::AddFrame`/etc. arriving from
 /// outside this crate (e.g. a plugin's `PanelOutcome.edits`), not this function's own contract.
 pub fn add_frame(doc: &Document, at: usize, frame: Frame) -> Result<Edit, FrameOpError> {
-    check_caps(doc, doc.frame_count() + 1, frame.layers.len(), frame.layers.len())?;
+    check_caps(
+        doc,
+        doc.frame_count() + 1,
+        frame.layers.len(),
+        frame.layers.len(),
+    )?;
     let active_before = doc.active_frame();
     // The inserted frame becomes active (`active_frame_after == at`) — the same rule
     // `layer_ops::add_layer` uses: the user's next action is almost always on the frame just
     // added or duplicated. Undo restores `active_frame_before`.
-    Ok(Edit::AddFrame { index: at, frame, active_frame_before: active_before, active_frame_after: at })
+    Ok(Edit::AddFrame {
+        index: at,
+        frame,
+        active_frame_before: active_before,
+        active_frame_after: at,
+    })
 }
 
 /// Clones frame `index` and inserts the clone immediately after it.
 pub fn duplicate_frame(doc: &Document, index: usize) -> Result<Edit, FrameOpError> {
     let frame_count = doc.frame_count();
-    let source = doc.frame(index).ok_or(FrameOpError::IndexOutOfBounds { index, frame_count })?;
+    let source = doc
+        .frame(index)
+        .ok_or(FrameOpError::IndexOutOfBounds { index, frame_count })?;
     add_frame(doc, index + 1, source.clone())
 }
 
@@ -111,38 +142,68 @@ pub fn remove_frame(doc: &Document, index: usize) -> Result<Edit, FrameOpError> 
     if frame_count <= 1 {
         return Err(FrameOpError::LastFrame);
     }
-    let frame = doc.frame(index).ok_or(FrameOpError::IndexOutOfBounds { index, frame_count })?.clone();
+    let frame = doc
+        .frame(index)
+        .ok_or(FrameOpError::IndexOutOfBounds { index, frame_count })?
+        .clone();
     let active_before = doc.active_frame();
     let active_after = shift_for_remove(active_before, index, frame_count - 1);
-    Ok(Edit::RemoveFrame { index, frame, active_frame_before: active_before, active_frame_after: active_after })
+    Ok(Edit::RemoveFrame {
+        index,
+        frame,
+        active_frame_before: active_before,
+        active_frame_after: active_after,
+    })
 }
 
 /// Moves the frame at `from` to `to`. `Ok(None)` for a `from == to` no-op (no empty undo entry).
 pub fn reorder_frame(doc: &Document, from: usize, to: usize) -> Result<Option<Edit>, FrameOpError> {
     let frame_count = doc.frame_count();
     if from >= frame_count {
-        return Err(FrameOpError::IndexOutOfBounds { index: from, frame_count });
+        return Err(FrameOpError::IndexOutOfBounds {
+            index: from,
+            frame_count,
+        });
     }
     if to >= frame_count {
-        return Err(FrameOpError::IndexOutOfBounds { index: to, frame_count });
+        return Err(FrameOpError::IndexOutOfBounds {
+            index: to,
+            frame_count,
+        });
     }
     if from == to {
         return Ok(None);
     }
     let active_before = doc.active_frame();
     let active_after = shift_for_move(active_before, from, to);
-    Ok(Some(Edit::ReorderFrame { from, to, active_frame_before: active_before, active_frame_after: active_after }))
+    Ok(Some(Edit::ReorderFrame {
+        from,
+        to,
+        active_frame_before: active_before,
+        active_frame_after: active_after,
+    }))
 }
 
 /// Sets frame `index`'s duration override. `Ok(None)` if `duration_ms` already matches the
 /// current override (no empty undo entry).
-pub fn set_frame_duration(doc: &Document, index: usize, duration_ms: Option<u32>) -> Result<Option<Edit>, FrameOpError> {
+pub fn set_frame_duration(
+    doc: &Document,
+    index: usize,
+    duration_ms: Option<u32>,
+) -> Result<Option<Edit>, FrameOpError> {
     let frame_count = doc.frame_count();
-    let current = doc.frame(index).ok_or(FrameOpError::IndexOutOfBounds { index, frame_count })?.duration_override;
+    let current = doc
+        .frame(index)
+        .ok_or(FrameOpError::IndexOutOfBounds { index, frame_count })?
+        .duration_override;
     if current == duration_ms {
         return Ok(None);
     }
-    Ok(Some(Edit::SetFrameDuration { index, before: current, after: duration_ms }))
+    Ok(Some(Edit::SetFrameDuration {
+        index,
+        before: current,
+        after: duration_ms,
+    }))
 }
 
 #[cfg(test)]
@@ -164,9 +225,19 @@ mod tests {
         assert_eq!(doc.active_frame(), 1, "the appended frame becomes active");
 
         let edit = add_frame(&doc, 0, blank(3, 3)).unwrap();
-        let Edit::AddFrame { active_frame_before, active_frame_after, .. } = edit else { panic!("expected AddFrame") };
+        let Edit::AddFrame {
+            active_frame_before,
+            active_frame_after,
+            ..
+        } = edit
+        else {
+            panic!("expected AddFrame")
+        };
         assert_eq!(active_frame_before, 1);
-        assert_eq!(active_frame_after, 0, "the inserted frame becomes active, matching layer_ops' rule");
+        assert_eq!(
+            active_frame_after, 0,
+            "the inserted frame becomes active, matching layer_ops' rule"
+        );
     }
 
     #[test]
@@ -178,7 +249,11 @@ mod tests {
         assert_eq!(doc.active_frame(), 1);
 
         history.undo(&mut doc);
-        assert_eq!(doc.active_frame(), 0, "undo must return the cursor to the frame it left");
+        assert_eq!(
+            doc.active_frame(),
+            0,
+            "undo must return the cursor to the frame it left"
+        );
     }
 
     #[test]
@@ -192,8 +267,16 @@ mod tests {
         doc.set_active_frame(2);
 
         let edit = remove_frame(&doc, 0).unwrap();
-        let Edit::RemoveFrame { active_frame_after, .. } = edit else { panic!("expected RemoveFrame") };
-        assert_eq!(active_frame_after, 1, "removing a frame before the active index shifts it back by one");
+        let Edit::RemoveFrame {
+            active_frame_after, ..
+        } = edit
+        else {
+            panic!("expected RemoveFrame")
+        };
+        assert_eq!(
+            active_frame_after, 1,
+            "removing a frame before the active index shifts it back by one"
+        );
     }
 
     #[test]
@@ -207,8 +290,16 @@ mod tests {
         assert_eq!(doc.active_frame(), 0);
 
         let edit = remove_frame(&doc, 0).unwrap();
-        let Edit::RemoveFrame { active_frame_after, .. } = edit else { panic!("expected RemoveFrame") };
-        assert_eq!(active_frame_after, 0, "removing the active frame clamps to the new last valid index");
+        let Edit::RemoveFrame {
+            active_frame_after, ..
+        } = edit
+        else {
+            panic!("expected RemoveFrame")
+        };
+        assert_eq!(
+            active_frame_after, 0,
+            "removing the active frame clamps to the new last valid index"
+        );
     }
 
     #[test]
@@ -228,8 +319,16 @@ mod tests {
         doc.set_active_frame(0);
 
         let edit = reorder_frame(&doc, 0, 2).unwrap().unwrap();
-        let Edit::ReorderFrame { active_frame_after, .. } = edit else { panic!("expected ReorderFrame") };
-        assert_eq!(active_frame_after, 2, "moving the active frame itself follows it to the destination");
+        let Edit::ReorderFrame {
+            active_frame_after, ..
+        } = edit
+        else {
+            panic!("expected ReorderFrame")
+        };
+        assert_eq!(
+            active_frame_after, 2,
+            "moving the active frame itself follows it to the destination"
+        );
     }
 
     #[test]
@@ -251,7 +350,12 @@ mod tests {
         assert_eq!(doc.active_frame(), 1);
 
         let edit = reorder_frame(&doc, 0, 2).unwrap().unwrap();
-        let Edit::ReorderFrame { active_frame_after, .. } = edit else { panic!("expected ReorderFrame") };
+        let Edit::ReorderFrame {
+            active_frame_after, ..
+        } = edit
+        else {
+            panic!("expected ReorderFrame")
+        };
         assert_eq!(
             active_frame_after, 0,
             "moving a frame from before to after the active index shifts the uninvolved active index back by one"
@@ -267,12 +371,29 @@ mod tests {
     #[test]
     fn duplicate_frame_inserts_a_deep_clone_immediately_after_the_source() {
         let mut doc = Document::new(3, 3);
-        doc.set_cell(0, 0, 0, Cell { ch: 'D', ..Cell::BLANK });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: 'D',
+                ..Cell::BLANK
+            },
+        );
 
         let edit = duplicate_frame(&doc, 0).unwrap();
-        let Edit::AddFrame { index, ref frame, .. } = edit else { panic!("expected AddFrame") };
+        let Edit::AddFrame {
+            index, ref frame, ..
+        } = edit
+        else {
+            panic!("expected AddFrame")
+        };
         assert_eq!(index, 1, "the clone lands immediately after the source");
-        assert_eq!(frame.layers[0].cells()[0].ch, 'D', "the clone carries the source's content");
+        assert_eq!(
+            frame.layers[0].cells()[0].ch,
+            'D',
+            "the clone carries the source's content"
+        );
 
         let mut history = History::new();
         history.apply(&mut doc, edit);
@@ -294,8 +415,17 @@ mod tests {
 
         let started = std::time::Instant::now();
         let result = add_frame(&doc, 0, blank(2, 2));
-        assert!(started.elapsed() < std::time::Duration::from_millis(200), "must reject before allocating, not after");
-        assert_eq!(result, Err(FrameOpError::TooManyFrames { found: Document::MAX_FRAMES + 1, max: Document::MAX_FRAMES }));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "must reject before allocating, not after"
+        );
+        assert_eq!(
+            result,
+            Err(FrameOpError::TooManyFrames {
+                found: Document::MAX_FRAMES + 1,
+                max: Document::MAX_FRAMES
+            })
+        );
     }
 
     #[test]
@@ -304,11 +434,16 @@ mod tests {
         // that makes one additional MAX_LAYERS-sized frame exceed MAX_TOTAL_CELLS.
         let doc = Document::new(Document::MAX_WIDTH, Document::MAX_HEIGHT);
         let big_frame = Frame {
-            layers: (0..Document::MAX_LAYERS).map(|_| Layer::blank(Document::MAX_WIDTH, Document::MAX_HEIGHT)).collect(),
+            layers: (0..Document::MAX_LAYERS)
+                .map(|_| Layer::blank(Document::MAX_WIDTH, Document::MAX_HEIGHT))
+                .collect(),
             duration_override: None,
         };
         let result = add_frame(&doc, 1, big_frame);
-        assert!(matches!(result, Err(FrameOpError::TotalCellBudgetExceeded { .. })));
+        assert!(matches!(
+            result,
+            Err(FrameOpError::TotalCellBudgetExceeded { .. })
+        ));
     }
 
     /// `add_frame` must refuse a single frame whose own layer count exceeds `MAX_LAYERS`,
@@ -318,13 +453,18 @@ mod tests {
     fn add_frame_with_more_layers_than_max_layers_is_rejected() {
         let doc = Document::new(2, 2);
         let over_max = Frame {
-            layers: (0..=Document::MAX_LAYERS).map(|_| Layer::blank(2, 2)).collect(),
+            layers: (0..=Document::MAX_LAYERS)
+                .map(|_| Layer::blank(2, 2))
+                .collect(),
             duration_override: None,
         };
         let result = add_frame(&doc, 1, over_max);
         assert_eq!(
             result,
-            Err(FrameOpError::TooManyLayers { found: Document::MAX_LAYERS + 1, max: Document::MAX_LAYERS })
+            Err(FrameOpError::TooManyLayers {
+                found: Document::MAX_LAYERS + 1,
+                max: Document::MAX_LAYERS
+            })
         );
     }
 
@@ -338,7 +478,8 @@ mod tests {
     fn add_frame_over_the_total_cell_budget_accounts_for_existing_frames_own_multi_layer_counts() {
         let mut doc = Document::new(Document::MAX_WIDTH, Document::MAX_HEIGHT);
         let mut history = History::new();
-        let add_frame_edit = add_frame(&doc, 1, blank(Document::MAX_WIDTH, Document::MAX_HEIGHT)).unwrap();
+        let add_frame_edit =
+            add_frame(&doc, 1, blank(Document::MAX_WIDTH, Document::MAX_HEIGHT)).unwrap();
         history.apply(&mut doc, add_frame_edit);
         // Adds one layer to EVERY frame at once (add_layer's uniform-across-frames contract): 2
         // frames now carry 2 layers each, 4 real layers total.
@@ -351,12 +492,20 @@ mod tests {
         // 253 extra layers: (4 existing + 253) * WH exceeds MAX_TOTAL_CELLS, but (2 "frame count" +
         // 253) * WH would not — this only rejects if the sum counts real layers, not frames.
         let extra = Frame {
-            layers: (0..253).map(|_| Layer::blank(Document::MAX_WIDTH, Document::MAX_HEIGHT)).collect(),
+            layers: (0..253)
+                .map(|_| Layer::blank(Document::MAX_WIDTH, Document::MAX_HEIGHT))
+                .collect(),
             duration_override: None,
         };
         let result = add_frame(&doc, 1, extra);
-        assert!(matches!(result, Err(FrameOpError::TotalCellBudgetExceeded { .. })), "got {result:?}");
-        assert_eq!(doc, before, "a rejected add_frame must leave the document completely unmodified");
+        assert!(
+            matches!(result, Err(FrameOpError::TotalCellBudgetExceeded { .. })),
+            "got {result:?}"
+        );
+        assert_eq!(
+            doc, before,
+            "a rejected add_frame must leave the document completely unmodified"
+        );
     }
 
     #[test]

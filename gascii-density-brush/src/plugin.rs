@@ -1,6 +1,9 @@
 use egui::{Ui, Vec2};
 use gascii_core::{Buildup, DensityBrush, DensityMode, Fixed, Ramp};
-use gascii_plugin_api::{OptionsGeom, PanelOutcome, Plugin, PluginDescriptor, PluginHost, PluginToolCapabilities, ToolCtxPatch};
+use gascii_plugin_api::{
+    OptionsGeom, PanelOutcome, Plugin, PluginDescriptor, PluginHost, PluginToolCapabilities,
+    ToolCtxPatch,
+};
 
 use crate::icon::BRUSH_ICON;
 use crate::theme;
@@ -154,7 +157,13 @@ impl Plugin for BrushPlugin {
     /// Ramp, intensity mode/level and the pressure toggle — app-global state both bindings' brushes
     /// share, shown once whichever binding holds the Brush (`sidebar::binding_options_geom`'s
     /// plugin-slot dedup, not this method, is what guarantees "once").
-    fn options_ui(&mut self, tool_name: &str, ui: &mut Ui, geom: OptionsGeom, host: &dyn PluginHost) {
+    fn options_ui(
+        &mut self,
+        tool_name: &str,
+        ui: &mut Ui,
+        geom: OptionsGeom,
+        host: &dyn PluginHost,
+    ) {
         if tool_name != BRUSH {
             return;
         }
@@ -162,8 +171,12 @@ impl Plugin for BrushPlugin {
         widgets::micro_label(ui, "BRUSH");
 
         let mut ramp = self.active_ramp;
-        let names: Vec<(usize, &str)> =
-            self.ramps.iter().enumerate().map(|(i, r)| (i, ramp_label(r.name))).collect();
+        let names: Vec<(usize, &str)> = self
+            .ramps
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (i, ramp_label(r.name)))
+            .collect();
         if widgets::segmented(ui, &mut ramp, &names, false) {
             self.active_ramp = ramp;
         }
@@ -231,7 +244,13 @@ impl Plugin for BrushPlugin {
     /// playback clock needs `tick` even while a field has focus, so the gate moved here) — pressing
     /// a digit implicitly switches into Fixed mode at that level even if Buildup was active, since
     /// reaching for a number key expresses "I want this exact intensity now."
-    fn tick(&mut self, ui: &mut Ui, focused: bool, _resumed_after_suppression: bool, host: &dyn PluginHost) -> PanelOutcome {
+    fn tick(
+        &mut self,
+        ui: &mut Ui,
+        focused: bool,
+        _resumed_after_suppression: bool,
+        host: &dyn PluginHost,
+    ) -> PanelOutcome {
         // No cross-frame key-hold state of its own (each digit key is a one-shot press, not a
         // hold) — nothing here can go stale across a modal suppression window, unlike gascii-anim's
         // Space hold, so `_resumed_after_suppression` is deliberately unused.
@@ -239,7 +258,10 @@ impl Plugin for BrushPlugin {
             return PanelOutcome::default();
         }
         let level = ui.input_mut(|i| {
-            DIGIT_KEY_LEVELS.iter().find(|&&(key, _)| i.consume_key(egui::Modifiers::NONE, key)).map(|&(_, level)| level)
+            DIGIT_KEY_LEVELS
+                .iter()
+                .find(|&&(key, _)| i.consume_key(egui::Modifiers::NONE, key))
+                .map(|&(_, level)| level)
         });
         if let Some(level) = level {
             self.density_mode = DensityMode::Fixed(Fixed(level));
@@ -277,7 +299,11 @@ mod tests {
     }
     impl FakeHost {
         fn new(stylus: bool, bound: bool) -> Self {
-            Self { stylus, bound, doc: gascii_core::Document::default_document() }
+            Self {
+                stylus,
+                bound,
+                doc: gascii_core::Document::default_document(),
+            }
         }
     }
     impl PluginHost for FakeHost {
@@ -296,7 +322,13 @@ mod tests {
     }
 
     fn geom() -> OptionsGeom {
-        OptionsGeom { stepper_h: 26.0, shape_indent: 0.0, item_spacing_y: Some(6.0), inline_controls: false, slider_h: 20.0 }
+        OptionsGeom {
+            stepper_h: 26.0,
+            shape_indent: 0.0,
+            item_spacing_y: Some(6.0),
+            inline_controls: false,
+            slider_h: 20.0,
+        }
     }
 
     /// The merged tool row must carry exactly the pre-migration literal `ToolDef` row's capability
@@ -308,7 +340,10 @@ mod tests {
         let r = &rows[0];
         assert_eq!(r.name, "Brush");
         assert_eq!(r.key, egui::Key::B);
-        assert!(!r.icon.is_empty(), "Brush must carry its own icon now that icons live per-row");
+        assert!(
+            !r.icon.is_empty(),
+            "Brush must carry its own icon now that icons live per-row"
+        );
         assert!(r.sized);
         assert!(!r.holds_session);
         assert!(r.shows_hover);
@@ -327,7 +362,10 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].keys, &DIGIT_KEYS);
         for &(key, _) in &DIGIT_KEY_LEVELS {
-            assert!(rows[0].keys.contains(&key), "{key:?} must be in the declared shortcut's keys");
+            assert!(
+                rows[0].keys.contains(&key),
+                "{key:?} must be in the declared shortcut's keys"
+            );
         }
     }
 
@@ -355,7 +393,10 @@ mod tests {
         assert!(p.tool_ctx_patch("Pencil").is_none());
         let patch = p.tool_ctx_patch("Brush").expect("Brush wants a ctx patch");
         assert!(matches!(patch.density, Some(DensityMode::Fixed(_))));
-        assert_eq!(patch.ramp, Some(gascii_core::builtin_ramps()[1].chars.clone()));
+        assert_eq!(
+            patch.ramp,
+            Some(gascii_core::builtin_ramps()[1].chars.clone())
+        );
     }
 
     /// `tick` must only react while Brush is actually bound, and must switch into Fixed mode at the
@@ -375,8 +416,13 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         });
-        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, false, &FakeHost::new(false, false)); });
-        assert!(matches!(p.density_mode(), DensityMode::Buildup(_)), "unbound tick must not react");
+        let _ = ctx.run_ui(raw, |ui| {
+            p.tick(ui, false, false, &FakeHost::new(false, false));
+        });
+        assert!(
+            matches!(p.density_mode(), DensityMode::Buildup(_)),
+            "unbound tick must not react"
+        );
 
         let mut raw = egui::RawInput::default();
         raw.events.push(egui::Event::Key {
@@ -386,7 +432,9 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         });
-        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, false, false, &FakeHost::new(false, true)); });
+        let _ = ctx.run_ui(raw, |ui| {
+            p.tick(ui, false, false, &FakeHost::new(false, true));
+        });
         match p.density_mode() {
             DensityMode::Fixed(Fixed(level)) => assert!((level - 0.5).abs() < 1e-4),
             other => panic!("expected Fixed(0.5), got {other:?}"),
@@ -410,8 +458,13 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         });
-        let _ = ctx.run_ui(raw, |ui| { p.tick(ui, true, false, &FakeHost::new(false, true)); });
-        assert!(matches!(p.density_mode(), DensityMode::Buildup(_)), "a focused tick must not react even while bound");
+        let _ = ctx.run_ui(raw, |ui| {
+            p.tick(ui, true, false, &FakeHost::new(false, true));
+        });
+        assert!(
+            matches!(p.density_mode(), DensityMode::Buildup(_)),
+            "a focused tick must not react even while bound"
+        );
     }
 
     /// `pressure_override_enabled` must answer only for Brush's own name, and must reflect the
@@ -423,7 +476,10 @@ mod tests {
         assert!(!p.pressure_override_enabled("Pencil"));
         p.set_pressure_enabled(true);
         assert!(p.pressure_override_enabled(BRUSH));
-        assert!(!p.pressure_override_enabled("Pencil"), "must not answer for a foreign tool name");
+        assert!(
+            !p.pressure_override_enabled("Pencil"),
+            "must not answer for a foreign tool name"
+        );
     }
 
     /// `options_ui` must be a true no-op for any tool name other than Brush's own — the guard every
@@ -437,6 +493,10 @@ mod tests {
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             p.options_ui("Pencil", ui, geom(), &host);
         });
-        assert_eq!(p.active_ramp(), 1, "a foreign tool name must not touch this plugin's own state");
+        assert_eq!(
+            p.active_ramp(),
+            1,
+            "a foreign tool name must not touch this plugin's own state"
+        );
     }
 }

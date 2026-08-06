@@ -98,16 +98,21 @@ pub(crate) struct ChordDef {
 /// in.
 pub(crate) const CHORDS: &[ChordDef] = &[
     ChordDef {
-        id: ChordId::Redo, name: "Redo",
+        id: ChordId::Redo,
+        name: "Redo",
         label: "Ctrl+Shift+Z / Ctrl+Y",
         keys: &[
-            (egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT), egui::Key::Z),
+            (
+                egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+                egui::Key::Z,
+            ),
             (egui::Modifiers::COMMAND, egui::Key::Y),
         ],
         dispatch: ChordDispatch::HandWritten,
     },
     ChordDef {
-        id: ChordId::Undo, name: "Undo",
+        id: ChordId::Undo,
+        name: "Undo",
         label: "Ctrl+Z",
         keys: &[(egui::Modifiers::COMMAND, egui::Key::Z)],
         dispatch: ChordDispatch::HandWritten,
@@ -116,119 +121,174 @@ pub(crate) const CHORDS: &[ChordDef] = &[
     // same reason Redo precedes Undo above: `matches_logically` ignores the extra Shift, so
     // checking Save first would swallow SaveAs's own S key press.
     ChordDef {
-        id: ChordId::SaveAs, name: "Save As",
+        id: ChordId::SaveAs,
+        name: "Save As",
         label: "Ctrl+Shift+S",
-        keys: &[(egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT), egui::Key::S)],
+        keys: &[(
+            egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+            egui::Key::S,
+        )],
         dispatch: ChordDispatch::GenericAlways,
     },
     ChordDef {
-        id: ChordId::Save, name: "Save",
+        id: ChordId::Save,
+        name: "Save",
         label: "Ctrl+S",
         keys: &[(egui::Modifiers::COMMAND, egui::Key::S)],
         dispatch: ChordDispatch::GenericAlways,
     },
     ChordDef {
-        id: ChordId::ExportDialog, name: "Export...",
+        id: ChordId::ExportDialog,
+        name: "Export...",
         label: "Ctrl+Shift+E",
-        keys: &[(egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT), egui::Key::E)],
+        keys: &[(
+            egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
+            egui::Key::E,
+        )],
         dispatch: ChordDispatch::GenericAlways,
     },
     ChordDef {
-        id: ChordId::Fit, name: "Fit to Window",
+        id: ChordId::Fit,
+        name: "Fit to Window",
         label: "Ctrl+0",
         keys: &[(egui::Modifiers::COMMAND, egui::Key::Num0)],
         dispatch: ChordDispatch::GenericAlways,
     },
     ChordDef {
-        id: ChordId::SwapColors, name: "Swap Colors",
+        id: ChordId::SwapColors,
+        name: "Swap Colors",
         label: "X",
         keys: &[(egui::Modifiers::NONE, egui::Key::X)],
         dispatch: ChordDispatch::GenericUnfocused,
     },
-    ChordDef { id: ChordId::Copy, name: "Copy Selection", label: "Ctrl+C", keys: &[], dispatch: ChordDispatch::HandWritten },
-    ChordDef { id: ChordId::CopyAll, name: "Copy All as Text", label: "Ctrl+Shift+C", keys: &[], dispatch: ChordDispatch::HandWritten },
-    ChordDef { id: ChordId::Paste, name: "Paste", label: "Ctrl+V", keys: &[], dispatch: ChordDispatch::HandWritten },
     ChordDef {
-        id: ChordId::ZoomIn, name: "Zoom In",
-        label: "+ / =",
-        keys: &[(egui::Modifiers::NONE, egui::Key::Plus), (egui::Modifiers::NONE, egui::Key::Equals)],
+        id: ChordId::Copy,
+        name: "Copy Selection",
+        label: "Ctrl+C",
+        keys: &[],
         dispatch: ChordDispatch::HandWritten,
     },
     ChordDef {
-        id: ChordId::ZoomOut, name: "Zoom Out",
+        id: ChordId::CopyAll,
+        name: "Copy All as Text",
+        label: "Ctrl+Shift+C",
+        keys: &[],
+        dispatch: ChordDispatch::HandWritten,
+    },
+    ChordDef {
+        id: ChordId::Paste,
+        name: "Paste",
+        label: "Ctrl+V",
+        keys: &[],
+        dispatch: ChordDispatch::HandWritten,
+    },
+    ChordDef {
+        id: ChordId::ZoomIn,
+        name: "Zoom In",
+        label: "+ / =",
+        keys: &[
+            (egui::Modifiers::NONE, egui::Key::Plus),
+            (egui::Modifiers::NONE, egui::Key::Equals),
+        ],
+        dispatch: ChordDispatch::HandWritten,
+    },
+    ChordDef {
+        id: ChordId::ZoomOut,
+        name: "Zoom Out",
         label: "\u{2212}", // U+2212 MINUS SIGN — matches the View menu's own literal glyph
         keys: &[(egui::Modifiers::NONE, egui::Key::Minus)],
         dispatch: ChordDispatch::HandWritten,
     },
     ChordDef {
-        id: ChordId::ShrinkStamp, name: "Shrink Stamp",
+        id: ChordId::ShrinkStamp,
+        name: "Shrink Stamp",
         label: "[",
         keys: &[(egui::Modifiers::NONE, egui::Key::OpenBracket)],
         dispatch: ChordDispatch::HandWritten,
     },
     ChordDef {
-        id: ChordId::GrowStamp, name: "Grow Stamp",
+        id: ChordId::GrowStamp,
+        name: "Grow Stamp",
         label: "]",
         keys: &[(egui::Modifiers::NONE, egui::Key::CloseBracket)],
         dispatch: ChordDispatch::HandWritten,
     },
     ChordDef {
-        id: ChordId::ToggleFullscreen, name: "Toggle Full Screen",
+        id: ChordId::ToggleFullscreen,
+        name: "Toggle Full Screen",
         label: "F11",
         keys: &[(egui::Modifiers::NONE, egui::Key::F11)],
         dispatch: ChordDispatch::HandWritten,
     },
     ChordDef {
-        id: ChordId::ExitFullscreenEscape, name: "Exit Full Screen",
+        id: ChordId::ExitFullscreenEscape,
+        name: "Exit Full Screen",
         label: "Escape",
         keys: &[(egui::Modifiers::NONE, egui::Key::Escape)],
         dispatch: ChordDispatch::HandWritten,
     },
     ChordDef {
-        id: ChordId::New, name: "New Document",
+        id: ChordId::New,
+        name: "New Document",
         label: "Ctrl+N",
         keys: &[(egui::Modifiers::COMMAND, egui::Key::N)],
         dispatch: ChordDispatch::GenericAlways,
     },
     ChordDef {
-        id: ChordId::Open, name: "Open...",
+        id: ChordId::Open,
+        name: "Open...",
         label: "Ctrl+O",
         keys: &[(egui::Modifiers::COMMAND, egui::Key::O)],
         dispatch: ChordDispatch::GenericAlways,
     },
     ChordDef {
-        id: ChordId::ZoomInAlias, name: "Zoom In",
+        id: ChordId::ZoomInAlias,
+        name: "Zoom In",
         label: "Ctrl+=",
-        keys: &[(egui::Modifiers::COMMAND, egui::Key::Equals), (egui::Modifiers::COMMAND, egui::Key::Plus)],
+        keys: &[
+            (egui::Modifiers::COMMAND, egui::Key::Equals),
+            (egui::Modifiers::COMMAND, egui::Key::Plus),
+        ],
         dispatch: ChordDispatch::GenericAlways,
     },
     ChordDef {
-        id: ChordId::ZoomOutAlias, name: "Zoom Out",
+        id: ChordId::ZoomOutAlias,
+        name: "Zoom Out",
         label: "Ctrl+\u{2212}",
         keys: &[(egui::Modifiers::COMMAND, egui::Key::Minus)],
         dispatch: ChordDispatch::GenericAlways,
     },
     ChordDef {
-        id: ChordId::ToggleGrid, name: "Toggle Grid",
+        id: ChordId::ToggleGrid,
+        name: "Toggle Grid",
         label: "G",
         keys: &[(egui::Modifiers::NONE, egui::Key::G)],
         dispatch: ChordDispatch::GenericUnfocused,
     },
     ChordDef {
-        id: ChordId::SelectAll, name: "Select All",
+        id: ChordId::SelectAll,
+        name: "Select All",
         label: "Ctrl+A",
         keys: &[(egui::Modifiers::COMMAND, egui::Key::A)],
         dispatch: ChordDispatch::HandWritten,
     },
-    ChordDef { id: ChordId::Cut, name: "Cut", label: "Ctrl+X", keys: &[], dispatch: ChordDispatch::HandWritten },
     ChordDef {
-        id: ChordId::Duplicate, name: "Duplicate Selection",
+        id: ChordId::Cut,
+        name: "Cut",
+        label: "Ctrl+X",
+        keys: &[],
+        dispatch: ChordDispatch::HandWritten,
+    },
+    ChordDef {
+        id: ChordId::Duplicate,
+        name: "Duplicate Selection",
         label: "Ctrl+D",
         keys: &[(egui::Modifiers::COMMAND, egui::Key::D)],
         dispatch: ChordDispatch::HandWritten,
     },
     ChordDef {
-        id: ChordId::HelpOverlay, name: "Keyboard Shortcuts",
+        id: ChordId::HelpOverlay,
+        name: "Keyboard Shortcuts",
         label: "?",
         keys: &[(egui::Modifiers::NONE, egui::Key::Questionmark)],
         dispatch: ChordDispatch::GenericUnfocused,
@@ -240,7 +300,11 @@ pub(crate) const CHORDS: &[ChordDef] = &[
 /// actually says it is. Linear scan: the table is small (under 20 rows) and this only ever runs
 /// while building UI, never on a hot path.
 pub(crate) fn chord_label(id: ChordId) -> &'static str {
-    CHORDS.iter().find(|c| c.id == id).expect("every ChordId has a CHORDS row").label
+    CHORDS
+        .iter()
+        .find(|c| c.id == id)
+        .expect("every ChordId has a CHORDS row")
+        .label
 }
 
 /// Every `(name, label)` pair in `CHORDS`, in table order — the `?` overlay's one source for the
@@ -266,19 +330,29 @@ pub(crate) fn chord_rows() -> impl Iterator<Item = (&'static str, &'static str)>
 ///   toggles, so they consume ignoring key-repeat: holding the key down must fire the toggle once,
 ///   not flicker it on every OS-generated repeat. `GenericAlways`'s rows are one-shot actions
 ///   (Save, zoom, …) where a stray repeat is harmless, so they keep ordinary consumption.
-pub(crate) fn consume_generic_chords(i: &mut egui::InputState, gate: ChordDispatch) -> Vec<ChordId> {
+pub(crate) fn consume_generic_chords(
+    i: &mut egui::InputState,
+    gate: ChordDispatch,
+) -> Vec<ChordId> {
     let alt_held = i.modifiers.alt;
     let ignore_repeats = gate == ChordDispatch::GenericUnfocused;
     CHORDS
         .iter()
         .filter(|c| c.dispatch == gate)
         .filter_map(|c| {
-            assert!(!c.keys.is_empty(), "a GenericAlways/GenericUnfocused row always carries real keys");
+            assert!(
+                !c.keys.is_empty(),
+                "a GenericAlways/GenericUnfocused row always carries real keys"
+            );
             let fired = c.keys.iter().any(|&(modifiers, key)| {
                 if modifiers.contains(egui::Modifiers::COMMAND) && alt_held {
                     return false;
                 }
-                if ignore_repeats { consume_key_no_repeat(i, modifiers, key) } else { i.consume_key(modifiers, key) }
+                if ignore_repeats {
+                    consume_key_no_repeat(i, modifiers, key)
+                } else {
+                    i.consume_key(modifiers, key)
+                }
             });
             fired.then_some(c.id)
         })
@@ -290,7 +364,11 @@ pub(crate) fn consume_generic_chords(i: &mut egui::InputState, gate: ChordDispat
 /// initial press, not re-fire (and flicker the toggled state) on every repeat while it's held.
 /// Mirrors `InputState::count_and_consume_key`'s own removal semantics (retain non-matches, count
 /// the rest), just with `repeat: false` added to the match.
-pub(crate) fn consume_key_no_repeat(i: &mut egui::InputState, modifiers: egui::Modifiers, key: egui::Key) -> bool {
+pub(crate) fn consume_key_no_repeat(
+    i: &mut egui::InputState,
+    modifiers: egui::Modifiers,
+    key: egui::Key,
+) -> bool {
     let mut consumed = false;
     i.events.retain(|event| {
         let is_match = matches!(
@@ -314,7 +392,9 @@ pub(crate) fn consume_key_no_repeat(i: &mut egui::InputState, modifiers: egui::M
 /// `key_claims` folds into the same claim set from a different source.
 pub(crate) fn reserved_chord_keys() -> impl Iterator<Item = (egui::Key, &'static str)> + 'static {
     CHORDS.iter().flat_map(|c| {
-        c.keys.iter().filter_map(|&(m, k)| (m == egui::Modifiers::NONE).then_some((k, c.name)))
+        c.keys
+            .iter()
+            .filter_map(|&(m, k)| (m == egui::Modifiers::NONE).then_some((k, c.name)))
     })
 }
 
@@ -369,7 +449,10 @@ mod tests {
         assert_eq!(rows.len(), CHORDS.len());
         assert_eq!(rows[0], ("Redo", "Ctrl+Shift+Z / Ctrl+Y"));
         assert!(rows.contains(&("Save", "Ctrl+S")));
-        assert!(!rows.iter().any(|(name, _)| name.is_empty()), "every chord must have a real display name");
+        assert!(
+            !rows.iter().any(|(name, _)| name.is_empty()),
+            "every chord must have a real display name"
+        );
     }
 
     /// Every `GenericAlways`/`GenericUnfocused` row must carry at least one key pattern — a row
@@ -377,8 +460,16 @@ mod tests {
     /// iterate in `consume_generic_chords`'s `any`).
     #[test]
     fn every_generic_row_carries_at_least_one_key_pattern() {
-        for c in CHORDS.iter().filter(|c| c.dispatch != ChordDispatch::HandWritten) {
-            assert!(!c.keys.is_empty(), "{:?} ({}) has an empty keys slice", c.id, c.name);
+        for c in CHORDS
+            .iter()
+            .filter(|c| c.dispatch != ChordDispatch::HandWritten)
+        {
+            assert!(
+                !c.keys.is_empty(),
+                "{:?} ({}) has an empty keys slice",
+                c.id,
+                c.name
+            );
         }
     }
 
@@ -387,10 +478,20 @@ mod tests {
     /// no longer asserted here — it moved to a `PluginShortcut` declaration in `gascii-anim`.
     #[test]
     fn reserved_chord_keys_covers_every_none_modifier_row_and_nothing_else() {
-        let reserved: std::collections::HashSet<egui::Key> = reserved_chord_keys().map(|(k, _)| k).collect();
-        assert!(reserved.contains(&egui::Key::X), "SwapColors (X) must be reserved");
-        assert!(reserved.contains(&egui::Key::F11), "ToggleFullscreen (F11) must be reserved");
-        assert!(reserved.contains(&egui::Key::Escape), "ExitFullscreenEscape (Escape) must be reserved");
+        let reserved: std::collections::HashSet<egui::Key> =
+            reserved_chord_keys().map(|(k, _)| k).collect();
+        assert!(
+            reserved.contains(&egui::Key::X),
+            "SwapColors (X) must be reserved"
+        );
+        assert!(
+            reserved.contains(&egui::Key::F11),
+            "ToggleFullscreen (F11) must be reserved"
+        );
+        assert!(
+            reserved.contains(&egui::Key::Escape),
+            "ExitFullscreenEscape (Escape) must be reserved"
+        );
         assert!(
             !reserved.contains(&egui::Key::S),
             "Save is Ctrl+S (COMMAND modifier), not a bare key — must not be reserved"
@@ -400,9 +501,16 @@ mod tests {
     /// D-7: the bare `=` key is now reserved as a Zoom In alias alongside `+`.
     #[test]
     fn equals_is_reserved_as_a_zoom_in_alias() {
-        let reserved: std::collections::HashSet<egui::Key> = reserved_chord_keys().map(|(k, _)| k).collect();
-        assert!(reserved.contains(&egui::Key::Equals), "= must be reserved as a Zoom In alias");
-        assert!(reserved.contains(&egui::Key::Plus), "+ must still be reserved as Zoom In's primary key");
+        let reserved: std::collections::HashSet<egui::Key> =
+            reserved_chord_keys().map(|(k, _)| k).collect();
+        assert!(
+            reserved.contains(&egui::Key::Equals),
+            "= must be reserved as a Zoom In alias"
+        );
+        assert!(
+            reserved.contains(&egui::Key::Plus),
+            "+ must still be reserved as Zoom In's primary key"
+        );
     }
 
     #[test]
@@ -431,8 +539,16 @@ mod tests {
                 fired_unfocused = consume_generic_chords(i, ChordDispatch::GenericUnfocused);
             });
         });
-        assert_eq!(fired_always, vec![ChordId::Save], "only the GenericAlways row (Ctrl+S) should fire here");
-        assert_eq!(fired_unfocused, vec![ChordId::SwapColors], "only the GenericUnfocused row (X) should fire here");
+        assert_eq!(
+            fired_always,
+            vec![ChordId::Save],
+            "only the GenericAlways row (Ctrl+S) should fire here"
+        );
+        assert_eq!(
+            fired_unfocused,
+            vec![ChordId::SwapColors],
+            "only the GenericUnfocused row (X) should fire here"
+        );
     }
 
     /// `Open`/`SaveAs` dispatch through `handle_keys` opens a real native `rfd::FileDialog` — not
@@ -443,7 +559,10 @@ mod tests {
     #[test]
     fn open_and_save_as_fire_through_the_generic_always_gate() {
         let ctx = egui::Context::default();
-        let mut raw = egui::RawInput { modifiers: egui::Modifiers::COMMAND, ..Default::default() };
+        let mut raw = egui::RawInput {
+            modifiers: egui::Modifiers::COMMAND,
+            ..Default::default()
+        };
         raw.events.push(egui::Event::Key {
             key: egui::Key::O,
             physical_key: None,
@@ -452,7 +571,9 @@ mod tests {
             modifiers: egui::Modifiers::COMMAND,
         });
         let mut fired = Vec::new();
-        let _ = ctx.run_ui(raw, |ui| ui.input_mut(|i| fired = consume_generic_chords(i, ChordDispatch::GenericAlways)));
+        let _ = ctx.run_ui(raw, |ui| {
+            ui.input_mut(|i| fired = consume_generic_chords(i, ChordDispatch::GenericAlways))
+        });
         assert_eq!(fired, vec![ChordId::Open]);
 
         let ctx = egui::Context::default();
@@ -468,7 +589,9 @@ mod tests {
             modifiers: egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
         });
         let mut fired = Vec::new();
-        let _ = ctx.run_ui(raw, |ui| ui.input_mut(|i| fired = consume_generic_chords(i, ChordDispatch::GenericAlways)));
+        let _ = ctx.run_ui(raw, |ui| {
+            ui.input_mut(|i| fired = consume_generic_chords(i, ChordDispatch::GenericAlways))
+        });
         assert_eq!(fired, vec![ChordId::SaveAs]);
     }
 
@@ -492,7 +615,9 @@ mod tests {
             modifiers: egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT),
         });
         let mut fired = Vec::new();
-        let _ = ctx.run_ui(raw, |ui| ui.input_mut(|i| fired = consume_generic_chords(i, ChordDispatch::GenericAlways)));
+        let _ = ctx.run_ui(raw, |ui| {
+            ui.input_mut(|i| fired = consume_generic_chords(i, ChordDispatch::GenericAlways))
+        });
         assert_eq!(
             fired,
             vec![ChordId::SaveAs],
@@ -508,7 +633,10 @@ mod tests {
     fn altgr_reported_as_ctrl_plus_alt_does_not_fire_a_command_only_chord() {
         let ctrl_alt = egui::Modifiers::COMMAND.plus(egui::Modifiers::ALT);
         let ctx = egui::Context::default();
-        let mut raw = egui::RawInput { modifiers: ctrl_alt, ..Default::default() };
+        let mut raw = egui::RawInput {
+            modifiers: ctrl_alt,
+            ..Default::default()
+        };
         raw.events.push(egui::Event::Key {
             key: egui::Key::O,
             physical_key: None,
@@ -517,11 +645,19 @@ mod tests {
             modifiers: ctrl_alt,
         });
         let mut fired = Vec::new();
-        let _ = ctx.run_ui(raw, |ui| ui.input_mut(|i| fired = consume_generic_chords(i, ChordDispatch::GenericAlways)));
-        assert!(fired.is_empty(), "AltGr's Ctrl+Alt must not fire Open's Ctrl+O pattern");
+        let _ = ctx.run_ui(raw, |ui| {
+            ui.input_mut(|i| fired = consume_generic_chords(i, ChordDispatch::GenericAlways))
+        });
+        assert!(
+            fired.is_empty(),
+            "AltGr's Ctrl+Alt must not fire Open's Ctrl+O pattern"
+        );
 
         let ctx = egui::Context::default();
-        let mut raw = egui::RawInput { modifiers: egui::Modifiers::COMMAND, ..Default::default() };
+        let mut raw = egui::RawInput {
+            modifiers: egui::Modifiers::COMMAND,
+            ..Default::default()
+        };
         raw.events.push(egui::Event::Key {
             key: egui::Key::O,
             physical_key: None,
@@ -530,8 +666,14 @@ mod tests {
             modifiers: egui::Modifiers::COMMAND,
         });
         let mut fired = Vec::new();
-        let _ = ctx.run_ui(raw, |ui| ui.input_mut(|i| fired = consume_generic_chords(i, ChordDispatch::GenericAlways)));
-        assert_eq!(fired, vec![ChordId::Open], "plain Ctrl+O (no Alt) must still fire Open");
+        let _ = ctx.run_ui(raw, |ui| {
+            ui.input_mut(|i| fired = consume_generic_chords(i, ChordDispatch::GenericAlways))
+        });
+        assert_eq!(
+            fired,
+            vec![ChordId::Open],
+            "plain Ctrl+O (no Alt) must still fire Open"
+        );
     }
 
     /// `GenericUnfocused`'s toggle chords (SwapColors/ToggleGrid/HelpOverlay) must ignore
@@ -546,7 +688,13 @@ mod tests {
     fn consume_key_no_repeat_ignores_repeats_but_still_consumes_a_real_press() {
         let ctx = egui::Context::default();
         fn x_press() -> egui::Event {
-            egui::Event::Key { key: egui::Key::X, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }
+            egui::Event::Key {
+                key: egui::Key::X,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }
         }
 
         // Pass 1: a genuine, first-ever press of X fires.
@@ -566,6 +714,9 @@ mod tests {
         let _ = ctx.run_ui(raw, |ui| {
             ui.input_mut(|i| fired = consume_key_no_repeat(i, egui::Modifiers::NONE, egui::Key::X));
         });
-        assert!(!fired, "a key-repeat press must not fire the toggle chord again");
+        assert!(
+            !fired,
+            "a key-repeat press must not fire the toggle chord again"
+        );
     }
 }

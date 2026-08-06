@@ -47,7 +47,12 @@ fn composite_over(src: Rgba, dst: [u8; 4]) -> [u8; 4] {
         let out_c = (sc_f * src_a + dc_f * dst_a * (1.0 - src_a)) / out_a;
         (out_c * 255.0).round().clamp(0.0, 255.0) as u8
     };
-    [mix(src.0, dst[0]), mix(src.1, dst[1]), mix(src.2, dst[2]), (out_a * 255.0).round() as u8]
+    [
+        mix(src.0, dst[0]),
+        mix(src.1, dst[1]),
+        mix(src.2, dst[2]),
+        (out_a * 255.0).round() as u8,
+    ]
 }
 
 /// Standard "over" alpha compositing of `color` (straight alpha) onto `img`'s pixel at `(x,y)`.
@@ -78,17 +83,26 @@ struct PreparedBg {
 /// px_h`, then un-premultiply and bake `opacity` into the alpha channel. `None` whenever the old
 /// inline code would have skipped the blend entirely (a degenerate `fit_cover`).
 fn prepare_bg(src: &image::RgbaImage, opacity: f32, px_w: u32, px_h: u32) -> Option<PreparedBg> {
-    let (ox, oy, w, h) = crate::image_bg::fit_cover(src.width(), src.height(), px_w as f32, px_h as f32)?;
+    let (ox, oy, w, h) =
+        crate::image_bg::fit_cover(src.width(), src.height(), px_w as f32, px_h as f32)?;
     let (fw, fh) = ((w.round() as u32).max(1), (h.round() as u32).max(1));
     let premultiplied = premultiply(src);
-    let resized = image::imageops::resize(&premultiplied, fw, fh, image::imageops::FilterType::Triangle);
+    let resized = image::imageops::resize(
+        &premultiplied,
+        fw,
+        fh,
+        image::imageops::FilterType::Triangle,
+    );
     let mut buf = image::RgbaImage::new(fw, fh);
     for (x, y, px) in resized.enumerate_pixels() {
         let p = unpremultiply(px.0);
         let a = (p[3] as f32 * opacity).round().clamp(0.0, 255.0) as u8;
         buf.put_pixel(x, y, image::Rgba([p[0], p[1], p[2], a]));
     }
-    Some(PreparedBg { offset: (ox.round() as i64, oy.round() as i64), buf })
+    Some(PreparedBg {
+        offset: (ox.round() as i64, oy.round() as i64),
+        buf,
+    })
 }
 
 /// Fixed, per-export assets that used to be rebuilt on every `rasterize_composited` call: the parsed
@@ -108,12 +122,28 @@ pub(crate) struct RasterAssets {
 }
 
 impl RasterAssets {
-    fn prepare(px_w: u32, px_h: u32, cell_px: u32, bg_image: Option<(&image::RgbaImage, f32)>) -> Result<Self, PngExportAppError> {
-        let font = fontdue::Font::from_bytes(crate::fonts::CANVAS_FONT_BYTES, fontdue::FontSettings::default())
-            .map_err(|e| PngExportAppError::Font(e.to_string()))?;
-        let ascent = font.horizontal_line_metrics(cell_px as f32).map(|m| m.ascent).unwrap_or(cell_px as f32 * 0.8);
+    fn prepare(
+        px_w: u32,
+        px_h: u32,
+        cell_px: u32,
+        bg_image: Option<(&image::RgbaImage, f32)>,
+    ) -> Result<Self, PngExportAppError> {
+        let font = fontdue::Font::from_bytes(
+            crate::fonts::CANVAS_FONT_BYTES,
+            fontdue::FontSettings::default(),
+        )
+        .map_err(|e| PngExportAppError::Font(e.to_string()))?;
+        let ascent = font
+            .horizontal_line_metrics(cell_px as f32)
+            .map(|m| m.ascent)
+            .unwrap_or(cell_px as f32 * 0.8);
         let bg = bg_image.and_then(|(src, opacity)| prepare_bg(src, opacity, px_w, px_h));
-        Ok(Self { font, ascent, bg, glyph_cache: std::cell::RefCell::new(std::collections::HashMap::new()) })
+        Ok(Self {
+            font,
+            ascent,
+            bg,
+            glyph_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+        })
     }
 
     /// Rasterized glyph bitmap for `ch` at this asset set's own `cell_px`, built once and reused for
@@ -135,7 +165,8 @@ pub(crate) fn build_raster_assets(
     cell_px: u32,
     bg_image: Option<(&image::RgbaImage, f32)>,
 ) -> Result<RasterAssets, PngExportAppError> {
-    let (px_w, px_h) = validate_png_dimensions(doc.width, doc.height, cell_px).map_err(PngExportAppError::Dimensions)?;
+    let (px_w, px_h) = validate_png_dimensions(doc.width, doc.height, cell_px)
+        .map_err(PngExportAppError::Dimensions)?;
     RasterAssets::prepare(px_w, px_h, cell_px, bg_image)
 }
 
@@ -184,14 +215,21 @@ fn rasterize_frame_stacked(
             if dx < 0 || dy < 0 || dx as u32 >= px_w || dy as u32 >= px_h {
                 continue;
             }
-            blend_pixel(&mut img, dx as u32, dy as u32, Rgba(px.0[0], px.0[1], px.0[2], px.0[3]));
+            blend_pixel(
+                &mut img,
+                dx as u32,
+                dy as u32,
+                Rgba(px.0[0], px.0[1], px.0[2], px.0[3]),
+            );
         }
     }
 
     for layer in visible_layers(doc, frame) {
         for y in 0..doc.height {
             for x in 0..doc.width {
-                let Some(&cell) = doc.cell_at(frame, layer, x, y) else { continue };
+                let Some(&cell) = doc.cell_at(frame, layer, x, y) else {
+                    continue;
+                };
                 let cell_x0 = x as i64 * cell_px as i64;
                 let cell_y0 = y as i64 * cell_px as i64;
 
@@ -209,7 +247,9 @@ fn rasterize_frame_stacked(
                 if cell.ch != ' ' {
                     let (metrics, bitmap) = assets.glyph(cell.ch, cell_px);
                     let origin_x = cell_x0 + metrics.xmin as i64;
-                    let origin_y = cell_y0 + assets.ascent.round() as i64 - metrics.height as i64 - metrics.ymin as i64;
+                    let origin_y = cell_y0 + assets.ascent.round() as i64
+                        - metrics.height as i64
+                        - metrics.ymin as i64;
                     for gy in 0..metrics.height {
                         for gx in 0..metrics.width {
                             let coverage = bitmap[gy * metrics.width + gx];
@@ -228,7 +268,12 @@ fn rasterize_frame_stacked(
                             if a_byte == 0 {
                                 continue;
                             }
-                            blend_pixel(&mut img, px as u32, py as u32, Rgba(cell.fg.0, cell.fg.1, cell.fg.2, a_byte));
+                            blend_pixel(
+                                &mut img,
+                                px as u32,
+                                py as u32,
+                                Rgba(cell.fg.0, cell.fg.1, cell.fg.2, a_byte),
+                            );
                         }
                     }
                 }
@@ -325,10 +370,20 @@ mod tests {
     /// headlessly (unlike an anti-aliased glyph edge, whose coverage — and thus exact color — is a
     /// font-rasterizer implementation detail this test must not depend on).
     #[test]
-    fn a_fully_covered_glyph_pixel_reproduces_the_cells_exact_fg_color_over_a_transparent_background() {
+    fn a_fully_covered_glyph_pixel_reproduces_the_cells_exact_fg_color_over_a_transparent_background(
+    ) {
         let mut doc = doc_with(1, 1);
         let fg = Rgba(10, 20, 30, 255);
-        doc.set_cell(0, 0, 0, Cell { ch: '█', fg, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: '█',
+                fg,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         let bytes = export_png(&doc, 32, None, None).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
         assert!(
@@ -345,7 +400,16 @@ mod tests {
     fn a_corner_pixel_of_an_opaque_background_cell_matches_the_exact_bg_color() {
         let mut doc = doc_with(1, 1);
         let bg = Rgba(10, 20, 30, 255);
-        doc.set_cell(0, 0, 0, Cell { ch: ' ', fg: Rgba::WHITE, bg });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: ' ',
+                fg: Rgba::WHITE,
+                bg,
+            },
+        );
         let bytes = export_png(&doc, 16, None, None).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
         assert_eq!(decoded.get_pixel(0, 0).0, [bg.0, bg.1, bg.2, bg.3]);
@@ -362,11 +426,29 @@ mod tests {
     #[test]
     fn overlapping_glyphs_on_two_layers_both_reach_the_export() {
         let mut doc = doc_with(1, 1);
-        doc.set_cell(0, 0, 0, Cell { ch: '█', fg: Rgba(255, 0, 0, 255), bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: '█',
+                fg: Rgba(255, 0, 0, 255),
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         let mut history = gascii_core::History::new();
         let add = gascii_core::add_layer(&doc, 1).unwrap();
         history.apply(&mut doc, add);
-        doc.set_cell(1, 0, 0, Cell { ch: 'X', fg: Rgba(0, 255, 0, 255), bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            1,
+            0,
+            0,
+            Cell {
+                ch: 'X',
+                fg: Rgba(0, 255, 0, 255),
+                bg: Rgba::TRANSPARENT,
+            },
+        );
 
         let bytes = export_png(&doc, 32, None, None).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
@@ -374,31 +456,61 @@ mod tests {
             decoded.pixels().any(|p| p.0 == [255, 0, 0, 255]),
             "the bottom block's ink must survive wherever the top glyph doesn't cover it"
         );
-        assert!(decoded.pixels().any(|p| p.0[1] > 0), "the top glyph's ink must land on top of the block");
+        assert!(
+            decoded.pixels().any(|p| p.0[1] > 0),
+            "the top glyph's ink must land on top of the block"
+        );
     }
 
     /// Hidden-layer exclusion holds in the stacked export path, not just the flattened composite.
     #[test]
     fn a_hidden_top_layer_is_excluded_from_the_stacked_export() {
         let mut doc = doc_with(1, 1);
-        doc.set_cell(0, 0, 0, Cell { ch: '█', fg: Rgba(255, 0, 0, 255), bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: '█',
+                fg: Rgba(255, 0, 0, 255),
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         let mut history = gascii_core::History::new();
         let add = gascii_core::add_layer(&doc, 1).unwrap();
         history.apply(&mut doc, add);
-        doc.set_cell(1, 0, 0, Cell { ch: 'X', fg: Rgba(0, 255, 0, 255), bg: Rgba::TRANSPARENT });
-        let hide = gascii_core::set_layer_visibility(&doc, 1, false).unwrap().unwrap();
+        doc.set_cell(
+            1,
+            0,
+            0,
+            Cell {
+                ch: 'X',
+                fg: Rgba(0, 255, 0, 255),
+                bg: Rgba::TRANSPARENT,
+            },
+        );
+        let hide = gascii_core::set_layer_visibility(&doc, 1, false)
+            .unwrap()
+            .unwrap();
         history.apply(&mut doc, hide);
 
         let bytes = export_png(&doc, 32, None, None).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
-        assert!(decoded.pixels().all(|p| p.0[1] == 0), "no hidden-layer ink may reach the export");
-        assert!(decoded.pixels().any(|p| p.0 == [255, 0, 0, 255]), "the visible bottom layer still exports");
+        assert!(
+            decoded.pixels().all(|p| p.0[1] == 0),
+            "no hidden-layer ink may reach the export"
+        );
+        assert!(
+            decoded.pixels().any(|p| p.0 == [255, 0, 0, 255]),
+            "the visible bottom layer still exports"
+        );
     }
 
     #[test]
     fn exported_png_dimensions_match_validate_png_dimensions() {
         let doc = doc_with(10, 4);
-        let bytes = export_png(&doc, 16, None, None).expect("export must succeed for a small document");
+        let bytes =
+            export_png(&doc, 16, None, None).expect("export must succeed for a small document");
         let decoded = image::load_from_memory(&bytes).expect("must decode as a valid image");
         let (expected_w, expected_h) = validate_png_dimensions(doc.width, doc.height, 16).unwrap();
         assert_eq!(decoded.width(), expected_w);
@@ -410,7 +522,10 @@ mod tests {
         let doc = doc_with(4, 4);
         let bytes = export_png(&doc, 8, None, None).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
-        assert!(decoded.pixels().all(|p| p.0[3] == 0), "an all-blank document must export fully transparent");
+        assert!(
+            decoded.pixels().all(|p| p.0[3] == 0),
+            "an all-blank document must export fully transparent"
+        );
     }
 
     /// `opaque_bg` pre-fills every pixel before compositing — a blank document with a non-
@@ -435,7 +550,16 @@ mod tests {
     #[test]
     fn rasterize_frame_rgba8_of_the_active_frame_matches_rasterize_rgba8() {
         let mut doc = doc_with(3, 2);
-        doc.set_cell(0, 0, 0, Cell { ch: 'z', fg: Rgba(9, 8, 7, 255), bg: Rgba(1, 2, 3, 200) });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: 'z',
+                fg: Rgba(9, 8, 7, 255),
+                bg: Rgba(1, 2, 3, 200),
+            },
+        );
         let whole = rasterize_rgba8(&doc, 6, None, None).unwrap();
         let explicit = rasterize_frame_rgba8(&doc, doc.active_frame(), 6, None, None).unwrap();
         assert_eq!(whole, explicit);
@@ -459,16 +583,37 @@ mod tests {
     #[test]
     fn a_painted_cell_produces_a_visibly_non_transparent_region() {
         let mut doc = doc_with(1, 1);
-        doc.set_cell(0, 0, 0, Cell { ch: '#', fg: Rgba(255, 255, 255, 255), bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: '#',
+                fg: Rgba(255, 255, 255, 255),
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         let bytes = export_png(&doc, 16, None, None).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
-        assert!(decoded.pixels().any(|p| p.0[3] > 0), "a drawn glyph must rasterize to at least one visible pixel");
+        assert!(
+            decoded.pixels().any(|p| p.0[3] > 0),
+            "a drawn glyph must rasterize to at least one visible pixel"
+        );
     }
 
     #[test]
     fn opaque_background_fills_the_entire_cell() {
         let mut doc = doc_with(1, 1);
-        doc.set_cell(0, 0, 0, Cell { ch: ' ', fg: Rgba::WHITE, bg: Rgba(10, 20, 30, 255) });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: ' ',
+                fg: Rgba::WHITE,
+                bg: Rgba(10, 20, 30, 255),
+            },
+        );
         let bytes = export_png(&doc, 8, None, None).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
         assert!(decoded.pixels().all(|p| p.0 == [10, 20, 30, 255]));
@@ -479,7 +624,8 @@ mod tests {
     // premultiplied-but-stored-straight bug is caught.
 
     #[test]
-    fn partial_alpha_source_over_a_fully_transparent_dest_reproduces_the_sources_own_straight_color() {
+    fn partial_alpha_source_over_a_fully_transparent_dest_reproduces_the_sources_own_straight_color(
+    ) {
         // src_a = 128/255 ≈ 0.502. Un-premultiplying by out_a (== src_a, since dst_a == 0) cancels
         // out exactly, so the stored color must equal the source's own straight RGB — not the
         // source scaled down by its own alpha (the old bug's result would have been [100,50,25,128]).
@@ -527,21 +673,49 @@ mod tests {
     /// the pixel level, not just at the cell-storage level. The "Transparent background" checkbox
     /// checked (`None`) must leave that same newly grown region genuinely transparent instead.
     #[test]
-    fn a_custom_background_grown_into_by_an_anchored_resize_fills_the_new_cells_when_exported_opaque() {
+    fn a_custom_background_grown_into_by_an_anchored_resize_fills_the_new_cells_when_exported_opaque(
+    ) {
         use gascii_core::{AxisAnchor, ResizeAnchor};
 
         let mut doc = doc_with(2, 2);
         doc.background = Rgba(30, 60, 90, 255);
-        doc.set_cell(0, 0, 0, Cell { ch: 'a', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
-        doc.set_cell(0, 1, 1, Cell { ch: 'z', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: 'a',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
+        doc.set_cell(
+            0,
+            1,
+            1,
+            Cell {
+                ch: 'z',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
 
         // Center/Center grow to 6x6: old content lands at (2,2)-(3,3); every other cell is a
         // newly created Blank cell this resize introduced.
-        let anchor = ResizeAnchor { h: AxisAnchor::Center, v: AxisAnchor::Center };
-        let edit = gascii_core::resize_document(&doc, 6, 6, anchor).unwrap().unwrap();
+        let anchor = ResizeAnchor {
+            h: AxisAnchor::Center,
+            v: AxisAnchor::Center,
+        };
+        let edit = gascii_core::resize_document(&doc, 6, 6, anchor)
+            .unwrap()
+            .unwrap();
         let mut history = gascii_core::History::new();
         history.apply(&mut doc, edit);
-        assert_eq!(doc.cell(0, 0, 0), Some(&Cell::BLANK), "sanity: (0,0) is a newly created cell, not old content");
+        assert_eq!(
+            doc.cell(0, 0, 0),
+            Some(&Cell::BLANK),
+            "sanity: (0,0) is a newly created cell, not old content"
+        );
 
         // Opaque export ("Transparent background" unchecked): the app's own convention.
         let opaque_bg = Some(doc.background);
@@ -557,8 +731,14 @@ mod tests {
         // Transparent export ("Transparent background" checked): the same newly-grown region must
         // stay genuinely transparent, not silently pick up the background anyway.
         let transparent_bytes = export_png(&doc, 8, None, None).unwrap();
-        let transparent = image::load_from_memory(&transparent_bytes).unwrap().to_rgba8();
-        assert_eq!(transparent.get_pixel(px, py).0[3], 0, "the same cell must be transparent when opaque_bg is None");
+        let transparent = image::load_from_memory(&transparent_bytes)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(
+            transparent.get_pixel(px, py).0[3],
+            0,
+            "the same cell must be transparent when opaque_bg is None"
+        );
     }
 
     // Export background (Cover) blend tests. Every source used here is a single uniform color, so
@@ -589,7 +769,11 @@ mod tests {
                 "corner ({x},{y}) must be fully covered by the source, not left as a transparent letterbox gap"
             );
         }
-        assert_eq!(decoded.get_pixel(w / 2, h / 2).0, [255, 0, 0, 255], "center pixel must also be the source color");
+        assert_eq!(
+            decoded.get_pixel(w / 2, h / 2).0,
+            [255, 0, 0, 255],
+            "center pixel must also be the source color"
+        );
     }
 
     /// Opacity 0.0 must blend nothing in — the export is byte-identical to the same document
@@ -600,7 +784,10 @@ mod tests {
         let src = uniform_source(4, 1, [255, 0, 0, 255]);
         let with_zero_opacity = export_png(&doc, 8, None, Some((&src, 0.0))).unwrap();
         let without_image = export_png(&doc, 8, None, None).unwrap();
-        assert_eq!(with_zero_opacity, without_image, "opacity 0.0 must produce byte-identical output to no bg_image at all");
+        assert_eq!(
+            with_zero_opacity, without_image,
+            "opacity 0.0 must produce byte-identical output to no bg_image at all"
+        );
     }
 
     /// A fully-opaque cell painted over the covering background image must win at its own pixels —
@@ -609,7 +796,16 @@ mod tests {
     fn a_fully_opaque_cell_wins_over_the_background_image_beneath_it() {
         let mut doc = doc_with(4, 4);
         let cell_color = Rgba(10, 20, 30, 255);
-        doc.set_cell(0, 0, 0, Cell { ch: ' ', fg: Rgba::WHITE, bg: cell_color });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: ' ',
+                fg: Rgba::WHITE,
+                bg: cell_color,
+            },
+        );
         let src = uniform_source(4, 1, [255, 0, 0, 255]);
         let bytes = export_png(&doc, 8, None, Some((&src, 1.0))).unwrap();
         let decoded = image::load_from_memory(&bytes).unwrap().to_rgba8();
@@ -629,7 +825,10 @@ mod tests {
         let degenerate = image::RgbaImage::new(4, 0);
         let bytes = export_png(&doc, 8, None, Some((&degenerate, 1.0))).unwrap();
         let without_image = export_png(&doc, 8, None, None).unwrap();
-        assert_eq!(bytes, without_image, "a degenerate source must be skipped, not panic or partially blend");
+        assert_eq!(
+            bytes, without_image,
+            "a degenerate source must be skipped, not panic or partially blend"
+        );
     }
 
     // `premultiply`/`unpremultiply` regression tests: the two-step's own math, isolated from the
@@ -657,7 +856,8 @@ mod tests {
     }
 
     #[test]
-    fn unpremultiply_of_a_fully_transparent_pixel_is_fully_transparent_black_not_a_divide_by_zero() {
+    fn unpremultiply_of_a_fully_transparent_pixel_is_fully_transparent_black_not_a_divide_by_zero()
+    {
         assert_eq!(unpremultiply([10, 20, 30, 0]), [0, 0, 0, 0]);
     }
 
@@ -675,7 +875,11 @@ mod tests {
         let doc = doc_with(8, 8); // cell_px 8 -> 64x64 px, square
         let mut src = image::RgbaImage::new(8, 8); // square, matches the doc's aspect: identity fit, no crop
         for (x, _y, px) in src.enumerate_pixels_mut() {
-            px.0 = if x < 4 { [0, 255, 0, 255] } else { [255, 0, 0, 0] };
+            px.0 = if x < 4 {
+                [0, 255, 0, 255]
+            } else {
+                [255, 0, 0, 0]
+            };
         }
         let opaque_bg = Rgba(0, 0, 255, 255);
         let bytes = export_png(&doc, 8, Some(opaque_bg), Some((&src, 1.0))).unwrap();
@@ -712,7 +916,11 @@ mod tests {
         let doc = doc_with(8, 4); // cell_px 8 -> 64x32 px
         let mut src = image::RgbaImage::new(8, 2); // wide source: fit_cover(8,2,64,32) crops horizontally
         for (x, _y, px) in src.enumerate_pixels_mut() {
-            px.0 = if x < 4 { [0, 255, 0, 255] } else { [255, 0, 0, 0] };
+            px.0 = if x < 4 {
+                [0, 255, 0, 255]
+            } else {
+                [255, 0, 0, 0]
+            };
         }
         let opaque_bg = Rgba(0, 0, 255, 255);
         let bytes = export_png(&doc, 8, Some(opaque_bg), Some((&src, 1.0))).unwrap();
@@ -720,8 +928,14 @@ mod tests {
 
         // Sanity: fit_cover really does crop here (not an identity fit like the test above).
         let (_ox, _oy, w, h) = crate::image_bg::fit_cover(8, 2, 64.0, 32.0).unwrap();
-        assert!(w > 64.0, "sanity: the fitted width must overflow the doc, forcing a real horizontal crop");
-        assert!((h - 32.0).abs() < 1e-3, "sanity: height fits exactly, only width is cropped");
+        assert!(
+            w > 64.0,
+            "sanity: the fitted width must overflow the doc, forcing a real horizontal crop"
+        );
+        assert!(
+            (h - 32.0).abs() < 1e-3,
+            "sanity: height fits exactly, only width is cropped"
+        );
 
         assert_eq!(
             decoded.get_pixel(8, 16).0,
@@ -748,7 +962,8 @@ mod tests {
     /// three frames whose content differs, so a stale-cache bug (an entry from frame 0 leaking into
     /// frame 1's output) would also be caught.
     #[test]
-    fn a_multi_frame_export_through_shared_raster_assets_is_byte_identical_to_independent_single_frame_rasterizations() {
+    fn a_multi_frame_export_through_shared_raster_assets_is_byte_identical_to_independent_single_frame_rasterizations(
+    ) {
         use gascii_core::{add_frame, History};
 
         let mut doc = doc_with(3, 2);
@@ -760,7 +975,16 @@ mod tests {
         let glyphs = ['a', 'b', 'c'];
         for (i, &ch) in glyphs.iter().enumerate() {
             doc.set_active_frame(i);
-            doc.set_cell(0, 0, 0, Cell { ch, fg: Rgba((i as u8) * 40 + 10, 20, 30, 255), bg: Rgba(1, 2, 3, 200) });
+            doc.set_cell(
+                0,
+                0,
+                0,
+                Cell {
+                    ch,
+                    fg: Rgba((i as u8) * 40 + 10, 20, 30, 255),
+                    bg: Rgba(1, 2, 3, 200),
+                },
+            );
         }
         doc.set_active_frame(0);
 

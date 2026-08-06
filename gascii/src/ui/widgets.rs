@@ -88,7 +88,10 @@ pub fn segmented<T: PartialEq + Copy>(
     let edge = if soft { t.border_soft } else { t.border_strong };
     let font = fonts::ui_medium_id(fonts::size::CONTROL);
 
-    let sizes: Vec<Vec2> = options.iter().map(|(_, label)| measure(ui, label, &font)).collect();
+    let sizes: Vec<Vec2> = options
+        .iter()
+        .map(|(_, label)| measure(ui, label, &font))
+        .collect();
     let widths: Vec<f32> = sizes.iter().map(|s| s.x + SEG_PAD.x * 2.0).collect();
     let row_h = sizes.iter().map(|s| s.y).fold(0.0, f32::max);
     let total = Vec2::new(widths.iter().sum(), row_h + SEG_PAD.y * 2.0);
@@ -106,7 +109,13 @@ pub fn segmented<T: PartialEq + Copy>(
         let resp = ui.interact(seg, group.id.with(i), Sense::click());
         let selected = *value == *opt;
         let fg = cell(&painter, seg, &t, selected, resp.hovered());
-        painter.text(seg.center(), Align2::CENTER_CENTER, *label, font.clone(), fg);
+        painter.text(
+            seg.center(),
+            Align2::CENTER_CENTER,
+            *label,
+            font.clone(),
+            fg,
+        );
         if x > rect.min.x {
             // 1px divider between segments, drawn on the group's own border colour.
             painter.vline(x, seg.y_range(), Stroke::new(1.0, edge));
@@ -134,16 +143,19 @@ pub fn stepper(ui: &mut Ui, value: &mut u16, min: u16, max: u16, h: f32) -> bool
     let before = *value;
 
     let minus = Rect::from_min_size(rect.min, Vec2::new(btn_w, h));
-    let val = Rect::from_min_size(
-        Pos2::new(minus.max.x, rect.min.y),
-        Vec2::new(value_w, h),
-    );
+    let val = Rect::from_min_size(Pos2::new(minus.max.x, rect.min.y), Vec2::new(value_w, h));
     let plus = Rect::from_min_size(Pos2::new(val.max.x, rect.min.y), Vec2::new(btn_w, h));
 
     for (r, label, delta) in [(minus, "–", -1i32), (plus, "+", 1)] {
         let resp = ui.interact(r, group.id.with(label), Sense::click());
         let fg = cell(&painter, r, &t, false, resp.hovered());
-        painter.text(r.center(), Align2::CENTER_CENTER, label, fonts::ui_medium_id(fonts::size::CONTROL), fg);
+        painter.text(
+            r.center(),
+            Align2::CENTER_CENTER,
+            label,
+            fonts::ui_medium_id(fonts::size::CONTROL),
+            fg,
+        );
         if resp.clicked() {
             *value = (*value as i32 + delta).clamp(min as i32, max as i32) as u16;
         }
@@ -209,7 +221,13 @@ pub fn checkbox(ui: &mut Ui, checked: &mut bool, label: &str) -> bool {
     painter.rect_filled(box_rect, 0.0, fill);
     border(&painter, box_rect, t.border_strong);
     if *checked {
-        painter.text(box_rect.center(), Align2::CENTER_CENTER, "✓", fonts::mono_id(fonts::size::CAPTION), t.fg_inverse);
+        painter.text(
+            box_rect.center(),
+            Align2::CENTER_CENTER,
+            "✓",
+            fonts::mono_id(fonts::size::CAPTION),
+            t.fg_inverse,
+        );
     }
     painter.text(
         Pos2::new(box_rect.max.x + 5.0, rect.center().y),
@@ -240,7 +258,13 @@ pub struct Bound {
 ///
 /// The cell inverts for L only. R is shown as a badge alone, because inversion is what marks "the
 /// tool you are drawing with", and every keyboard shortcut and every glyph action targets L.
-pub fn tool_cell(ui: &mut Ui, icon: &[gascii_plugin_api::IconPath], name: &str, bound: Bound, size: Vec2) -> Response {
+pub fn tool_cell(
+    ui: &mut Ui,
+    icon: &[gascii_plugin_api::IconPath],
+    name: &str,
+    bound: Bound,
+    size: Vec2,
+) -> Response {
     let t = tokens(ui);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter().clone();
@@ -319,15 +343,30 @@ pub fn glyph_swatch(ui: &mut Ui, ch: char, selected: bool, size: f32, glyph_px: 
 /// [`glyph_swatch`]: no glyph, no canvas font, just a colour and a border. Selection is a 1px
 /// inset ring rather than inversion — inverting would hide the colour itself, the one thing this
 /// swatch exists to show.
-pub fn color_swatch(ui: &mut Ui, color: Color32, idle_border: Color32, selected: bool, size: f32) -> Response {
+pub fn color_swatch(
+    ui: &mut Ui,
+    color: Color32,
+    idle_border: Color32,
+    selected: bool,
+    size: f32,
+) -> Response {
     let t = tokens(ui);
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     let painter = ui.painter().clone();
     painter.rect_filled(rect, 0.0, color);
-    let edge = if resp.hovered() { t.border_strong } else { idle_border };
+    let edge = if resp.hovered() {
+        t.border_strong
+    } else {
+        idle_border
+    };
     border(&painter, rect, edge);
     if selected {
-        painter.rect_stroke(rect.shrink(3.0), 0.0, Stroke::new(1.0, t.bg_inverse), StrokeKind::Inside);
+        painter.rect_stroke(
+            rect.shrink(3.0),
+            0.0,
+            Stroke::new(1.0, t.bg_inverse),
+            StrokeKind::Inside,
+        );
     }
     resp
 }
@@ -346,7 +385,10 @@ pub fn color_wells(ui: &mut Ui, fg: Color32, bg: Color32, well: f32) -> WellsRes
     let (rect, _) = ui.allocate_exact_size(Vec2::new(span, span), Sense::hover());
     let painter = ui.painter().clone();
 
-    let bg_rect = Rect::from_min_size(rect.min + Vec2::splat(well - WELL_OVERLAP), Vec2::splat(well));
+    let bg_rect = Rect::from_min_size(
+        rect.min + Vec2::splat(well - WELL_OVERLAP),
+        Vec2::splat(well),
+    );
     let fg_rect = Rect::from_min_size(rect.min, Vec2::splat(well));
 
     // FG is interacted with FIRST so it wins the overlapped corner — egui gives the click to the
@@ -360,7 +402,10 @@ pub fn color_wells(ui: &mut Ui, fg: Color32, bg: Color32, well: f32) -> WellsRes
     painter.rect_filled(fg_rect, 0.0, fg);
     border(&painter, fg_rect, t.border_strong);
 
-    WellsResponse { fg: fg_resp, bg: bg_resp }
+    WellsResponse {
+        fg: fg_resp,
+        bg: bg_resp,
+    }
 }
 
 /// The ⇄ swap control that sits beside the wells. Separate from [`color_wells`] so callers can push
@@ -376,7 +421,13 @@ pub fn swap_button(ui: &mut Ui, size: f32) -> bool {
     // `⇄` exists in neither Instrument Sans nor Fragment Mono; the Iosevka backstop on the tail of
     // the chrome font chains is what resolves it.
     let font_px = (size * 0.5).round().max(fonts::size::CONTROL);
-    painter.text(rect.center(), Align2::CENTER_CENTER, "⇄", fonts::mono_id(font_px), fg);
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        "⇄",
+        fonts::mono_id(font_px),
+        fg,
+    );
     resp.on_hover_text("Swap FG/BG (X)").clicked()
 }
 
@@ -387,14 +438,24 @@ pub fn swap_button(ui: &mut Ui, size: f32) -> bool {
 pub fn button(ui: &mut Ui, label: &str, primary: bool, enabled: bool) -> Response {
     let t = tokens(ui);
     let size = button_size(ui, label);
-    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
     let (rect, resp) = ui.allocate_exact_size(size, sense);
     let painter = ui.painter().clone();
 
     if !enabled {
         border(&painter, rect, t.border_soft);
         let font = fonts::ui_medium_id(fonts::size::CONTROL);
-        painter.text(rect.center(), Align2::CENTER_CENTER, label, font, t.fg_secondary);
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            label,
+            font,
+            t.fg_secondary,
+        );
         return resp;
     }
     if primary {
@@ -402,7 +463,13 @@ pub fn button(ui: &mut Ui, label: &str, primary: bool, enabled: bool) -> Respons
     }
     let fg = cell(&painter, rect, &t, primary, resp.hovered());
     border(&painter, rect, t.border_strong);
-    painter.text(rect.center(), Align2::CENTER_CENTER, label, fonts::ui_medium_id(fonts::size::CONTROL), fg);
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        fonts::ui_medium_id(fonts::size::CONTROL),
+        fg,
+    );
     resp
 }
 
@@ -427,7 +494,11 @@ pub fn mini_button(ui: &mut Ui, label: &str, soft: bool) -> bool {
     let painter = ui.painter().clone();
     let fg = cell(&painter, rect, &t, false, resp.hovered());
     if !resp.hovered() {
-        border(&painter, rect, if soft { t.border_soft } else { t.border_strong });
+        border(
+            &painter,
+            rect,
+            if soft { t.border_soft } else { t.border_strong },
+        );
     }
     painter.text(rect.center(), Align2::CENTER_CENTER, label, font, fg);
     resp.clicked()
@@ -453,7 +524,11 @@ pub(crate) fn micro_label_response(ui: &mut Ui, text: &str) -> Response {
     let t = tokens(ui);
     // egui has no letter-spacing, so it is faked by interleaving thin spaces.
     let spaced: String = text.chars().flat_map(|c| [c, '\u{2009}']).collect();
-    ui.label(egui::RichText::new(spaced).font(fonts::mono_id(fonts::size::MICRO)).color(t.fg_secondary))
+    ui.label(
+        egui::RichText::new(spaced)
+            .font(fonts::mono_id(fonts::size::MICRO))
+            .color(t.fg_secondary),
+    )
 }
 
 /// Straight-alpha `gascii_core::Rgba` to egui's premultiplied `Color32`, un-multiplied — the one
@@ -511,8 +586,15 @@ mod tests {
             ctx.set_theme(theme);
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
                 let resp = button(ui, "Undo", false, false);
-                assert_eq!(resp.sense, Sense::hover(), "{theme:?}: a disabled button must sense only hover");
-                assert!(!resp.clicked(), "{theme:?}: a disabled button must never report clicked");
+                assert_eq!(
+                    resp.sense,
+                    Sense::hover(),
+                    "{theme:?}: a disabled button must sense only hover"
+                );
+                assert!(
+                    !resp.clicked(),
+                    "{theme:?}: a disabled button must never report clicked"
+                );
             });
         }
     }
@@ -522,7 +604,11 @@ mod tests {
         let ctx = headless_ctx();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             let resp = button(ui, "Undo", false, true);
-            assert_eq!(resp.sense, Sense::click(), "an enabled button must sense clicks");
+            assert_eq!(
+                resp.sense,
+                Sense::click(),
+                "an enabled button must sense clicks"
+            );
         });
     }
 
@@ -532,7 +618,11 @@ mod tests {
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             let expected = button_size(ui, "Redo");
             let resp = button(ui, "Redo", false, true);
-            assert_eq!(resp.rect.size(), expected, "button_size must predict button's own allocation");
+            assert_eq!(
+                resp.rect.size(),
+                expected,
+                "button_size must predict button's own allocation"
+            );
         });
     }
 
@@ -552,7 +642,11 @@ mod tests {
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             let idle = color_swatch(ui, Color32::BLUE, Color32::BLACK, false, 24.0);
             let selected = color_swatch(ui, Color32::BLUE, Color32::BLACK, true, 24.0);
-            assert_eq!(idle.rect.size(), selected.rect.size(), "selection must not change the swatch's footprint");
+            assert_eq!(
+                idle.rect.size(),
+                selected.rect.size(),
+                "selection must not change the swatch's footprint"
+            );
         });
     }
 
@@ -566,8 +660,14 @@ mod tests {
 
     #[test]
     fn parse_hex_accepts_eight_digit_forms_with_explicit_alpha() {
-        assert_eq!(parse_hex("#ABCDEF80"), Some(gascii_core::Rgba(0xAB, 0xCD, 0xEF, 0x80)));
-        assert_eq!(parse_hex("ABCDEF00"), Some(gascii_core::Rgba(0xAB, 0xCD, 0xEF, 0x00)));
+        assert_eq!(
+            parse_hex("#ABCDEF80"),
+            Some(gascii_core::Rgba(0xAB, 0xCD, 0xEF, 0x80))
+        );
+        assert_eq!(
+            parse_hex("ABCDEF00"),
+            Some(gascii_core::Rgba(0xAB, 0xCD, 0xEF, 0x00))
+        );
     }
 
     #[test]
@@ -601,13 +701,22 @@ mod tests {
         let translucent = gascii_core::Rgba(0, 0, 0, 0); // the app's own default transparent BG
         let round_tripped = parse_hex(&hex_string_rgba(translucent))
             .expect("hex_string_rgba always emits 8 valid hex digits");
-        assert_eq!(round_tripped, translucent, "alpha must round-trip through hex_string_rgba/parse_hex");
+        assert_eq!(
+            round_tripped, translucent,
+            "alpha must round-trip through hex_string_rgba/parse_hex"
+        );
     }
 
     #[test]
     fn hex_string_rgba_formats_exact_eight_digit_uppercase_hex() {
-        assert_eq!(hex_string_rgba(gascii_core::Rgba(0x12, 0x34, 0x56, 0xFF)), "#123456FF");
-        assert_eq!(hex_string_rgba(gascii_core::Rgba(0xAB, 0xCD, 0xEF, 0x80)), "#ABCDEF80");
+        assert_eq!(
+            hex_string_rgba(gascii_core::Rgba(0x12, 0x34, 0x56, 0xFF)),
+            "#123456FF"
+        );
+        assert_eq!(
+            hex_string_rgba(gascii_core::Rgba(0xAB, 0xCD, 0xEF, 0x80)),
+            "#ABCDEF80"
+        );
     }
 
     #[test]
@@ -618,7 +727,11 @@ mod tests {
             gascii_core::Rgba(0x12, 0x34, 0x56, 0x80),
             gascii_core::Rgba(0xC9, 0x4F, 0x3D, 0),
         ] {
-            assert_eq!(parse_hex(&hex_string_rgba(c)), Some(c), "round-trip for {c:?}");
+            assert_eq!(
+                parse_hex(&hex_string_rgba(c)),
+                Some(c),
+                "round-trip for {c:?}"
+            );
         }
     }
 }

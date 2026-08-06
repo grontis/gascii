@@ -1,6 +1,9 @@
 use egui::Ui;
 
-use crate::{CanvasRenderer, OptionsGeom, PanelOutcome, PluginHost, PluginShortcut, PluginToolCapabilities, ToolCtxPatch};
+use crate::{
+    CanvasRenderer, OptionsGeom, PanelOutcome, PluginHost, PluginShortcut, PluginToolCapabilities,
+    ToolCtxPatch,
+};
 
 /// The host-facing contract every plugin implements. Every method has a true-no-op default except
 /// `as_any_mut` (which cannot: a `Self: Sized` bound would make it uncallable on `Box<dyn Plugin>`)
@@ -32,7 +35,14 @@ pub trait Plugin: 'static {
 
     /// Custom per-tool options-panel content beyond the host's generic size/shape rows, rendered at
     /// most once per frame per owning plugin even if both bindings hold the same tool.
-    fn options_ui(&mut self, _tool_name: &str, _ui: &mut Ui, _geom: OptionsGeom, _host: &dyn PluginHost) {}
+    fn options_ui(
+        &mut self,
+        _tool_name: &str,
+        _ui: &mut Ui,
+        _geom: OptionsGeom,
+        _host: &dyn PluginHost,
+    ) {
+    }
 
     /// Per-frame input a plugin wants outside a canvas gesture (a keyboard shortcut, a playback
     /// clock tick). `focused`: true while a widget holds keyboard focus or an active session
@@ -57,7 +67,13 @@ pub trait Plugin: 'static {
     /// (egui's own input state is a per-viewport global the modal's own event loop also consumed
     /// from), so any state built up before the suppression started is stale and must be reset, not
     /// resumed. A plugin with no such state ignores this safely.
-    fn tick(&mut self, _ui: &mut Ui, _focused: bool, _resumed_after_suppression: bool, _host: &dyn PluginHost) -> PanelOutcome {
+    fn tick(
+        &mut self,
+        _ui: &mut Ui,
+        _focused: bool,
+        _resumed_after_suppression: bool,
+        _host: &dyn PluginHost,
+    ) -> PanelOutcome {
         PanelOutcome::default()
     }
 
@@ -166,7 +182,13 @@ mod tests {
     }
 
     fn geom() -> OptionsGeom {
-        OptionsGeom { stepper_h: 1.0, shape_indent: 0.0, item_spacing_y: None, inline_controls: false, slider_h: 1.0 }
+        OptionsGeom {
+            stepper_h: 1.0,
+            shape_indent: 0.0,
+            item_spacing_y: None,
+            inline_controls: false,
+            slider_h: 1.0,
+        }
     }
 
     /// Every default method must be callable without panicking and must produce exactly the
@@ -180,11 +202,23 @@ mod tests {
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
             p.options_ui("anything", ui, geom(), &host);
             let tick_outcome = p.tick(ui, false, false, &host);
-            assert!(tick_outcome.edits.is_empty(), "default tick must request no edits");
-            assert!(tick_outcome.properties.is_empty(), "default tick must not request a document property change");
+            assert!(
+                tick_outcome.edits.is_empty(),
+                "default tick must request no edits"
+            );
+            assert!(
+                tick_outcome.properties.is_empty(),
+                "default tick must not request a document property change"
+            );
             let outcome = p.panel(ui, false, &host);
-            assert!(outcome.edits.is_empty(), "default panel must request no edits");
-            assert!(outcome.properties.is_empty(), "default panel must not request a document property change");
+            assert!(
+                outcome.edits.is_empty(),
+                "default panel must request no edits"
+            );
+            assert!(
+                outcome.properties.is_empty(),
+                "default panel must not request a document property change"
+            );
         });
 
         assert!(NullPlugin::tool_capabilities().is_empty());
@@ -197,7 +231,10 @@ mod tests {
         let inner_addr = (inner.as_ref() as *const dyn CanvasRenderer).cast::<()>();
         let wrapped = p.wrap_renderer(inner);
         let wrapped_addr = (wrapped.as_ref() as *const dyn CanvasRenderer).cast::<()>();
-        assert_eq!(inner_addr, wrapped_addr, "default wrap_renderer must return the exact Box it was given");
+        assert_eq!(
+            inner_addr, wrapped_addr,
+            "default wrap_renderer must return the exact Box it was given"
+        );
     }
 
     /// `as_any_mut`'s default body must actually resolve to the concrete type behind the trait

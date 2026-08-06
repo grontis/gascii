@@ -12,7 +12,9 @@ use eframe::egui;
 use gascii_core::BrushShape;
 use serde::{Deserialize, Serialize};
 
-use crate::app::{tool_def, tools, Binding, ExportFormat, ExportSettings, GasciiApp, ToolKind, PLUGINS};
+use crate::app::{
+    tool_def, tools, Binding, ExportFormat, ExportSettings, GasciiApp, ToolKind, PLUGINS,
+};
 
 const KEY: &str = "gascii_prefs";
 
@@ -181,7 +183,11 @@ impl Prefs {
                     .filter_map(|d| d.stamp_slot.map(|i| i as usize))
                     .map(|i| (slot.stamps[i].size, shape_to_u8(slot.stamps[i].shape)))
                     .collect();
-                SlotPrefs { kind: tool_kind_to_str(slot.kind).to_owned(), stamps, stamps_by_name }
+                SlotPrefs {
+                    kind: tool_kind_to_str(slot.kind).to_owned(),
+                    stamps,
+                    stamps_by_name,
+                }
             })
             .collect();
         Prefs {
@@ -199,7 +205,10 @@ impl Prefs {
             plugins: PLUGINS
                 .iter()
                 .enumerate()
-                .map(|(i, d)| PluginPref { id: d.id.to_owned(), enabled: app.plugin_enabled(i) })
+                .map(|(i, d)| PluginPref {
+                    id: d.id.to_owned(),
+                    enabled: app.plugin_enabled(i),
+                })
                 .collect(),
         }
     }
@@ -223,7 +232,11 @@ impl Prefs {
                 app.bind(*b, kind);
             }
             let apply_one = |app: &mut GasciiApp, name: &str, size: u16, shape_byte: u8| {
-                let Some(idx) = tools().iter().find(|d| d.name == name).and_then(|d| d.stamp_slot) else {
+                let Some(idx) = tools()
+                    .iter()
+                    .find(|d| d.name == name)
+                    .and_then(|d| d.stamp_slot)
+                else {
                     return; // unknown tool name — skipped silently, every other entry still applies
                 };
                 let idx = idx as usize;
@@ -238,7 +251,9 @@ impl Prefs {
                     apply_one(app, &pref.tool, pref.size, pref.shape);
                 }
             } else {
-                for (&name, &(size, shape_byte)) in LEGACY_STAMP_ORDER.iter().zip(slot_prefs.stamps.iter()) {
+                for (&name, &(size, shape_byte)) in
+                    LEGACY_STAMP_ORDER.iter().zip(slot_prefs.stamps.iter())
+                {
                     apply_one(app, name, size, shape_byte);
                 }
             }
@@ -282,7 +297,9 @@ impl Prefs {
 /// never block startup.
 pub(crate) fn load(storage: Option<&dyn eframe::Storage>, app: &mut GasciiApp) {
     let Some(storage) = storage else { return };
-    let Some(raw) = storage.get_string(KEY) else { return };
+    let Some(raw) = storage.get_string(KEY) else {
+        return;
+    };
     if let Ok(prefs) = serde_json::from_str::<Prefs>(&raw) {
         prefs.apply_to(app);
     }
@@ -315,7 +332,10 @@ mod tests {
     #[test]
     fn tool_kind_round_trips_through_its_str_mapping_for_every_kind() {
         for def in tools().iter() {
-            assert_eq!(tool_kind_from_str(tool_kind_to_str(def.kind)), Some(def.kind));
+            assert_eq!(
+                tool_kind_from_str(tool_kind_to_str(def.kind)),
+                Some(def.kind)
+            );
         }
     }
 
@@ -347,10 +367,18 @@ mod tests {
         let mut app = GasciiApp::headless();
         app.bind(Binding::L, BRUSH_KIND);
         app.slots[Binding::L.ix()].stamps[crate::app::sized_slot(BRUSH_KIND).unwrap()] =
-            crate::app::StampSettings { size: 7, shape: BrushShape::Circle };
+            crate::app::StampSettings {
+                size: 7,
+                shape: BrushShape::Circle,
+            };
         app.recent_glyphs = vec!['a', 'b', 'c'];
         app.recent_files = vec![PathBuf::from("a.gascii"), PathBuf::from("b.gascii")];
-        app.export = ExportSettings { format: ExportFormat::Png, scale: 2, transparent: true, trim: false };
+        app.export = ExportSettings {
+            format: ExportFormat::Png,
+            scale: 2,
+            transparent: true,
+            trim: false,
+        };
         app.show_grid = true;
         app.theme_pref = egui::ThemePreference::Dark;
 
@@ -365,11 +393,25 @@ mod tests {
         assert_eq!(restored.slot(Binding::L).kind, BRUSH_KIND);
         assert_eq!(
             restored.slot(Binding::L).stamps[crate::app::sized_slot(BRUSH_KIND).unwrap()],
-            crate::app::StampSettings { size: 7, shape: BrushShape::Circle }
+            crate::app::StampSettings {
+                size: 7,
+                shape: BrushShape::Circle
+            }
         );
         assert_eq!(restored.recent_glyphs, vec!['a', 'b', 'c']);
-        assert_eq!(restored.recent_files, vec![PathBuf::from("a.gascii"), PathBuf::from("b.gascii")]);
-        assert_eq!(restored.export, ExportSettings { format: ExportFormat::Png, scale: 2, transparent: true, trim: false });
+        assert_eq!(
+            restored.recent_files,
+            vec![PathBuf::from("a.gascii"), PathBuf::from("b.gascii")]
+        );
+        assert_eq!(
+            restored.export,
+            ExportSettings {
+                format: ExportFormat::Png,
+                scale: 2,
+                transparent: true,
+                trim: false
+            }
+        );
         assert!(restored.show_grid);
     }
 
@@ -392,8 +434,16 @@ mod tests {
         let mut restored = GasciiApp::headless();
         back.apply_to(&mut restored);
 
-        assert_eq!(restored.slot(Binding::L).kind, BRUSH_KIND, "L must resolve back through the plugin-backed row");
-        assert_eq!(restored.slot(Binding::R).kind, BRUSH_KIND, "R must resolve back through the plugin-backed row too");
+        assert_eq!(
+            restored.slot(Binding::L).kind,
+            BRUSH_KIND,
+            "L must resolve back through the plugin-backed row"
+        );
+        assert_eq!(
+            restored.slot(Binding::R).kind,
+            BRUSH_KIND,
+            "R must resolve back through the plugin-backed row too"
+        );
     }
 
     /// Plugin enabled state must survive the save/load round trip per plugin: the disabled one
@@ -409,9 +459,18 @@ mod tests {
         let mut restored = GasciiApp::headless();
         back.apply_to(&mut restored);
 
-        assert!(!restored.plugin_enabled(brush), "the disabled plugin must come back disabled");
-        let anim = PLUGINS.iter().position(|d| d.id != PLUGINS[brush].id).unwrap();
-        assert!(restored.plugin_enabled(anim), "the untouched plugin must stay enabled");
+        assert!(
+            !restored.plugin_enabled(brush),
+            "the disabled plugin must come back disabled"
+        );
+        let anim = PLUGINS
+            .iter()
+            .position(|d| d.id != PLUGINS[brush].id)
+            .unwrap();
+        assert!(
+            restored.plugin_enabled(anim),
+            "the untouched plugin must stay enabled"
+        );
     }
 
     /// A stored plugin id this build doesn't register (a removed plugin, a future version's) must
@@ -422,13 +481,19 @@ mod tests {
         let mut app = GasciiApp::headless();
         let brush = tool_def(BRUSH_KIND).plugin_slot.unwrap();
         let mut prefs = Prefs::from_app(&app);
-        prefs.plugins.push(PluginPref { id: "not-a-registered-plugin".to_owned(), enabled: false });
+        prefs.plugins.push(PluginPref {
+            id: "not-a-registered-plugin".to_owned(),
+            enabled: false,
+        });
         if let Some(entry) = prefs.plugins.iter_mut().find(|p| p.id == PLUGINS[brush].id) {
             entry.enabled = false;
         }
 
         prefs.apply_to(&mut app);
-        assert!(!app.plugin_enabled(brush), "the known entry must still apply around the unknown one");
+        assert!(
+            !app.plugin_enabled(brush),
+            "the known entry must still apply around the unknown one"
+        );
     }
 
     /// A blob written before plugins were toggleable has no `plugins` field at all —
@@ -449,14 +514,23 @@ mod tests {
         })
         .to_string();
 
-        let prefs: Prefs = serde_json::from_str(&json).expect("a blob missing the plugins field must still parse");
+        let prefs: Prefs =
+            serde_json::from_str(&json).expect("a blob missing the plugins field must still parse");
         let mut app = GasciiApp::headless();
         prefs.apply_to(&mut app);
 
         for (i, d) in PLUGINS.iter().enumerate() {
-            assert!(app.plugin_enabled(i), "plugin {} must stay enabled when the blob predates toggling", d.id);
+            assert!(
+                app.plugin_enabled(i),
+                "plugin {} must stay enabled when the blob predates toggling",
+                d.id
+            );
         }
-        assert_eq!(app.theme_pref, egui::ThemePreference::Dark, "every other field must still load");
+        assert_eq!(
+            app.theme_pref,
+            egui::ThemePreference::Dark,
+            "every other field must still load"
+        );
     }
 
     /// A blob storing BOTH "Brush is bound to L" and "the brush plugin is disabled" must load
@@ -484,9 +558,16 @@ mod tests {
         let mut app = GasciiApp::headless();
         prefs.apply_to(&mut app);
 
-        assert_eq!(app.slot(Binding::L).kind, ToolKind::Pencil, "the stored Brush binding must converge to Pencil");
+        assert_eq!(
+            app.slot(Binding::L).kind,
+            ToolKind::Pencil,
+            "the stored Brush binding must converge to Pencil"
+        );
         let brush = tool_def(BRUSH_KIND).plugin_slot.unwrap();
-        assert!(!app.plugin_enabled(brush), "and the plugin must still come out disabled");
+        assert!(
+            !app.plugin_enabled(brush),
+            "and the plugin must still come out disabled"
+        );
     }
 
     #[test]
@@ -502,9 +583,14 @@ mod tests {
         }
         let mut app = GasciiApp::headless();
         let before_kind = app.slot(Binding::L).kind;
-        let storage: Box<dyn eframe::Storage> = Box::new(FakeStorage("not json at all".to_string()));
+        let storage: Box<dyn eframe::Storage> =
+            Box::new(FakeStorage("not json at all".to_string()));
         load(Some(storage.as_ref()), &mut app);
-        assert_eq!(app.slot(Binding::L).kind, before_kind, "malformed prefs must not perturb defaults");
+        assert_eq!(
+            app.slot(Binding::L).kind,
+            before_kind,
+            "malformed prefs must not perturb defaults"
+        );
     }
 
     #[test]
@@ -513,12 +599,18 @@ mod tests {
         let mut prefs = Prefs::from_app(&app);
         // Stored most-recent-first, 10 unique entries — more than the 8-entry cap, which a bare
         // assignment (the pre-fix behavior) would let straight through.
-        prefs.recent_files = (0..10).map(|i| PathBuf::from(format!("{i}.gascii"))).collect();
+        prefs.recent_files = (0..10)
+            .map(|i| PathBuf::from(format!("{i}.gascii")))
+            .collect();
         // Plus a stray duplicate of an already-listed path tacked onto the end.
         prefs.recent_files.push(PathBuf::from("5.gascii"));
         prefs.apply_to(&mut app);
 
-        assert_eq!(app.recent_files.len(), 8, "must cap at 8 entries on load, not just on note_recent_file");
+        assert_eq!(
+            app.recent_files.len(),
+            8,
+            "must cap at 8 entries on load, not just on note_recent_file"
+        );
         assert_eq!(
             app.recent_files,
             (0..8).map(|i| PathBuf::from(format!("{i}.gascii"))).collect::<Vec<_>>(),
@@ -535,7 +627,11 @@ mod tests {
     #[test]
     fn an_export_scale_with_no_matching_preset_snaps_to_the_nearest_one() {
         for (stored, expected) in [(0u8, 1u8), (1, 1), (2, 2), (3, 2), (4, 4), (5, 4), (200, 4)] {
-            assert_eq!(nearest_export_scale(stored), expected, "stored scale {stored}");
+            assert_eq!(
+                nearest_export_scale(stored),
+                expected,
+                "stored scale {stored}"
+            );
         }
     }
 
@@ -576,19 +672,31 @@ mod tests {
         let l = app.slot(Binding::L);
         assert_eq!(
             l.stamps[crate::app::sized_slot(ToolKind::Pencil).unwrap()],
-            crate::app::StampSettings { size: 3, shape: BrushShape::Square }
+            crate::app::StampSettings {
+                size: 3,
+                shape: BrushShape::Square
+            }
         );
         assert_eq!(
             l.stamps[crate::app::sized_slot(ToolKind::Eraser).unwrap()],
-            crate::app::StampSettings { size: 4, shape: BrushShape::Circle }
+            crate::app::StampSettings {
+                size: 4,
+                shape: BrushShape::Circle
+            }
         );
         assert_eq!(
             l.stamps[crate::app::sized_slot(ToolKind::Line).unwrap()],
-            crate::app::StampSettings { size: 5, shape: BrushShape::Raw }
+            crate::app::StampSettings {
+                size: 5,
+                shape: BrushShape::Raw
+            }
         );
         assert_eq!(
             l.stamps[crate::app::sized_slot(BRUSH_KIND).unwrap()],
-            crate::app::StampSettings { size: 6, shape: BrushShape::Square }
+            crate::app::StampSettings {
+                size: 6,
+                shape: BrushShape::Square
+            }
         );
     }
 
@@ -598,12 +706,23 @@ mod tests {
     fn a_named_stamp_for_an_unknown_tool_is_skipped_without_disturbing_the_known_ones() {
         let mut app = GasciiApp::headless();
         let mut prefs = Prefs::from_app(&app);
-        prefs.slots[Binding::L.ix()].stamps_by_name.push(StampPref { tool: "NotARealPlugin".to_owned(), size: 9, shape: 2 });
-        if let Some(entry) = prefs.slots[Binding::L.ix()].stamps_by_name.iter_mut().find(|p| p.tool == "Pencil") {
+        prefs.slots[Binding::L.ix()].stamps_by_name.push(StampPref {
+            tool: "NotARealPlugin".to_owned(),
+            size: 9,
+            shape: 2,
+        });
+        if let Some(entry) = prefs.slots[Binding::L.ix()]
+            .stamps_by_name
+            .iter_mut()
+            .find(|p| p.tool == "Pencil")
+        {
             entry.size = 5;
         }
         prefs.apply_to(&mut app);
-        assert_eq!(app.slot(Binding::L).stamps[crate::app::sized_slot(ToolKind::Pencil).unwrap()].size, 5);
+        assert_eq!(
+            app.slot(Binding::L).stamps[crate::app::sized_slot(ToolKind::Pencil).unwrap()].size,
+            5
+        );
     }
 
     /// `from_app` must emit both shapes for the four `LEGACY_STAMP_ORDER` tools, and they must
@@ -612,14 +731,21 @@ mod tests {
     fn saved_prefs_emit_both_the_named_and_the_legacy_stamp_shapes_and_agree() {
         let mut app = GasciiApp::headless();
         app.slots[Binding::L.ix()].stamps[crate::app::sized_slot(ToolKind::Pencil).unwrap()] =
-            crate::app::StampSettings { size: 4, shape: BrushShape::Square };
+            crate::app::StampSettings {
+                size: 4,
+                shape: BrushShape::Square,
+            };
         let prefs = Prefs::from_app(&app);
         let l = &prefs.slots[Binding::L.ix()];
         assert!(!l.stamps_by_name.is_empty());
         assert!(!l.stamps.is_empty());
         for (i, name) in LEGACY_STAMP_ORDER.iter().enumerate() {
             let named = l.stamps_by_name.iter().find(|p| &p.tool == name).unwrap();
-            assert_eq!(l.stamps[i], (named.size, named.shape), "{name} legacy/named must agree");
+            assert_eq!(
+                l.stamps[i],
+                (named.size, named.shape),
+                "{name} legacy/named must agree"
+            );
         }
     }
 
@@ -655,7 +781,10 @@ mod tests {
 
         assert_eq!(
             app.slot(Binding::L).stamps[crate::app::sized_slot(ToolKind::Pencil).unwrap()],
-            crate::app::StampSettings { size: 9, shape: BrushShape::Circle },
+            crate::app::StampSettings {
+                size: 9,
+                shape: BrushShape::Circle
+            },
             "the named shape must win over the disagreeing legacy positional shape"
         );
     }
@@ -679,7 +808,8 @@ mod tests {
         })
         .to_string();
 
-        let prefs: Prefs = serde_json::from_str(&json).expect("a blob missing stamps_by_name must still parse");
+        let prefs: Prefs =
+            serde_json::from_str(&json).expect("a blob missing stamps_by_name must still parse");
         let mut app = GasciiApp::headless();
         prefs.apply_to(&mut app);
 
@@ -720,14 +850,22 @@ mod tests {
 
         let mut app = GasciiApp::headless();
         let before_kind = app.slot(Binding::L).kind;
-        let prefs: Prefs = serde_json::from_str(&json).expect("well-typed JSON, even with hostile values, must parse");
+        let prefs: Prefs = serde_json::from_str(&json)
+            .expect("well-typed JSON, even with hostile values, must parse");
         prefs.apply_to(&mut app);
 
         assert_eq!(app.theme_pref, egui::ThemePreference::System);
-        assert_eq!(app.slot(Binding::L).kind, before_kind, "an unrecognized tool name must not change the bound kind");
+        assert_eq!(
+            app.slot(Binding::L).kind,
+            before_kind,
+            "an unrecognized tool name must not change the bound kind"
+        );
         for b in Binding::ALL {
             for stamp in &app.slot(b).stamps {
-                assert!(stamp.size >= 1 && stamp.size <= gascii_core::MAX_TOOL_SIZE, "every stamp size must be in range");
+                assert!(
+                    stamp.size >= 1 && stamp.size <= gascii_core::MAX_TOOL_SIZE,
+                    "every stamp size must be in range"
+                );
             }
         }
     }
@@ -741,7 +879,8 @@ mod tests {
     /// in isolation (e.g. because it accidentally reads a sibling field's already-sanitized value)
     /// would slip through the existing suite.
     #[test]
-    fn a_json_blob_with_many_simultaneously_hostile_fields_loads_without_panicking_and_sanitizes_every_one() {
+    fn a_json_blob_with_many_simultaneously_hostile_fields_loads_without_panicking_and_sanitizes_every_one(
+    ) {
         let json = serde_json::json!({
             "theme": "not_a_real_theme",
             "slots": [
@@ -762,23 +901,53 @@ mod tests {
         let before_kind = app.slot(Binding::L).kind;
 
         // Must not panic while deserializing or applying.
-        let prefs: Prefs = serde_json::from_str(&json).expect("well-typed JSON, even with hostile values, must parse");
+        let prefs: Prefs = serde_json::from_str(&json)
+            .expect("well-typed JSON, even with hostile values, must parse");
         prefs.apply_to(&mut app);
 
-        assert_eq!(app.theme_pref, egui::ThemePreference::System, "an unrecognized theme string falls back to System");
+        assert_eq!(
+            app.theme_pref,
+            egui::ThemePreference::System,
+            "an unrecognized theme string falls back to System"
+        );
         // Unrecognized tool names leave the slot's kind at whatever the fresh app already had.
-        assert_eq!(app.slot(Binding::L).kind, before_kind, "an unrecognized tool name must not change the bound kind");
-        assert_eq!(app.slot(Binding::R).kind, app.slot(Binding::R).kind, "sanity: R slot still holds a valid kind");
+        assert_eq!(
+            app.slot(Binding::L).kind,
+            before_kind,
+            "an unrecognized tool name must not change the bound kind"
+        );
+        assert_eq!(
+            app.slot(Binding::R).kind,
+            app.slot(Binding::R).kind,
+            "sanity: R slot still holds a valid kind"
+        );
         for b in Binding::ALL {
             for stamp in &app.slot(b).stamps {
-                assert!(stamp.size >= 1 && stamp.size <= gascii_core::MAX_TOOL_SIZE, "every stamp size must be in range");
+                assert!(
+                    stamp.size >= 1 && stamp.size <= gascii_core::MAX_TOOL_SIZE,
+                    "every stamp size must be in range"
+                );
             }
         }
-        assert_eq!(app.export.format, ExportFormat::Text, "an unrecognized export format falls back to Text");
-        assert_eq!(app.export.scale, 4, "scale 200 snaps to the nearest offered preset");
-        assert_eq!(app.recent_files.len(), 8, "an oversized/duplicated recent_files list is still capped at 8 on load");
         assert_eq!(
-            app.recent_files.iter().collect::<std::collections::HashSet<_>>().len(),
+            app.export.format,
+            ExportFormat::Text,
+            "an unrecognized export format falls back to Text"
+        );
+        assert_eq!(
+            app.export.scale, 4,
+            "scale 200 snaps to the nearest offered preset"
+        );
+        assert_eq!(
+            app.recent_files.len(),
+            8,
+            "an oversized/duplicated recent_files list is still capped at 8 on load"
+        );
+        assert_eq!(
+            app.recent_files
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
             8,
             "no duplicate path may survive the load"
         );
@@ -809,7 +978,10 @@ mod tests {
             "kiosk_last_fit_size",
             "pressure_stamp_size",
         ] {
-            assert!(!json.contains(forbidden), "prefs JSON must never mention {forbidden:?}: {json}");
+            assert!(
+                !json.contains(forbidden),
+                "prefs JSON must never mention {forbidden:?}: {json}"
+            );
         }
     }
 
@@ -819,7 +991,8 @@ mod tests {
     /// unknown-field-tolerant deserialization, and `apply_to` must never set the corresponding
     /// session-only fields on a freshly-constructed app.
     #[test]
-    fn a_hostile_prefs_blob_with_extra_fullscreen_and_stylus_fields_never_touches_session_only_state() {
+    fn a_hostile_prefs_blob_with_extra_fullscreen_and_stylus_fields_never_touches_session_only_state(
+    ) {
         let json = serde_json::json!({
             "theme": "dark",
             "slots": [
@@ -846,7 +1019,10 @@ mod tests {
 
         prefs.apply_to(&mut app);
 
-        assert!(!app.stylus_detected, "apply_to must never set stylus_detected — it isn't a prefs field");
+        assert!(
+            !app.stylus_detected,
+            "apply_to must never set stylus_detected — it isn't a prefs field"
+        );
         assert!(
             !app.brush_plugin_mut().pressure_enabled(),
             "apply_to must never set Brush's pressure opt-in — it isn't a prefs field"

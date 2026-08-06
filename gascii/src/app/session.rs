@@ -4,7 +4,10 @@
 //! subsystem rather than touching `self.doc`/`self.slots` directly.
 
 use eframe::egui;
-use gascii_core::{clear_document, duplicate_frame, CellEdit, CellPatch, Edit, FrameOpError, ToolEvent, ToolResponse};
+use gascii_core::{
+    clear_document, duplicate_frame, CellEdit, CellPatch, Edit, FrameOpError, ToolEvent,
+    ToolResponse,
+};
 
 use super::{make_tool, Binding, GasciiApp, ToolKind};
 
@@ -101,7 +104,9 @@ impl GasciiApp {
     pub(crate) fn resync_slots(&mut self, except: Option<Binding>) {
         for b in Binding::ALL {
             if Some(b) != except {
-                self.slots[b.ix()].tool.resync(&self.doc, self.active_frame, self.active_layer);
+                self.slots[b.ix()]
+                    .tool
+                    .resync(&self.doc, self.active_frame, self.active_layer);
             }
         }
     }
@@ -160,7 +165,9 @@ impl GasciiApp {
         }
         let tctx = crate::canvas::tool_ctx(self, b);
         if let ToolResponse::Commit(Some(edit)) =
-            self.slots[b.ix()].tool.update(ToolEvent::Commit, &tctx, &self.doc)
+            self.slots[b.ix()]
+                .tool
+                .update(ToolEvent::Commit, &tctx, &self.doc)
         {
             self.apply_edit(edit, Some(b));
         }
@@ -176,7 +183,9 @@ impl GasciiApp {
         self.flush_slot(b);
         if holds_session(self.slots[b.ix()].kind) {
             let tctx = crate::canvas::tool_ctx(self, b);
-            self.slots[b.ix()].tool.update(ToolEvent::Cancel, &tctx, &self.doc);
+            self.slots[b.ix()]
+                .tool
+                .update(ToolEvent::Cancel, &tctx, &self.doc);
         }
         self.release_keyboard(b);
     }
@@ -258,7 +267,9 @@ impl GasciiApp {
         self.flush_all();
         match gascii_core::remove_frame(&self.doc, self.doc.active_frame()) {
             Ok(edit) => self.apply_edit(edit, None),
-            Err(FrameOpError::LastFrame) => self.flash_error("delete frame: a document must keep at least one frame"),
+            Err(FrameOpError::LastFrame) => {
+                self.flash_error("delete frame: a document must keep at least one frame")
+            }
             Err(_) => self.flash_error("delete frame: unexpected error"),
         }
     }
@@ -277,7 +288,11 @@ impl GasciiApp {
         let text = gascii_core::export_frame_text(&self.doc, idx).unwrap_or_default();
         // A fully blank frame trims to an empty string, which egui-winit's paste path would skip
         // exactly like an empty clipboard — substitute a readable marker so Ctrl+V still fires.
-        let text = if text.trim().is_empty() { format!("[gascii frame {}]", idx + 1) } else { text };
+        let text = if text.trim().is_empty() {
+            format!("[gascii frame {}]", idx + 1)
+        } else {
+            text
+        };
         ctx.copy_text(text);
     }
 
@@ -307,7 +322,9 @@ impl GasciiApp {
                 self.flash_error("paste frame: exceeds the maximum total cell budget");
             }
             Err(FrameOpError::TooManyLayers { max, .. }) => {
-                self.flash_error(format!("paste frame: exceeds the {max} maximum layer count"));
+                self.flash_error(format!(
+                    "paste frame: exceeds the {max} maximum layer count"
+                ));
             }
             Err(_) => self.flash_error("paste frame: unexpected error"),
         }
@@ -373,7 +390,8 @@ impl GasciiApp {
     /// one exists (a press starts a session and takes the keyboard, and starting one finishes the
     /// other slot's), so the singular language in `copy_selection` and the Edit menu stays honest.
     pub(crate) fn selection_slot(&self) -> Option<Binding> {
-        self.keyboard_owner.filter(|&b| self.slot(b).kind == ToolKind::Selection)
+        self.keyboard_owner
+            .filter(|&b| self.slot(b).kind == ToolKind::Selection)
     }
 
     /// Copies the active selection's cells to both the OS clipboard (plain text) and the app's
@@ -385,7 +403,11 @@ impl GasciiApp {
         };
         // A dropped float's cells must be in `self.doc` before capturing the region.
         self.flush_all();
-        let Some(rect) = self.slots[b.ix()].tool.selection_overlay().and_then(|v| v.marquee) else {
+        let Some(rect) = self.slots[b.ix()]
+            .tool
+            .selection_overlay()
+            .and_then(|v| v.marquee)
+        else {
             return;
         };
         let patch = CellPatch::from_region(&self.doc, rect, self.active_layer);
@@ -407,7 +429,9 @@ impl GasciiApp {
         };
         self.copy_selection(ctx);
         let tctx = crate::canvas::tool_ctx(self, b);
-        let resp = self.slots[b.ix()].tool.update(ToolEvent::Delete, &tctx, &self.doc);
+        let resp = self.slots[b.ix()]
+            .tool
+            .update(ToolEvent::Delete, &tctx, &self.doc);
         if let ToolResponse::Commit(Some(edit)) = resp {
             self.apply_edit(edit, Some(b));
         }
@@ -423,7 +447,9 @@ impl GasciiApp {
         }
         self.acquire_keyboard(b);
         let tctx = crate::canvas::tool_ctx(self, b);
-        self.slots[b.ix()].tool.update(ToolEvent::SelectAll, &tctx, &self.doc);
+        self.slots[b.ix()]
+            .tool
+            .update(ToolEvent::SelectAll, &tctx, &self.doc);
     }
 
     /// Edit ▸ Deselect (keyboard: Escape, via `canvas.rs`'s own Selection-Escape branch — the
@@ -439,7 +465,9 @@ impl GasciiApp {
             return;
         };
         let tctx = crate::canvas::tool_ctx(self, b);
-        self.slots[b.ix()].tool.update(ToolEvent::Cancel, &tctx, &self.doc);
+        self.slots[b.ix()]
+            .tool
+            .update(ToolEvent::Cancel, &tctx, &self.doc);
         self.release_keyboard(b);
     }
 
@@ -458,7 +486,11 @@ impl GasciiApp {
         // A lifted float's cells must be in `self.doc` before capturing the region — same rule as
         // `copy_selection` (a Ctrl+D mid-move duplicates the float's landed position).
         self.flush_all();
-        let Some(rect) = self.slots[b.ix()].tool.selection_overlay().and_then(|v| v.marquee) else {
+        let Some(rect) = self.slots[b.ix()]
+            .tool
+            .selection_overlay()
+            .and_then(|v| v.marquee)
+        else {
             return;
         };
         let patch = CellPatch::from_region(&self.doc, rect, self.active_layer);
@@ -487,7 +519,11 @@ impl GasciiApp {
         };
         // Same flush-before-reading rule as `copy_selection`.
         self.flush_all();
-        let Some(rect) = self.slots[b.ix()].tool.selection_overlay().and_then(|v| v.marquee) else {
+        let Some(rect) = self.slots[b.ix()]
+            .tool
+            .selection_overlay()
+            .and_then(|v| v.marquee)
+        else {
             return;
         };
         let (frame, layer) = (self.active_frame, self.active_layer);
@@ -495,7 +531,9 @@ impl GasciiApp {
         let mut cells = Vec::new();
         for y in rect.y0..=rect.y1 {
             for x in rect.x0..=rect.x1 {
-                let Some(&before) = self.doc.cell_at(frame, layer, x, y) else { continue };
+                let Some(&before) = self.doc.cell_at(frame, layer, x, y) else {
+                    continue;
+                };
                 if before.is_blank() {
                     continue;
                 }
@@ -507,7 +545,14 @@ impl GasciiApp {
                     after.bg = self.active_bg;
                 }
                 if after != before {
-                    cells.push(CellEdit { frame, layer, x, y, before, after });
+                    cells.push(CellEdit {
+                        frame,
+                        layer,
+                        x,
+                        y,
+                        before,
+                        after,
+                    });
                 }
             }
         }
@@ -537,7 +582,9 @@ impl GasciiApp {
         }
         self.flush_all(); // drop any current float before reading self.doc / switching tools
         let patch = if is_own_clipboard_text(text, self.internal_clipboard.as_ref()) {
-            self.internal_clipboard.clone().expect("is_own_clipboard_text implies Some")
+            self.internal_clipboard
+                .clone()
+                .expect("is_own_clipboard_text implies Some")
         } else {
             let (patch, dropped) =
                 CellPatch::from_external_text(text, self.active_fg, self.active_bg);
@@ -559,7 +606,9 @@ impl GasciiApp {
         self.end_session(b.other());
         self.acquire_keyboard(b);
         self.options_focus = b;
-        self.slots[b.ix()].tool.accept_stamp(patch, anchor, &self.doc);
+        self.slots[b.ix()]
+            .tool
+            .accept_stamp(patch, anchor, &self.doc);
     }
 
     /// Discards (not commits) all pending work: each session-holding slot's tool is replaced with
@@ -580,7 +629,9 @@ impl GasciiApp {
         // the swap can't graft the old document's stroke onto the new one.
         if let Some(b) = self.stroke_owner.take() {
             let tctx = crate::canvas::tool_ctx(self, b);
-            self.slots[b.ix()].tool.update(ToolEvent::Cancel, &tctx, &self.doc);
+            self.slots[b.ix()]
+                .tool
+                .update(ToolEvent::Cancel, &tctx, &self.doc);
         }
         self.keyboard_owner = None;
         // The document about to replace `self.doc` always starts at frame/layer 0 (`Document::new`,

@@ -33,14 +33,19 @@ pub(crate) const PANEL_W: f32 = 220.0;
 /// paint over its left edge.
 pub(crate) fn panel_frame(ctx: &egui::Context) -> egui::Frame {
     let t = theme::current(ctx);
-    egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::symmetric(10, 8))
+    egui::Frame::new()
+        .fill(t.bg_panel)
+        .inner_margin(egui::Margin::symmetric(10, 8))
 }
 
 pub(crate) fn show(ui: &mut Ui, doc: &Document) -> PanelOutcome {
     let mut outcome = PanelOutcome::default();
-    egui::Panel::right("gascii_layers_panel").frame(panel_frame(ui.ctx())).exact_size(PANEL_W).show(ui, |ui| {
-        outcome = body(ui, doc, 26.0, 24.0);
-    });
+    egui::Panel::right("gascii_layers_panel")
+        .frame(panel_frame(ui.ctx()))
+        .exact_size(PANEL_W)
+        .show(ui, |ui| {
+            outcome = body(ui, doc, 26.0, 24.0);
+        });
     outcome
 }
 
@@ -50,8 +55,12 @@ pub(crate) fn show(ui: &mut Ui, doc: &Document) -> PanelOutcome {
 pub(crate) fn layer_op_error_message(action: &str, err: LayerOpError) -> String {
     match err {
         LayerOpError::TooManyLayers { max, .. } => format!("{action}: exceeds the {max} maximum"),
-        LayerOpError::TotalCellBudgetExceeded { .. } => format!("{action}: exceeds the maximum total cell budget"),
-        LayerOpError::IndexOutOfBounds { .. } | LayerOpError::LastLayer | LayerOpError::LayerCountDesync => {
+        LayerOpError::TotalCellBudgetExceeded { .. } => {
+            format!("{action}: exceeds the maximum total cell budget")
+        }
+        LayerOpError::IndexOutOfBounds { .. }
+        | LayerOpError::LastLayer
+        | LayerOpError::LayerCountDesync => {
             format!("{action}: unexpected error")
         }
     }
@@ -91,13 +100,17 @@ fn move_active_layer_down(doc: &Document) -> Option<Edit> {
 }
 
 fn toggle_layer_visibility(doc: &Document, index: usize) -> Option<Edit> {
-    gascii_core::set_layer_visibility(doc, index, !doc.layer_visible(index)).ok().flatten()
+    gascii_core::set_layer_visibility(doc, index, !doc.layer_visible(index))
+        .ok()
+        .flatten()
 }
 
 /// `None` when `name` already matches the layer's current name (`set_layer_name`'s own no-op
 /// contract) — a rename commit that didn't actually change anything produces no edit.
 fn commit_layer_rename(doc: &Document, index: usize, name: &str) -> Option<Edit> {
-    gascii_core::set_layer_name(doc, index, name.to_string()).ok().flatten()
+    gascii_core::set_layer_name(doc, index, name.to_string())
+        .ok()
+        .flatten()
 }
 
 /// Whether a row click should request `index` become the active layer — the pure decision core,
@@ -128,11 +141,22 @@ fn rename_id() -> egui::Id {
 }
 
 fn renaming_row(ui: &Ui, index: usize) -> Option<RenameBuf> {
-    ui.ctx().data_mut(|d| d.get_temp::<RenameBuf>(rename_id())).filter(|b| b.index == index)
+    ui.ctx()
+        .data_mut(|d| d.get_temp::<RenameBuf>(rename_id()))
+        .filter(|b| b.index == index)
 }
 
 fn begin_rename(ui: &Ui, index: usize, current_name: &str) {
-    ui.ctx().data_mut(|d| d.insert_temp(rename_id(), RenameBuf { index, text: current_name.to_string(), focus_requested: false }));
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(
+            rename_id(),
+            RenameBuf {
+                index,
+                text: current_name.to_string(),
+                focus_requested: false,
+            },
+        )
+    });
 }
 
 fn end_rename(ui: &Ui) {
@@ -145,7 +169,10 @@ fn end_rename(ui: &Ui) {
 /// can point at a different layer than the one the user opened the rename on, and a later commit
 /// would rename the wrong row.
 fn is_structural_layer_edit(edit: &Edit) -> bool {
-    matches!(edit, Edit::AddLayer { .. } | Edit::RemoveLayer { .. } | Edit::ReorderLayer { .. })
+    matches!(
+        edit,
+        Edit::AddLayer { .. } | Edit::RemoveLayer { .. } | Edit::ReorderLayer { .. }
+    )
 }
 
 /// One layer's row: visibility toggle, name (or its inline rename editor when mid-rename), and a
@@ -168,7 +195,11 @@ fn row(ui: &mut Ui, doc: &Document, index: usize, row_h: f32, outcome: &mut Pane
 
         if let Some(mut buf) = renaming {
             let avail = (ui.available_width() - row_h - 4.0).max(20.0);
-            let resp = ui.add(egui::TextEdit::singleline(&mut buf.text).desired_width(avail).font(widgets::mono_id(widgets::size::LABEL)));
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut buf.text)
+                    .desired_width(avail)
+                    .font(widgets::mono_id(widgets::size::LABEL)),
+            );
             if !buf.focus_requested {
                 resp.request_focus();
                 buf.focus_requested = true;
@@ -266,13 +297,17 @@ pub(crate) fn body(ui: &mut Ui, doc: &Document, row_h: f32, control_h: f32) -> P
                 }
             }
             let can_move_up = doc.active_layer() + 1 < doc.layer_count();
-            if widgets::square_button(ui, "\u{25B2}", can_move_up, control_h).clicked() && can_move_up {
+            if widgets::square_button(ui, "\u{25B2}", can_move_up, control_h).clicked()
+                && can_move_up
+            {
                 if let Some(edit) = move_active_layer_up(doc) {
                     outcome.edits.push(edit);
                 }
             }
             let can_move_down = doc.active_layer() > 0;
-            if widgets::square_button(ui, "\u{25BC}", can_move_down, control_h).clicked() && can_move_down {
+            if widgets::square_button(ui, "\u{25BC}", can_move_down, control_h).clicked()
+                && can_move_down
+            {
                 if let Some(edit) = move_active_layer_down(doc) {
                     outcome.edits.push(edit);
                 }
@@ -305,19 +340,43 @@ mod tests {
     #[test]
     fn layer_op_error_message_covers_every_variant_with_the_given_action_prefix() {
         assert_eq!(
-            layer_op_error_message("add layer", LayerOpError::TooManyLayers { found: 257, max: 256 }),
+            layer_op_error_message(
+                "add layer",
+                LayerOpError::TooManyLayers {
+                    found: 257,
+                    max: 256
+                }
+            ),
             "add layer: exceeds the 256 maximum"
         );
         assert_eq!(
-            layer_op_error_message("add layer", LayerOpError::TotalCellBudgetExceeded { total_cells: 1, max: 2 }),
+            layer_op_error_message(
+                "add layer",
+                LayerOpError::TotalCellBudgetExceeded {
+                    total_cells: 1,
+                    max: 2
+                }
+            ),
             "add layer: exceeds the maximum total cell budget"
         );
         assert_eq!(
-            layer_op_error_message("add layer", LayerOpError::IndexOutOfBounds { index: 9, layer_count: 1 }),
+            layer_op_error_message(
+                "add layer",
+                LayerOpError::IndexOutOfBounds {
+                    index: 9,
+                    layer_count: 1
+                }
+            ),
             "add layer: unexpected error"
         );
-        assert_eq!(layer_op_error_message("remove layer", LayerOpError::LastLayer), "remove layer: unexpected error");
-        assert_eq!(layer_op_error_message("add layer", LayerOpError::LayerCountDesync), "add layer: unexpected error");
+        assert_eq!(
+            layer_op_error_message("remove layer", LayerOpError::LastLayer),
+            "remove layer: unexpected error"
+        );
+        assert_eq!(
+            layer_op_error_message("add layer", LayerOpError::LayerCountDesync),
+            "add layer: unexpected error"
+        );
     }
 
     /// Exercised through the exact wrapper the panel's own Add button calls: the newly inserted
@@ -329,7 +388,11 @@ mod tests {
         let edit = add_layer_after_active(&doc).unwrap();
         history.apply(&mut doc, edit);
         assert_eq!(doc.layer_count(), 2);
-        assert_eq!(doc.active_layer(), 1, "the panel's Add button must select the newly inserted layer");
+        assert_eq!(
+            doc.active_layer(),
+            1,
+            "the panel's Add button must select the newly inserted layer"
+        );
     }
 
     /// Exercised through the exact wrapper the panel's own Duplicate button calls.
@@ -347,7 +410,10 @@ mod tests {
     #[test]
     fn delete_active_layer_is_none_at_one_layer_and_some_otherwise() {
         let doc = doc_with_layers(1);
-        assert!(delete_active_layer(&doc).is_none(), "a single-layer document must not produce a delete edit");
+        assert!(
+            delete_active_layer(&doc).is_none(),
+            "a single-layer document must not produce a delete edit"
+        );
 
         let doc = doc_with_layers(2);
         assert!(delete_active_layer(&doc).is_some());
@@ -362,7 +428,11 @@ mod tests {
         let mut history = History::new();
         let edit = move_active_layer_up(&doc).unwrap();
         history.apply(&mut doc, edit);
-        assert_eq!(doc.active_layer(), 1, "Up must raise the index, moving the row up in the top-of-stack-first list");
+        assert_eq!(
+            doc.active_layer(),
+            1,
+            "Up must raise the index, moving the row up in the top-of-stack-first list"
+        );
     }
 
     /// The mirror-image mapping: moving a row *down in the displayed list* lowers the index.
@@ -373,7 +443,11 @@ mod tests {
         let mut history = History::new();
         let edit = move_active_layer_down(&doc).unwrap();
         history.apply(&mut doc, edit);
-        assert_eq!(doc.active_layer(), 1, "Down must lower the index, moving the row down in the top-of-stack-first list");
+        assert_eq!(
+            doc.active_layer(),
+            1,
+            "Down must lower the index, moving the row down in the top-of-stack-first list"
+        );
     }
 
     #[test]
@@ -382,9 +456,15 @@ mod tests {
         // `doc_with_layers` leaves the active layer on the top index (adding a layer selects it) —
         // reset to the bottom to exercise the "not yet at the top" case first.
         assert!(doc.set_active_layer(0));
-        assert!(move_active_layer_up(&doc).is_some(), "not yet at the top index");
+        assert!(
+            move_active_layer_up(&doc).is_some(),
+            "not yet at the top index"
+        );
         assert!(doc.set_active_layer(2));
-        assert!(move_active_layer_up(&doc).is_none(), "already the top index — nothing above it to move past");
+        assert!(
+            move_active_layer_up(&doc).is_none(),
+            "already the top index — nothing above it to move past"
+        );
     }
 
     #[test]
@@ -393,7 +473,10 @@ mod tests {
         assert!(doc.set_active_layer(1));
         assert!(move_active_layer_down(&doc).is_some());
         assert!(doc.set_active_layer(0));
-        assert!(move_active_layer_down(&doc).is_none(), "already index 0 — nothing below it to move past");
+        assert!(
+            move_active_layer_down(&doc).is_none(),
+            "already index 0 — nothing below it to move past"
+        );
     }
 
     #[test]
@@ -441,27 +524,57 @@ mod tests {
     fn commit_layer_rename_produces_an_edit_only_when_the_name_actually_changed() {
         let doc = doc_with_layers(1);
         let current = doc.layer_name(0).unwrap().to_string();
-        assert!(commit_layer_rename(&doc, 0, &current).is_none(), "committing the unchanged name must not produce an edit");
-        assert!(commit_layer_rename(&doc, 0, "Ink").is_some(), "a real name change must produce an edit");
+        assert!(
+            commit_layer_rename(&doc, 0, &current).is_none(),
+            "committing the unchanged name must not produce an edit"
+        );
+        assert!(
+            commit_layer_rename(&doc, 0, "Ink").is_some(),
+            "a real name change must produce an edit"
+        );
     }
 
     #[test]
     fn is_structural_layer_edit_covers_add_remove_reorder_but_not_visibility_or_rename() {
         let mut doc = doc_with_layers(2);
-        assert!(is_structural_layer_edit(&add_layer_after_active(&doc).unwrap()));
-        assert!(is_structural_layer_edit(&duplicate_active_layer(&doc).unwrap()));
-        assert!(is_structural_layer_edit(&delete_active_layer(&doc).unwrap()));
+        assert!(is_structural_layer_edit(
+            &add_layer_after_active(&doc).unwrap()
+        ));
+        assert!(is_structural_layer_edit(
+            &duplicate_active_layer(&doc).unwrap()
+        ));
+        assert!(is_structural_layer_edit(
+            &delete_active_layer(&doc).unwrap()
+        ));
         assert!(doc.set_active_layer(0));
-        assert!(is_structural_layer_edit(&move_active_layer_up(&doc).unwrap()));
-        assert!(!is_structural_layer_edit(&toggle_layer_visibility(&doc, 0).unwrap()));
-        assert!(!is_structural_layer_edit(&commit_layer_rename(&doc, 0, "Ink").unwrap()));
+        assert!(is_structural_layer_edit(
+            &move_active_layer_up(&doc).unwrap()
+        ));
+        assert!(!is_structural_layer_edit(
+            &toggle_layer_visibility(&doc, 0).unwrap()
+        ));
+        assert!(!is_structural_layer_edit(
+            &commit_layer_rename(&doc, 0, "Ink").unwrap()
+        ));
     }
 
     #[test]
     fn active_layer_request_requests_the_clicked_row_only_when_it_is_not_already_active() {
-        assert_eq!(active_layer_request(2, 0, true), Some(DocProperty::ActiveLayer(2)), "a click on a non-active row must request it");
-        assert_eq!(active_layer_request(0, 0, true), None, "a click on the already-active row must request nothing");
-        assert_eq!(active_layer_request(2, 0, false), None, "no click must request nothing");
+        assert_eq!(
+            active_layer_request(2, 0, true),
+            Some(DocProperty::ActiveLayer(2)),
+            "a click on a non-active row must request it"
+        );
+        assert_eq!(
+            active_layer_request(0, 0, true),
+            None,
+            "a click on the already-active row must request nothing"
+        );
+        assert_eq!(
+            active_layer_request(2, 0, false),
+            None,
+            "no click must request nothing"
+        );
     }
 
     /// A no-input render must produce a true no-op outcome — proves rendering alone never requests
@@ -490,7 +603,10 @@ mod tests {
         let doc = doc_with_layers(3);
         let ctx = egui::Context::default();
         let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1920.0, 1140.0))),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::new(1920.0, 1140.0),
+            )),
             ..Default::default()
         };
         let _ = ctx.run_ui(raw, |ui| {

@@ -16,12 +16,21 @@ use crate::model::{Document, Layer, LayerMeta};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LayerOpError {
-    IndexOutOfBounds { index: usize, layer_count: usize },
-    TooManyLayers { found: usize, max: usize },
+    IndexOutOfBounds {
+        index: usize,
+        layer_count: usize,
+    },
+    TooManyLayers {
+        found: usize,
+        max: usize,
+    },
     /// `remove_layer` refuses to remove a document's only layer — a document with zero layers must
     /// stay unreachable, mirroring `FrameOpError::LastFrame`.
     LastLayer,
-    TotalCellBudgetExceeded { total_cells: u128, max: usize },
+    TotalCellBudgetExceeded {
+        total_cells: u128,
+        max: usize,
+    },
     /// Every frame must already report the same layer count as `doc.layer_count()` — the permissive-
     /// metadata contract's one hard safety guarantee (see `LayerMeta`'s field doc on `Document`).
     /// Reachable only from a hand-built or corrupted `Document` that bypassed both the loader and
@@ -51,11 +60,17 @@ fn total_cells_after_one_more_layer(doc: &Document) -> u128 {
 fn check_caps(doc: &Document) -> Result<(), LayerOpError> {
     let new_layer_count = doc.layer_count() + 1;
     if new_layer_count > Document::MAX_LAYERS {
-        return Err(LayerOpError::TooManyLayers { found: new_layer_count, max: Document::MAX_LAYERS });
+        return Err(LayerOpError::TooManyLayers {
+            found: new_layer_count,
+            max: Document::MAX_LAYERS,
+        });
     }
     let total = total_cells_after_one_more_layer(doc);
     if total > Document::MAX_TOTAL_CELLS as u128 {
-        return Err(LayerOpError::TotalCellBudgetExceeded { total_cells: total, max: Document::MAX_TOTAL_CELLS });
+        return Err(LayerOpError::TotalCellBudgetExceeded {
+            total_cells: total,
+            max: Document::MAX_TOTAL_CELLS,
+        });
     }
     Ok(())
 }
@@ -69,7 +84,13 @@ pub fn add_layer(doc: &Document, at: usize) -> Result<Edit, LayerOpError> {
     check_caps(doc)?;
     let layers = vec![Layer::blank(doc.width, doc.height); doc.frame_count()];
     let meta = LayerMeta::default_named(at);
-    Ok(Edit::AddLayer { index: at, layers, meta, active_layer_before: doc.active_layer(), active_layer_after: at })
+    Ok(Edit::AddLayer {
+        index: at,
+        layers,
+        meta,
+        active_layer_before: doc.active_layer(),
+        active_layer_after: at,
+    })
 }
 
 /// Clones layer `index` (across every frame) and inserts the clone immediately after it. The
@@ -90,7 +111,13 @@ pub fn duplicate_layer(doc: &Document, index: usize) -> Result<Edit, LayerOpErro
         visible: doc.layer_meta[index].visible,
     };
     let at = index + 1;
-    Ok(Edit::AddLayer { index: at, layers, meta, active_layer_before: doc.active_layer(), active_layer_after: at })
+    Ok(Edit::AddLayer {
+        index: at,
+        layers,
+        meta,
+        active_layer_before: doc.active_layer(),
+        active_layer_after: at,
+    })
 }
 
 /// Removes the layer at `index` from every frame. Errs `LastLayer` if `doc` has only one layer — a
@@ -110,7 +137,13 @@ pub fn remove_layer(doc: &Document, index: usize) -> Result<Edit, LayerOpError> 
     let meta = doc.layer_meta[index].clone();
     let active_before = doc.active_layer();
     let active_after = crate::frame_ops::shift_for_remove(active_before, index, layer_count - 1);
-    Ok(Edit::RemoveLayer { index, layers, meta, active_layer_before: active_before, active_layer_after: active_after })
+    Ok(Edit::RemoveLayer {
+        index,
+        layers,
+        meta,
+        active_layer_before: active_before,
+        active_layer_after: active_after,
+    })
 }
 
 /// Moves the layer at `from` to `to` (in every frame). `Ok(None)` for a `from == to` no-op (no
@@ -118,10 +151,16 @@ pub fn remove_layer(doc: &Document, index: usize) -> Result<Edit, LayerOpError> 
 pub fn reorder_layer(doc: &Document, from: usize, to: usize) -> Result<Option<Edit>, LayerOpError> {
     let layer_count = doc.layer_count();
     if from >= layer_count {
-        return Err(LayerOpError::IndexOutOfBounds { index: from, layer_count });
+        return Err(LayerOpError::IndexOutOfBounds {
+            index: from,
+            layer_count,
+        });
     }
     if to >= layer_count {
-        return Err(LayerOpError::IndexOutOfBounds { index: to, layer_count });
+        return Err(LayerOpError::IndexOutOfBounds {
+            index: to,
+            layer_count,
+        });
     }
     if from == to {
         return Ok(None);
@@ -131,32 +170,62 @@ pub fn reorder_layer(doc: &Document, from: usize, to: usize) -> Result<Option<Ed
     }
     let active_before = doc.active_layer();
     let active_after = crate::frame_ops::shift_for_move(active_before, from, to);
-    Ok(Some(Edit::ReorderLayer { from, to, active_layer_before: active_before, active_layer_after: active_after }))
+    Ok(Some(Edit::ReorderLayer {
+        from,
+        to,
+        active_layer_before: active_before,
+        active_layer_after: active_after,
+    }))
 }
 
 /// Sets layer `index`'s visibility. `Ok(None)` if `visible` already matches the current value (no
 /// empty undo entry).
-pub fn set_layer_visibility(doc: &Document, index: usize, visible: bool) -> Result<Option<Edit>, LayerOpError> {
+pub fn set_layer_visibility(
+    doc: &Document,
+    index: usize,
+    visible: bool,
+) -> Result<Option<Edit>, LayerOpError> {
     let layer_count = doc.layer_count();
-    let current = doc.layer_meta.get(index).ok_or(LayerOpError::IndexOutOfBounds { index, layer_count })?.visible;
+    let current = doc
+        .layer_meta
+        .get(index)
+        .ok_or(LayerOpError::IndexOutOfBounds { index, layer_count })?
+        .visible;
     if current == visible {
         return Ok(None);
     }
-    Ok(Some(Edit::SetLayerVisibility { index, before: current, after: visible }))
+    Ok(Some(Edit::SetLayerVisibility {
+        index,
+        before: current,
+        after: visible,
+    }))
 }
 
 /// Sets layer `index`'s name, truncated to `LayerMeta::MAX_NAME_LEN` — the same cap the format
 /// loader enforces, so a plugin-driven rename can't write an unbounded name any more than a
 /// hand-crafted file can. `Ok(None)` if the (already-clamped) name already matches the current
 /// value (no empty undo entry).
-pub fn set_layer_name(doc: &Document, index: usize, name: String) -> Result<Option<Edit>, LayerOpError> {
+pub fn set_layer_name(
+    doc: &Document,
+    index: usize,
+    name: String,
+) -> Result<Option<Edit>, LayerOpError> {
     let layer_count = doc.layer_count();
-    let current = doc.layer_meta.get(index).ok_or(LayerOpError::IndexOutOfBounds { index, layer_count })?.name.clone();
+    let current = doc
+        .layer_meta
+        .get(index)
+        .ok_or(LayerOpError::IndexOutOfBounds { index, layer_count })?
+        .name
+        .clone();
     let name = LayerMeta::clamp_name(name);
     if current == name {
         return Ok(None);
     }
-    Ok(Some(Edit::SetLayerName { index, before: current, after: name }))
+    Ok(Some(Edit::SetLayerName {
+        index,
+        before: current,
+        after: name,
+    }))
 }
 
 #[cfg(test)]
@@ -172,9 +241,19 @@ mod tests {
         // active_before + 1). A layer insert instead always selects the *new* layer.
         let doc = Document::new(3, 3);
         let edit = add_layer(&doc, 0).unwrap();
-        let Edit::AddLayer { active_layer_before, active_layer_after, .. } = edit else { panic!("expected AddLayer") };
+        let Edit::AddLayer {
+            active_layer_before,
+            active_layer_after,
+            ..
+        } = edit
+        else {
+            panic!("expected AddLayer")
+        };
         assert_eq!(active_layer_before, 0);
-        assert_eq!(active_layer_after, 0, "the newly inserted layer's own index becomes active, not a shifted old cursor");
+        assert_eq!(
+            active_layer_after, 0,
+            "the newly inserted layer's own index becomes active, not a shifted old cursor"
+        );
     }
 
     #[test]
@@ -186,19 +265,47 @@ mod tests {
         let mut history = History::new();
         let edit = add_layer(&doc, 1).unwrap();
         history.apply(&mut doc, edit);
-        assert_eq!(doc.active_layer(), 1, "unlike add_frame, a layer insert after the active index still selects the new layer");
+        assert_eq!(
+            doc.active_layer(),
+            1,
+            "unlike add_frame, a layer insert after the active index still selects the new layer"
+        );
     }
 
     #[test]
     fn duplicate_layer_inserts_a_deep_clone_immediately_after_the_source_and_selects_it() {
         let mut doc = Document::new(3, 3);
-        doc.set_cell(0, 0, 0, Cell { ch: 'D', ..Cell::BLANK });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: 'D',
+                ..Cell::BLANK
+            },
+        );
 
         let edit = duplicate_layer(&doc, 0).unwrap();
-        let Edit::AddLayer { index, ref layers, ref meta, active_layer_after, .. } = edit else { panic!("expected AddLayer") };
+        let Edit::AddLayer {
+            index,
+            ref layers,
+            ref meta,
+            active_layer_after,
+            ..
+        } = edit
+        else {
+            panic!("expected AddLayer")
+        };
         assert_eq!(index, 1, "the clone lands immediately after the source");
-        assert_eq!(active_layer_after, 1, "the duplicate becomes active, diverging from duplicate_frame's own precedent");
-        assert_eq!(layers[0].cells()[0].ch, 'D', "the clone carries the source's content");
+        assert_eq!(
+            active_layer_after, 1,
+            "the duplicate becomes active, diverging from duplicate_frame's own precedent"
+        );
+        assert_eq!(
+            layers[0].cells()[0].ch,
+            'D',
+            "the clone carries the source's content"
+        );
         assert_eq!(meta.name, "Layer 1 copy");
         assert!(meta.visible);
 
@@ -217,7 +324,9 @@ mod tests {
         assert!(!doc.layer_visible(0));
 
         let edit = duplicate_layer(&doc, 0).unwrap();
-        let Edit::AddLayer { ref meta, .. } = edit else { panic!("expected AddLayer") };
+        let Edit::AddLayer { ref meta, .. } = edit else {
+            panic!("expected AddLayer")
+        };
         assert!(!meta.visible, "the duplicate must carry the source's current visibility, not always default to visible");
     }
 
@@ -234,8 +343,16 @@ mod tests {
         // Move active layer aside so it isn't the one being removed.
         assert!(doc.set_active_layer(2));
         let edit = remove_layer(&doc, 0).unwrap();
-        let Edit::RemoveLayer { active_layer_after, .. } = edit else { panic!("expected RemoveLayer") };
-        assert_eq!(active_layer_after, 1, "removing a layer before the active index shifts it back by one");
+        let Edit::RemoveLayer {
+            active_layer_after, ..
+        } = edit
+        else {
+            panic!("expected RemoveLayer")
+        };
+        assert_eq!(
+            active_layer_after, 1,
+            "removing a layer before the active index shifts it back by one"
+        );
     }
 
     #[test]
@@ -247,8 +364,16 @@ mod tests {
         assert!(doc.set_active_layer(0));
 
         let edit = remove_layer(&doc, 0).unwrap();
-        let Edit::RemoveLayer { active_layer_after, .. } = edit else { panic!("expected RemoveLayer") };
-        assert_eq!(active_layer_after, 0, "removing the active layer clamps to the new last valid index");
+        let Edit::RemoveLayer {
+            active_layer_after, ..
+        } = edit
+        else {
+            panic!("expected RemoveLayer")
+        };
+        assert_eq!(
+            active_layer_after, 0,
+            "removing the active layer clamps to the new last valid index"
+        );
     }
 
     #[test]
@@ -268,8 +393,16 @@ mod tests {
         assert!(doc.set_active_layer(0));
 
         let edit = reorder_layer(&doc, 0, 2).unwrap().unwrap();
-        let Edit::ReorderLayer { active_layer_after, .. } = edit else { panic!("expected ReorderLayer") };
-        assert_eq!(active_layer_after, 2, "moving the active layer itself follows it to the destination");
+        let Edit::ReorderLayer {
+            active_layer_after, ..
+        } = edit
+        else {
+            panic!("expected ReorderLayer")
+        };
+        assert_eq!(
+            active_layer_after, 2,
+            "moving the active layer itself follows it to the destination"
+        );
     }
 
     #[test]
@@ -281,7 +414,11 @@ mod tests {
     #[test]
     fn set_layer_visibility_to_the_same_value_returns_none() {
         let doc = Document::new(3, 3);
-        assert_eq!(set_layer_visibility(&doc, 0, true), Ok(None), "layer 0 already starts visible");
+        assert_eq!(
+            set_layer_visibility(&doc, 0, true),
+            Ok(None),
+            "layer 0 already starts visible"
+        );
     }
 
     #[test]
@@ -289,7 +426,10 @@ mod tests {
         let doc = Document::new(3, 3);
         assert_eq!(
             set_layer_visibility(&doc, 5, false),
-            Err(LayerOpError::IndexOutOfBounds { index: 5, layer_count: 1 })
+            Err(LayerOpError::IndexOutOfBounds {
+                index: 5,
+                layer_count: 1
+            })
         );
     }
 
@@ -307,7 +447,10 @@ mod tests {
         let doc = Document::new(3, 3);
         assert_eq!(
             set_layer_name(&doc, 5, "x".to_string()),
-            Err(LayerOpError::IndexOutOfBounds { index: 5, layer_count: 1 })
+            Err(LayerOpError::IndexOutOfBounds {
+                index: 5,
+                layer_count: 1
+            })
         );
     }
 
@@ -318,10 +461,15 @@ mod tests {
     fn set_layer_name_truncates_a_name_far_past_the_length_cap() {
         let doc = Document::new(3, 3);
         let huge_name = "x".repeat(LayerMeta::MAX_NAME_LEN * 4);
-        let Edit::SetLayerName { after, .. } = set_layer_name(&doc, 0, huge_name).unwrap().unwrap() else {
+        let Edit::SetLayerName { after, .. } = set_layer_name(&doc, 0, huge_name).unwrap().unwrap()
+        else {
             panic!("expected SetLayerName")
         };
-        assert_eq!(after.chars().count(), LayerMeta::MAX_NAME_LEN, "the stored name must be clamped to the cap");
+        assert_eq!(
+            after.chars().count(),
+            LayerMeta::MAX_NAME_LEN,
+            "the stored name must be clamped to the cap"
+        );
     }
 
     /// Timing-asserted like `frame_ops`'s own "must reject before allocating" tests: rejection must
@@ -338,8 +486,17 @@ mod tests {
 
         let started = std::time::Instant::now();
         let result = add_layer(&doc, 0);
-        assert!(started.elapsed() < std::time::Duration::from_millis(200), "must reject before allocating, not after");
-        assert_eq!(result, Err(LayerOpError::TooManyLayers { found: Document::MAX_LAYERS + 1, max: Document::MAX_LAYERS }));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(200),
+            "must reject before allocating, not after"
+        );
+        assert_eq!(
+            result,
+            Err(LayerOpError::TooManyLayers {
+                found: Document::MAX_LAYERS + 1,
+                max: Document::MAX_LAYERS
+            })
+        );
     }
 
     /// Trips the joint `MAX_TOTAL_CELLS` budget independent of the per-call `MAX_LAYERS` cap: two
@@ -356,10 +513,12 @@ mod tests {
     #[test]
     fn add_layer_over_the_total_cell_budget_is_rejected() {
         let layers_per_frame = 129; // (129*2 + 2) * MAX_WIDTH*MAX_HEIGHT exceeds MAX_TOTAL_CELLS,
-                                     // while layer_count()+1 (130) stays well under MAX_LAYERS (256).
+                                    // while layer_count()+1 (130) stays well under MAX_LAYERS (256).
         let frames: Vec<Frame> = (0..2)
             .map(|_| Frame {
-                layers: (0..layers_per_frame).map(|_| crate::model::Layer::blank(1, 1)).collect(),
+                layers: (0..layers_per_frame)
+                    .map(|_| crate::model::Layer::blank(1, 1))
+                    .collect(),
                 duration_override: None,
             })
             .collect();
@@ -371,13 +530,21 @@ mod tests {
             loop_playback: true,
             frames,
             active_frame: 0,
-            layer_meta: (0..layers_per_frame).map(LayerMeta::default_named).collect(),
+            layer_meta: (0..layers_per_frame)
+                .map(LayerMeta::default_named)
+                .collect(),
             active_layer: 0,
         };
-        assert!(doc.layer_count() < Document::MAX_LAYERS, "sanity: must stay under the per-call MAX_LAYERS cap");
+        assert!(
+            doc.layer_count() < Document::MAX_LAYERS,
+            "sanity: must stay under the per-call MAX_LAYERS cap"
+        );
 
         let result = add_layer(&doc, 0);
-        assert!(matches!(result, Err(LayerOpError::TotalCellBudgetExceeded { .. })));
+        assert!(matches!(
+            result,
+            Err(LayerOpError::TotalCellBudgetExceeded { .. })
+        ));
     }
 
     #[test]
@@ -385,9 +552,16 @@ mod tests {
         let mut doc = Document::new(3, 3);
         doc.layers_mut().push(crate::model::Layer::blank(3, 3)); // bypasses layer_meta on purpose
         assert_eq!(doc.layers().len(), 2);
-        assert_eq!(doc.layer_count(), 1, "layer_meta was never touched by the direct layers_mut() push");
+        assert_eq!(
+            doc.layer_count(),
+            1,
+            "layer_meta was never touched by the direct layers_mut() push"
+        );
         assert_eq!(add_layer(&doc, 0), Err(LayerOpError::LayerCountDesync));
-        assert_eq!(duplicate_layer(&doc, 0), Err(LayerOpError::LayerCountDesync));
+        assert_eq!(
+            duplicate_layer(&doc, 0),
+            Err(LayerOpError::LayerCountDesync)
+        );
     }
 
     #[test]
@@ -401,9 +575,16 @@ mod tests {
         // Desync: push a third layer directly onto the active frame, bypassing layer_meta.
         doc.layers_mut().push(crate::model::Layer::blank(3, 3));
         assert_eq!(doc.layers().len(), 3);
-        assert_eq!(doc.layer_count(), 2, "layer_meta was never touched by the direct push");
+        assert_eq!(
+            doc.layer_count(),
+            2,
+            "layer_meta was never touched by the direct push"
+        );
 
         assert_eq!(remove_layer(&doc, 0), Err(LayerOpError::LayerCountDesync));
-        assert_eq!(reorder_layer(&doc, 0, 1), Err(LayerOpError::LayerCountDesync));
+        assert_eq!(
+            reorder_layer(&doc, 0, 1),
+            Err(LayerOpError::LayerCountDesync)
+        );
     }
 }

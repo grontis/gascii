@@ -21,7 +21,9 @@ fn tokens(ui: &Ui) -> Tokens {
 }
 
 fn measure(ui: &Ui, text: &str, font: &egui::FontId) -> Vec2 {
-    ui.painter().layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER).size()
+    ui.painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER)
+        .size()
 }
 
 fn border(painter: &Painter, rect: Rect, color: Color32) {
@@ -39,7 +41,11 @@ pub(crate) fn button(ui: &mut Ui, label: &str, enabled: bool, min_h: f32) -> Res
     let pad = Vec2::new(10.0, 5.0);
     let mut size = text + pad * 2.0;
     size.y = size.y.max(min_h);
-    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
     let (rect, resp) = ui.allocate_exact_size(size, sense);
     let painter = ui.painter().clone();
 
@@ -63,7 +69,11 @@ pub(crate) fn button(ui: &mut Ui, label: &str, enabled: bool, min_h: f32) -> Res
 pub(crate) fn square_button(ui: &mut Ui, glyph: &str, enabled: bool, side: f32) -> Response {
     let t = tokens(ui);
     let font = mono_id(size::LABEL);
-    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(side), sense);
     let painter = ui.painter().clone();
 
@@ -86,7 +96,11 @@ pub(crate) fn square_button(ui: &mut Ui, glyph: &str, enabled: bool, side: f32) 
 pub(crate) fn micro_label(ui: &mut Ui, text: &str) -> Response {
     let t = tokens(ui);
     let spaced: String = text.chars().flat_map(|c| [c, '\u{2009}']).collect();
-    ui.label(egui::RichText::new(spaced).font(mono_id(size::MICRO)).color(t.fg_secondary))
+    ui.label(
+        egui::RichText::new(spaced)
+            .font(mono_id(size::MICRO))
+            .color(t.fg_secondary),
+    )
 }
 
 #[cfg(test)]

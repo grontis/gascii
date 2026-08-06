@@ -99,8 +99,13 @@ fn tool_shortcut_reachable(kind: ToolKind, is_fullscreen: bool) -> bool {
 /// it never reaches (because an earlier one already matched) is left completely untouched — the
 /// same "table order = consumption order, one shot" contract the chord registry's own generic loop
 /// follows.
-fn tool_shortcut_fires_and_consumes_its_key(def: &ToolDef, i: &mut egui::InputState, is_fullscreen: bool) -> bool {
-    tool_shortcut_reachable(def.kind, is_fullscreen) && i.consume_key(egui::Modifiers::NONE, def.key)
+fn tool_shortcut_fires_and_consumes_its_key(
+    def: &ToolDef,
+    i: &mut egui::InputState,
+    is_fullscreen: bool,
+) -> bool {
+    tool_shortcut_reachable(def.kind, is_fullscreen)
+        && i.consume_key(egui::Modifiers::NONE, def.key)
 }
 
 /// One plugin's per-app runtime state — `plugins`' enabled/resume sidecar, indexed identically.
@@ -357,7 +362,11 @@ enum OpenDialog {
 }
 
 impl GasciiApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, started: Instant, launch_fullscreen: bool) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        started: Instant,
+        launch_fullscreen: bool,
+    ) -> Self {
         fonts::install_fonts(&cc.egui_ctx);
         crate::ui::theme::install(&cc.egui_ctx);
         let mut app = Self::with_state(started);
@@ -401,8 +410,13 @@ impl GasciiApp {
         // Same slice `build_tools` reads descriptions from — see `PLUGINS`'s own doc comment for
         // why the two can no longer iterate it differently.
         let plugins: Vec<Box<dyn Plugin>> = PLUGINS.iter().map(|d| (d.make)()).collect();
-        let plugin_runtime: Vec<PluginRuntime> =
-            PLUGINS.iter().map(|_| PluginRuntime { enabled: true, resume_pending: false }).collect();
+        let plugin_runtime: Vec<PluginRuntime> = PLUGINS
+            .iter()
+            .map(|_| PluginRuntime {
+                enabled: true,
+                resume_pending: false,
+            })
+            .collect();
         let renderer = build_renderer(plugins.iter().map(|p| p.as_ref()));
         let doc = Document::default_document();
         // Mirrors `saved_marker`'s own "start clean" contract, read from the fresh `doc` itself
@@ -430,7 +444,10 @@ impl GasciiApp {
             mask: PlaneMask::default(),
             active_layer: 0,
             active_frame: 0,
-            slots: [ToolSlot::new(ToolKind::Pencil), ToolSlot::new(ToolKind::Eraser)],
+            slots: [
+                ToolSlot::new(ToolKind::Pencil),
+                ToolSlot::new(ToolKind::Eraser),
+            ],
             options_focus: Binding::L,
             stroke_owner: None,
             pressure_stamp_size: None,
@@ -507,13 +524,19 @@ impl GasciiApp {
     /// enabled, a plugin row follows its plugin's toggle. Filtering anywhere else would let two
     /// consumers drift on what "available" means.
     pub(crate) fn tool_enabled(&self, kind: ToolKind) -> bool {
-        tool_def(kind).plugin_slot.is_none_or(|i| self.plugin_enabled(i))
+        tool_def(kind)
+            .plugin_slot
+            .is_none_or(|i| self.plugin_enabled(i))
     }
 
     /// The registry minus disabled plugins' rows — what the toolbox and kiosk grids draw. Owned:
     /// `ToolDef` is `Copy` and both grids need `&mut GasciiApp` alongside the list.
     pub(crate) fn active_tools(&self) -> Vec<ToolDef> {
-        tools().iter().copied().filter(|d| self.tool_enabled(d.kind)).collect()
+        tools()
+            .iter()
+            .copied()
+            .filter(|d| self.tool_enabled(d.kind))
+            .collect()
     }
 
     /// Whether gascii-anim is enabled — gates the menu bar's Animation menu: a second frame
@@ -580,7 +603,10 @@ impl GasciiApp {
     #[cfg(test)]
     pub(crate) fn push_plugin_double(&mut self, p: Box<dyn Plugin>) -> usize {
         self.plugins.push(p);
-        self.plugin_runtime.push(PluginRuntime { enabled: true, resume_pending: false });
+        self.plugin_runtime.push(PluginRuntime {
+            enabled: true,
+            resume_pending: false,
+        });
         self.plugins.len() - 1
     }
 
@@ -591,8 +617,13 @@ impl GasciiApp {
     /// need a concrete plugin type back out of `Box<dyn Plugin>`.
     #[cfg(test)]
     pub(crate) fn brush_plugin_mut(&mut self) -> &mut gascii_density_brush::BrushPlugin {
-        let i = tool_def(BRUSH_KIND).plugin_slot.expect("Brush is plugin-sourced");
-        self.plugins[i].as_any_mut().downcast_mut().expect("plugin at Brush's slot must be BrushPlugin")
+        let i = tool_def(BRUSH_KIND)
+            .plugin_slot
+            .expect("Brush is plugin-sourced");
+        self.plugins[i]
+            .as_any_mut()
+            .downcast_mut()
+            .expect("plugin at Brush's slot must be BrushPlugin")
     }
 
     /// Binds `kind` to `b`, replacing that slot's instance. A no-op while a gesture is active: the
@@ -682,13 +713,19 @@ impl GasciiApp {
 
     /// Raises a status-bar error, stamping the moment it was raised so `error_flash` can expire it.
     pub(crate) fn flash_error(&mut self, text: impl Into<String>) {
-        self.last_error = Some(ErrorFlash { text: text.into(), at: std::time::Instant::now() });
+        self.last_error = Some(ErrorFlash {
+            text: text.into(),
+            at: std::time::Instant::now(),
+        });
     }
 
     /// The status bar's view of `last_error`: the text plus the time left before it expires,
     /// `None` once `ERROR_FLASH_TTL` has passed. Takes `now` rather than reading the clock so the
     /// expiry decision is testable without waiting out the TTL.
-    pub(crate) fn error_flash(&self, now: std::time::Instant) -> Option<(&str, std::time::Duration)> {
+    pub(crate) fn error_flash(
+        &self,
+        now: std::time::Instant,
+    ) -> Option<(&str, std::time::Duration)> {
         let flash = self.last_error.as_ref()?;
         let elapsed = now.saturating_duration_since(flash.at);
         if elapsed >= ERROR_FLASH_TTL {
@@ -733,34 +770,50 @@ impl GasciiApp {
         // press landing inside the animation panel) or the canvas. A keyboard-owning session (a
         // live marquee, a Text burst) always outranks the section — an explicit selection's
         // duplicate/delete/copy beats the implicit "last clicked here" state.
-        let frames_mode = self.frames_section_armed && self.keyboard_owner().is_none() && !widget_focused;
-        let (redo_shift, undo, redo_y, select_all, copy, copy_all, cut, duplicate, delete_frame, paste_frame, generic_always) =
-            ui.input_mut(|i| {
-                // Cmd/Ctrl+Shift+Z must be consumed before the plain Cmd/Ctrl+Z pattern, since
-                // `matches_logically` ignores extra Shift/Alt — checking undo first would swallow
-                // the redo shortcut's Z key press. Same reasoning for Ctrl+Shift+C vs plain Ctrl+C.
-                //
-                // Ctrl+A joins this same `widget_focused`-gated group, not the uniform generic
-                // subset: egui::TextEdit's own cursor handling treats Ctrl+A as "select all text in
-                // this field" while focused (confirmed against the vendored
-                // `text_selection/cursor_range.rs`), the same conflict that put Undo/Redo here in
-                // the first place. A canvas Text session sets no widget focus, so Ctrl+A there still
-                // reaches the Selection-tool chord below.
-                //
-                // Copy/CopyAll/Cut join the same gate for the identical reason: a focused
-                // `TextEdit` (the hex color popup, which lives outside `modal_open()`'s coverage)
-                // reads `Event::Copy`/`Event::Cut` off this frame's event list too, via its own
-                // `filtered_events` — cloned, not consumed, so an unguarded scan here would fire
-                // `copy_selection`/`cut_selection` on the canvas alongside the field's own cut/copy
-                // of its selected text. Duplicate (Ctrl+D) joins it too: it flushes pending work
-                // and spawns a float, so a Ctrl+D typed into a focused popup must not reach the
-                // canvas and rewrite the session underneath it.
-                let (redo_shift, undo, redo_y, select_all, copy, copy_all, cut, duplicate) = if widget_focused {
+        let frames_mode =
+            self.frames_section_armed && self.keyboard_owner().is_none() && !widget_focused;
+        let (
+            redo_shift,
+            undo,
+            redo_y,
+            select_all,
+            copy,
+            copy_all,
+            cut,
+            duplicate,
+            delete_frame,
+            paste_frame,
+            generic_always,
+        ) = ui.input_mut(|i| {
+            // Cmd/Ctrl+Shift+Z must be consumed before the plain Cmd/Ctrl+Z pattern, since
+            // `matches_logically` ignores extra Shift/Alt — checking undo first would swallow
+            // the redo shortcut's Z key press. Same reasoning for Ctrl+Shift+C vs plain Ctrl+C.
+            //
+            // Ctrl+A joins this same `widget_focused`-gated group, not the uniform generic
+            // subset: egui::TextEdit's own cursor handling treats Ctrl+A as "select all text in
+            // this field" while focused (confirmed against the vendored
+            // `text_selection/cursor_range.rs`), the same conflict that put Undo/Redo here in
+            // the first place. A canvas Text session sets no widget focus, so Ctrl+A there still
+            // reaches the Selection-tool chord below.
+            //
+            // Copy/CopyAll/Cut join the same gate for the identical reason: a focused
+            // `TextEdit` (the hex color popup, which lives outside `modal_open()`'s coverage)
+            // reads `Event::Copy`/`Event::Cut` off this frame's event list too, via its own
+            // `filtered_events` — cloned, not consumed, so an unguarded scan here would fire
+            // `copy_selection`/`cut_selection` on the canvas alongside the field's own cut/copy
+            // of its selected text. Duplicate (Ctrl+D) joins it too: it flushes pending work
+            // and spawns a float, so a Ctrl+D typed into a focused popup must not reach the
+            // canvas and rewrite the session underneath it.
+            let (redo_shift, undo, redo_y, select_all, copy, copy_all, cut, duplicate) =
+                if widget_focused {
                     (false, false, false, false, false, false, false, false)
                 } else {
                     let (copy, copy_all) = copy_events(&i.events, i.modifiers.shift);
                     (
-                        i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::Z),
+                        i.consume_key(
+                            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                            egui::Key::Z,
+                        ),
                         i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z),
                         i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y),
                         i.consume_key(egui::Modifiers::COMMAND, egui::Key::A),
@@ -770,37 +823,49 @@ impl GasciiApp {
                         i.consume_key(egui::Modifiers::COMMAND, egui::Key::D),
                     )
                 };
-                // The uniform, unconditional subset — one shared consume-and-dispatch loop over
-                // `chords::CHORDS`'s `GenericAlways` rows in table order, rather than one
-                // near-identical individual `consume_key` call per chord. None of these collide with
-                // each other or with anything above, so table order carries no precedence weight
-                // here — it exists only because the registry always consumes in table order, the
-                // same rule `tools()`'s own shortcut lookup already follows.
-                // `Ctrl+Shift+=` (the same physical key as `Ctrl+=`) produces `Key::Plus` on US
-                // layouts rather than `Key::Equals` — folded into `ZoomInAlias`'s own CHORDS row as
-                // a second key pattern (D-7), so the generic loop above already consumes it; no
-                // hand-written second `consume_key` call needed here anymore.
-                // Frames-mode-only keys: Delete removes the active frame, and `Event::Paste` is
-                // consumed (retain), not merely read — canvas.rs reads Paste un-consumed later
-                // this same frame, and without the removal a frames-mode paste would ALSO land as
-                // a floating text stamp on the canvas.
-                let (delete_frame, paste_frame) = if frames_mode {
-                    let del = i.consume_key(egui::Modifiers::NONE, egui::Key::Delete);
-                    let mut pasted = false;
-                    i.events.retain(|e| {
-                        if matches!(e, egui::Event::Paste(_)) {
-                            pasted = true;
-                            return false;
-                        }
-                        true
-                    });
-                    (del, pasted)
-                } else {
-                    (false, false)
-                };
-                let generic_always = chords::consume_generic_chords(i, ChordDispatch::GenericAlways);
-                (redo_shift, undo, redo_y, select_all, copy, copy_all, cut, duplicate, delete_frame, paste_frame, generic_always)
-            });
+            // The uniform, unconditional subset — one shared consume-and-dispatch loop over
+            // `chords::CHORDS`'s `GenericAlways` rows in table order, rather than one
+            // near-identical individual `consume_key` call per chord. None of these collide with
+            // each other or with anything above, so table order carries no precedence weight
+            // here — it exists only because the registry always consumes in table order, the
+            // same rule `tools()`'s own shortcut lookup already follows.
+            // `Ctrl+Shift+=` (the same physical key as `Ctrl+=`) produces `Key::Plus` on US
+            // layouts rather than `Key::Equals` — folded into `ZoomInAlias`'s own CHORDS row as
+            // a second key pattern (D-7), so the generic loop above already consumes it; no
+            // hand-written second `consume_key` call needed here anymore.
+            // Frames-mode-only keys: Delete removes the active frame, and `Event::Paste` is
+            // consumed (retain), not merely read — canvas.rs reads Paste un-consumed later
+            // this same frame, and without the removal a frames-mode paste would ALSO land as
+            // a floating text stamp on the canvas.
+            let (delete_frame, paste_frame) = if frames_mode {
+                let del = i.consume_key(egui::Modifiers::NONE, egui::Key::Delete);
+                let mut pasted = false;
+                i.events.retain(|e| {
+                    if matches!(e, egui::Event::Paste(_)) {
+                        pasted = true;
+                        return false;
+                    }
+                    true
+                });
+                (del, pasted)
+            } else {
+                (false, false)
+            };
+            let generic_always = chords::consume_generic_chords(i, ChordDispatch::GenericAlways);
+            (
+                redo_shift,
+                undo,
+                redo_y,
+                select_all,
+                copy,
+                copy_all,
+                cut,
+                duplicate,
+                delete_frame,
+                paste_frame,
+                generic_always,
+            )
+        });
         let save = generic_always.contains(&ChordId::Save);
         let export_dialog = generic_always.contains(&ChordId::ExportDialog);
         let fit = generic_always.contains(&ChordId::Fit);
@@ -855,7 +920,10 @@ impl GasciiApp {
             let picked = ui.input_mut(|i| {
                 tools()
                     .iter()
-                    .find(|def| self.tool_enabled(def.kind) && tool_shortcut_fires_and_consumes_its_key(def, i, is_fullscreen))
+                    .find(|def| {
+                        self.tool_enabled(def.kind)
+                            && tool_shortcut_fires_and_consumes_its_key(def, i, is_fullscreen)
+                    })
                     .map(|def| def.kind)
             });
             if let Some(kind) = picked {
@@ -869,10 +937,14 @@ impl GasciiApp {
         // when they wouldn't have claimed the key anyway) — and only consumed when it will actually
         // do something: consuming it in a windowed session, or while a widget popup still needs a
         // shot at it, would swallow the key for no effect at all.
-        if should_handle_escape_for_fullscreen(self.keyboard_owner(), self.stroke_in_progress(), widget_focused)
-            && is_fullscreen
+        if should_handle_escape_for_fullscreen(
+            self.keyboard_owner(),
+            self.stroke_in_progress(),
+            widget_focused,
+        ) && is_fullscreen
         {
-            let want_exit = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+            let want_exit =
+                ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
             if want_exit {
                 let ctx = ui.ctx().clone();
                 self.toggle_fullscreen(&ctx);
@@ -886,13 +958,15 @@ impl GasciiApp {
         // composing lasts), which is exactly the bug this is written to avoid. It's a toggle, so
         // key-repeat is ignored the same way the generic loop's toggle rows are — holding F11 down
         // must flip fullscreen once, not flicker it on every OS-generated repeat.
-        let want_toggle = ui.input_mut(|i| chords::consume_key_no_repeat(i, egui::Modifiers::NONE, egui::Key::F11));
+        let want_toggle = ui
+            .input_mut(|i| chords::consume_key_no_repeat(i, egui::Modifiers::NONE, egui::Key::F11));
         if want_toggle {
             let ctx = ui.ctx().clone();
             self.toggle_fullscreen(&ctx);
         }
         if !focused {
-            let fired = ui.input_mut(|i| chords::consume_generic_chords(i, ChordDispatch::GenericUnfocused));
+            let fired = ui
+                .input_mut(|i| chords::consume_generic_chords(i, ChordDispatch::GenericUnfocused));
             if fired.contains(&ChordId::SwapColors) {
                 self.swap_colors();
             }
@@ -900,8 +974,11 @@ impl GasciiApp {
                 self.show_grid = !self.show_grid;
             }
             if fired.contains(&ChordId::HelpOverlay) {
-                self.open_dialog =
-                    if self.open_dialog == Some(OpenDialog::Help) { None } else { Some(OpenDialog::Help) };
+                self.open_dialog = if self.open_dialog == Some(OpenDialog::Help) {
+                    None
+                } else {
+                    Some(OpenDialog::Help)
+                };
             }
         }
         if copy_all {
@@ -965,7 +1042,12 @@ impl GasciiApp {
         // (which lives inside `tick`) goes silent with them. `runtime` and `self.plugins` are
         // disjoint field borrows, same shape as `rebuild_renderer`.
         let (stylus_detected, bound) = host_context(self);
-        let host = host_facts(&self.doc, stylus_detected, bound, self.history.top_edit_id());
+        let host = host_facts(
+            &self.doc,
+            stylus_detected,
+            bound,
+            self.history.top_edit_id(),
+        );
         let mut tick_outcomes = Vec::with_capacity(self.plugins.len());
         let runtime = &mut self.plugin_runtime;
         for (i, p) in self.plugins.iter_mut().enumerate() {
@@ -975,7 +1057,10 @@ impl GasciiApp {
             // `mem::take` consumes the one-shot re-enable latch: read it and reset it to false in
             // a single move, so the reset signal fires on exactly one tick.
             let resumed = resumed_after_suppression
-                || runtime.get_mut(i).map(|r| std::mem::take(&mut r.resume_pending)).unwrap_or(false);
+                || runtime
+                    .get_mut(i)
+                    .map(|r| std::mem::take(&mut r.resume_pending))
+                    .unwrap_or(false);
             tick_outcomes.push(p.tick(ui, focused, resumed, &host));
         }
         self.drain_panel_outcomes(tick_outcomes);
@@ -1003,7 +1088,6 @@ impl GasciiApp {
             }
         }
     }
-
 
     /// File ▸ New…'s body: flush first, then either open the New dialog directly (a clean document)
     /// or veto through the unsaved-changes confirm. Shared by the menu click and the `Ctrl+N` chord
@@ -1088,7 +1172,10 @@ impl eframe::App for GasciiApp {
     /// egui parses the frame's input — makes the tap an ordinary right click everywhere downstream.
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         for event in &mut raw_input.events {
-            if let egui::Event::PointerButton { button, pressed, .. } = event {
+            if let egui::Event::PointerButton {
+                button, pressed, ..
+            } = event
+            {
                 if *button != egui::PointerButton::Primary {
                     continue;
                 }
@@ -1162,7 +1249,11 @@ impl eframe::App for GasciiApp {
                 .exact_size(crate::ui::kiosk::TOP_H)
                 .show(ui, |ui| crate::ui::kiosk::top_bar(ui, self, &ctx));
             egui::Panel::bottom("kiosk_status")
-                .frame(egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::symmetric(12, 0)))
+                .frame(
+                    egui::Frame::new()
+                        .fill(t.bg_panel)
+                        .inner_margin(egui::Margin::symmetric(12, 0)),
+                )
                 .exact_size(crate::ui::kiosk::STATUS_H)
                 .show(ui, |ui| {
                     ui.horizontal_centered(|ui| crate::ui::kiosk::status_bar(ui, self));
@@ -1200,7 +1291,11 @@ impl eframe::App for GasciiApp {
                 .exact_size(crate::ui::titlebar::HEIGHT)
                 .show(ui, |ui| crate::ui::titlebar::show(ui, self));
             egui::Panel::top("menubar")
-                .frame(egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::symmetric(8, 0)))
+                .frame(
+                    egui::Frame::new()
+                        .fill(t.bg_panel)
+                        .inner_margin(egui::Margin::symmetric(8, 0)),
+                )
                 .exact_size(28.0)
                 .show(ui, |ui| {
                     ui.horizontal_centered(|ui| crate::ui::menu::show(ui, self));
@@ -1209,13 +1304,21 @@ impl eframe::App for GasciiApp {
             // take their slice in declaration order: sidebar-first would give the left panel the whole
             // remaining height and leave the status bar starting at x=208.
             egui::Panel::bottom("status")
-                .frame(egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::symmetric(12, 0)))
+                .frame(
+                    egui::Frame::new()
+                        .fill(t.bg_panel)
+                        .inner_margin(egui::Margin::symmetric(12, 0)),
+                )
                 .exact_size(crate::ui::status_bar::HEIGHT)
                 .show(ui, |ui| {
                     ui.horizontal_centered(|ui| crate::ui::status_bar::show(ui, self));
                 });
             egui::Panel::left("sidebar")
-                .frame(egui::Frame::new().fill(t.bg_panel).inner_margin(egui::Margin::same(12)))
+                .frame(
+                    egui::Frame::new()
+                        .fill(t.bg_panel)
+                        .inner_margin(egui::Margin::same(12)),
+                )
                 .default_size(crate::ui::sidebar::DEFAULT_WIDTH)
                 .size_range(crate::ui::sidebar::MIN_WIDTH..=crate::ui::sidebar::MAX_WIDTH)
                 .resizable(true)
@@ -1251,4 +1354,3 @@ impl eframe::App for GasciiApp {
 
 #[cfg(test)]
 mod tests;
-

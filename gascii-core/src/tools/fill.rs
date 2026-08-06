@@ -4,7 +4,9 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use super::{diff_pending, mask_apply, PendingCell, PlaneMask, Tool, ToolCtx, ToolEvent, ToolResponse};
+use super::{
+    diff_pending, mask_apply, PendingCell, PlaneMask, Tool, ToolCtx, ToolEvent, ToolResponse,
+};
 use crate::model::{Cell, Document};
 
 #[derive(Default)]
@@ -33,8 +35,15 @@ impl Tool for FloodFill {
                 if !doc.in_bounds(x, y) {
                     return ToolResponse::Active;
                 }
-                let target = doc.cell_at(ctx.frame, ctx.layer, x, y).copied().unwrap_or(Cell::BLANK);
-                let proposed = Cell { ch: ctx.glyph, fg: ctx.fg, bg: ctx.bg };
+                let target = doc
+                    .cell_at(ctx.frame, ctx.layer, x, y)
+                    .copied()
+                    .unwrap_or(Cell::BLANK);
+                let proposed = Cell {
+                    ch: ctx.glyph,
+                    fg: ctx.fg,
+                    bg: ctx.bg,
+                };
                 self.source = Some((proposed, ctx.mask));
 
                 // Iterative worklist — never recursion: a full 1024x1024 canvas is ~1M cells and
@@ -44,8 +53,15 @@ impl Tool for FloodFill {
                 worklist.push_back((x, y));
                 visited.insert((x, y));
                 while let Some((cx, cy)) = worklist.pop_front() {
-                    let cell = doc.cell_at(ctx.frame, ctx.layer, cx, cy).copied().unwrap_or(Cell::BLANK);
-                    self.pending.push(PendingCell { x: cx, y: cy, cell: mask_apply(cell, proposed, ctx.mask) });
+                    let cell = doc
+                        .cell_at(ctx.frame, ctx.layer, cx, cy)
+                        .copied()
+                        .unwrap_or(Cell::BLANK);
+                    self.pending.push(PendingCell {
+                        x: cx,
+                        y: cy,
+                        cell: mask_apply(cell, proposed, ctx.mask),
+                    });
 
                     let mut neighbors: [Option<(u16, u16)>; 4] = [None; 4];
                     if cx > 0 {
@@ -64,7 +80,10 @@ impl Tool for FloodFill {
                         if !visited.insert(n) {
                             continue;
                         }
-                        let ncell = doc.cell_at(ctx.frame, ctx.layer, n.0, n.1).copied().unwrap_or(Cell::BLANK);
+                        let ncell = doc
+                            .cell_at(ctx.frame, ctx.layer, n.0, n.1)
+                            .copied()
+                            .unwrap_or(Cell::BLANK);
                         if ncell == target {
                             worklist.push_back(n);
                         }
@@ -97,9 +116,14 @@ impl Tool for FloodFill {
     /// the Press-time composition in `pending`, and Release's `diff_pending` would commit it
     /// wholesale — re-imposing the superseded content, on masked-off planes especially.
     fn resync(&mut self, doc: &Document, frame: usize, layer: usize) {
-        let Some((proposed, mask)) = self.source else { return };
+        let Some((proposed, mask)) = self.source else {
+            return;
+        };
         for p in &mut self.pending {
-            let current = doc.cell_at(frame, layer, p.x, p.y).copied().unwrap_or(Cell::BLANK);
+            let current = doc
+                .cell_at(frame, layer, p.x, p.y)
+                .copied()
+                .unwrap_or(Cell::BLANK);
             p.cell = mask_apply(current, proposed, mask);
         }
     }
@@ -140,7 +164,11 @@ mod tests {
         let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
             panic!("expected a committed edit");
         };
-        assert_eq!(cells.len(), 100, "the whole blank canvas is one connected region");
+        assert_eq!(
+            cells.len(),
+            100,
+            "the whole blank canvas is one connected region"
+        );
         assert!(cells.iter().all(|c| c.after.ch == '#'));
     }
 
@@ -149,7 +177,16 @@ mod tests {
         let mut doc = Document::new(5, 5);
         // A vertical wall of '|' at column 3 bounds the fill to columns 0..3.
         for y in 0..5u16 {
-            doc.set_cell(0, 3, y, Cell { ch: '|', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+            doc.set_cell(
+                0,
+                3,
+                y,
+                Cell {
+                    ch: '|',
+                    fg: Rgba::WHITE,
+                    bg: Rgba::TRANSPARENT,
+                },
+            );
         }
         let tctx = ctx(PlaneMask::ALL, '#', Rgba::WHITE, Rgba::TRANSPARENT);
         let resp = press_release(&doc, &tctx, (0, 0));
@@ -164,18 +201,67 @@ mod tests {
     fn diagonal_neighbors_are_not_connected() {
         let mut doc = Document::new(3, 3);
         // A plus-shaped wall isolates the four diagonal corners from each other and from center.
-        doc.set_cell(0, 1, 0, Cell { ch: '#', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
-        doc.set_cell(0, 0, 1, Cell { ch: '#', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
-        doc.set_cell(0, 2, 1, Cell { ch: '#', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
-        doc.set_cell(0, 1, 2, Cell { ch: '#', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
-        doc.set_cell(0, 1, 1, Cell { ch: '#', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            1,
+            0,
+            Cell {
+                ch: '#',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
+        doc.set_cell(
+            0,
+            0,
+            1,
+            Cell {
+                ch: '#',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
+        doc.set_cell(
+            0,
+            2,
+            1,
+            Cell {
+                ch: '#',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
+        doc.set_cell(
+            0,
+            1,
+            2,
+            Cell {
+                ch: '#',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
+        doc.set_cell(
+            0,
+            1,
+            1,
+            Cell {
+                ch: '#',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
 
         let tctx = ctx(PlaneMask::ALL, '@', Rgba::WHITE, Rgba::TRANSPARENT);
         let resp = press_release(&doc, &tctx, (0, 0)); // top-left corner, Blank, diagonal-only to (2,0) etc.
         let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
             panic!("expected a committed edit");
         };
-        assert_eq!(cells.len(), 1, "the corner cell has no 4-connected Blank neighbor");
+        assert_eq!(
+            cells.len(),
+            1,
+            "the corner cell has no 4-connected Blank neighbor"
+        );
         assert_eq!((cells[0].x, cells[0].y), (0, 0));
     }
 
@@ -193,7 +279,11 @@ mod tests {
     #[test]
     fn fill_that_changes_nothing_commits_none() {
         let mut doc = Document::new(5, 5);
-        let existing = Cell { ch: '#', fg: Rgba(1, 2, 3, 255), bg: Rgba(4, 5, 6, 255) };
+        let existing = Cell {
+            ch: '#',
+            fg: Rgba(1, 2, 3, 255),
+            bg: Rgba(4, 5, 6, 255),
+        };
         for y in 0..5u16 {
             for x in 0..5u16 {
                 doc.set_cell(0, x, y, existing);
@@ -209,11 +299,41 @@ mod tests {
         let mut doc = Document::new(3, 1);
         // Three Blank-glyph cells that differ only in fg — but the match is by glyph+fg+bg, so
         // this is actually three separate 1-cell regions, not one connected match.
-        doc.set_cell(0, 0, 0, Cell { ch: ' ', fg: Rgba(1, 1, 1, 255), bg: Rgba(7, 7, 7, 255) });
-        doc.set_cell(0, 1, 0, Cell { ch: ' ', fg: Rgba(2, 2, 2, 255), bg: Rgba(7, 7, 7, 255) });
-        doc.set_cell(0, 2, 0, Cell { ch: ' ', fg: Rgba(1, 1, 1, 255), bg: Rgba(7, 7, 7, 255) });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: ' ',
+                fg: Rgba(1, 1, 1, 255),
+                bg: Rgba(7, 7, 7, 255),
+            },
+        );
+        doc.set_cell(
+            0,
+            1,
+            0,
+            Cell {
+                ch: ' ',
+                fg: Rgba(2, 2, 2, 255),
+                bg: Rgba(7, 7, 7, 255),
+            },
+        );
+        doc.set_cell(
+            0,
+            2,
+            0,
+            Cell {
+                ch: ' ',
+                fg: Rgba(1, 1, 1, 255),
+                bg: Rgba(7, 7, 7, 255),
+            },
+        );
 
-        let mask = PlaneMask { glyph: true, bg: false };
+        let mask = PlaneMask {
+            glyph: true,
+            bg: false,
+        };
         let tctx = ctx(mask, '#', Rgba(9, 9, 9, 255), Rgba(9, 9, 9, 255));
         let resp = press_release(&doc, &tctx, (0, 0));
         let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
@@ -223,8 +343,16 @@ mod tests {
         // outside the match region even though it's adjacent.
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0].after.ch, '#');
-        assert_eq!(cells[0].after.fg, Rgba(9, 9, 9, 255), "text color follows the glyph plane");
-        assert_eq!(cells[0].after.bg, Rgba(7, 7, 7, 255), "bg masked off: keeps existing per-cell bg");
+        assert_eq!(
+            cells[0].after.fg,
+            Rgba(9, 9, 9, 255),
+            "text color follows the glyph plane"
+        );
+        assert_eq!(
+            cells[0].after.bg,
+            Rgba(7, 7, 7, 255),
+            "bg masked off: keeps existing per-cell bg"
+        );
     }
 
     #[test]
@@ -233,8 +361,14 @@ mod tests {
         let proposed_fg = Rgba(10, 20, 30, 255);
         let proposed_bg = Rgba(40, 50, 60, 255);
         for mask in [
-            PlaneMask { glyph: true, bg: false },
-            PlaneMask { glyph: false, bg: true },
+            PlaneMask {
+                glyph: true,
+                bg: false,
+            },
+            PlaneMask {
+                glyph: false,
+                bg: true,
+            },
             PlaneMask::ALL,
         ] {
             let tctx = ctx(mask, '@', proposed_fg, proposed_bg);
@@ -244,7 +378,11 @@ mod tests {
             };
             for c in &cells {
                 assert_eq!(c.after.ch == '@', mask.glyph);
-                assert_eq!(c.after.fg == proposed_fg, mask.glyph, "text color follows the glyph plane");
+                assert_eq!(
+                    c.after.fg == proposed_fg,
+                    mask.glyph,
+                    "text color follows the glyph plane"
+                );
                 assert_eq!(c.after.bg == proposed_bg, mask.bg);
             }
         }
@@ -255,16 +393,39 @@ mod tests {
     /// frame's bg survives into `after`, is what makes the defect visible: with identical or
     /// blank content on both frames the wrong-frame read is indistinguishable from the right one.
     #[test]
-    fn press_reads_the_flood_region_and_composition_from_ctx_frame_not_the_documents_active_frame() {
+    fn press_reads_the_flood_region_and_composition_from_ctx_frame_not_the_documents_active_frame()
+    {
         let mut doc = Document::new(1, 1);
-        doc.set_cell(0, 0, 0, Cell { ch: ' ', fg: Rgba::WHITE, bg: Rgba(1, 1, 1, 255) });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: ' ',
+                fg: Rgba::WHITE,
+                bg: Rgba(1, 1, 1, 255),
+            },
+        );
         let edit = crate::frame_ops::add_frame(&doc, 1, crate::model::Frame::blank(1, 1)).unwrap();
         let mut history = crate::edit::History::new();
         history.apply(&mut doc, edit);
-        doc.set_cell_at(1, 0, 0, 0, Cell { ch: ' ', fg: Rgba::WHITE, bg: Rgba(2, 2, 2, 255) });
+        doc.set_cell_at(
+            1,
+            0,
+            0,
+            0,
+            Cell {
+                ch: ' ',
+                fg: Rgba::WHITE,
+                bg: Rgba(2, 2, 2, 255),
+            },
+        );
         doc.set_active_frame(0); // only ctx.frame targets frame 1
 
-        let mask = PlaneMask { glyph: true, bg: false };
+        let mask = PlaneMask {
+            glyph: true,
+            bg: false,
+        };
         let mut tctx = ctx(mask, '#', Rgba(9, 9, 9, 255), Rgba(9, 9, 9, 255));
         tctx.frame = 1;
         let mut fill = FloodFill::new();
@@ -294,16 +455,26 @@ mod tests {
     #[test]
     fn resync_after_external_clear_recomposes_instead_of_reimposing_stale_content() {
         let mut doc = Document::new(3, 1);
-        let colored = Cell { ch: 'x', fg: Rgba(1, 1, 1, 255), bg: Rgba(7, 7, 7, 255) };
+        let colored = Cell {
+            ch: 'x',
+            fg: Rgba(1, 1, 1, 255),
+            bg: Rgba(7, 7, 7, 255),
+        };
         for x in 0..3u16 {
             doc.set_cell(0, x, 0, colored);
         }
-        let mask = PlaneMask { glyph: true, bg: false };
+        let mask = PlaneMask {
+            glyph: true,
+            bg: false,
+        };
         let tctx = ctx(mask, '#', Rgba(9, 9, 9, 255), Rgba(2, 2, 2, 255));
         let mut fill = FloodFill::new();
         fill.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &doc);
         assert_eq!(fill.pending().len(), 3);
-        assert!(fill.pending().iter().all(|p| p.cell.bg == colored.bg), "press-time composition keeps existing bg");
+        assert!(
+            fill.pending().iter().all(|p| p.cell.bg == colored.bg),
+            "press-time composition keeps existing bg"
+        );
 
         // Simulate a Clear landing mid-gesture.
         for x in 0..3u16 {
@@ -318,7 +489,11 @@ mod tests {
         assert_eq!(cells.len(), 3, "the previewed region still commits");
         for c in &cells {
             assert_eq!(c.after.ch, '#');
-            assert_eq!(c.after.bg, Cell::BLANK.bg, "bg masked off: the cleared bg must survive, not the press-time bg");
+            assert_eq!(
+                c.after.bg,
+                Cell::BLANK.bg,
+                "bg masked off: the cleared bg must survive, not the press-time bg"
+            );
             assert_eq!(c.before, Cell::BLANK, "before must be the post-clear value");
         }
     }
@@ -329,7 +504,16 @@ mod tests {
     fn resync_never_regrows_the_region_beyond_the_press_time_flood() {
         let mut doc = Document::new(5, 1);
         // A wall at column 2 bounds the press-time flood to columns 0..2.
-        doc.set_cell(0, 2, 0, Cell { ch: '|', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            2,
+            0,
+            Cell {
+                ch: '|',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         let tctx = ctx(PlaneMask::ALL, '#', Rgba::WHITE, Rgba::TRANSPARENT);
         let mut fill = FloodFill::new();
         fill.update(ToolEvent::Press { x: 0, y: 0 }, &tctx, &doc);
@@ -338,7 +522,11 @@ mod tests {
         // The wall vanishes mid-gesture (e.g. an undo); the region must stay as previewed.
         doc.set_cell(0, 2, 0, Cell::BLANK);
         fill.resync(&doc, 0, 0);
-        assert_eq!(fill.pending().len(), 2, "resync recomposes, never re-floods");
+        assert_eq!(
+            fill.pending().len(),
+            2,
+            "resync recomposes, never re-floods"
+        );
         let resp = fill.update(ToolEvent::Release, &tctx, &doc);
         let ToolResponse::Commit(Some(crate::edit::Edit::Cells(cells))) = resp else {
             panic!("expected a committed edit");

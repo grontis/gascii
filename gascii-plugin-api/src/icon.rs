@@ -9,10 +9,18 @@ pub struct IconPath {
 
 impl IconPath {
     pub const fn open(pts: &'static [(f32, f32)]) -> IconPath {
-        IconPath { pts, closed: false, dashed: false }
+        IconPath {
+            pts,
+            closed: false,
+            dashed: false,
+        }
     }
 
     pub const fn closed(pts: &'static [(f32, f32)]) -> IconPath {
-        IconPath { pts, closed: true, dashed: false }
+        IconPath {
+            pts,
+            closed: true,
+            dashed: false,
+        }
     }
 }

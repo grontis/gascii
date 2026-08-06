@@ -39,7 +39,10 @@ mod tests {
             ("Fragment Mono", MONO),
         ] {
             let missing = missing_from(bytes, 0x0020u32..=0x007E);
-            assert!(missing.is_empty(), "{name} is missing ASCII glyphs: {missing:?}");
+            assert!(
+                missing.is_empty(),
+                "{name} is missing ASCII glyphs: {missing:?}"
+            );
         }
     }
 
@@ -82,9 +85,18 @@ mod tests {
     fn instrument_sans_cuts_are_three_distinct_weights() {
         let weights: Vec<u16> = [UI_REGULAR, UI_MEDIUM, UI_SEMIBOLD]
             .iter()
-            .map(|bytes| ttf_parser::Face::parse(bytes, 0).expect("valid TTF").weight().to_number())
+            .map(|bytes| {
+                ttf_parser::Face::parse(bytes, 0)
+                    .expect("valid TTF")
+                    .weight()
+                    .to_number()
+            })
             .collect();
-        assert_eq!(weights, vec![400, 500, 600], "expected Regular/Medium/SemiBold");
+        assert_eq!(
+            weights,
+            vec![400, 500, 600],
+            "expected Regular/Medium/SemiBold"
+        );
     }
 
     /// Every glyph a user can draw must be in the canvas face. For this family the cmap IS the
@@ -111,7 +123,10 @@ mod tests {
                 }
             }
         }
-        assert!(missing.is_empty(), "glyphs that would render as tofu on the canvas: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "glyphs that would render as tofu on the canvas: {missing:?}"
+        );
     }
 
     /// Every symbol the chrome draws must be carried by at least one bundled face. Both chrome
@@ -127,7 +142,10 @@ mod tests {
                     .all(|bytes| !missing_from(bytes, std::iter::once(ch as u32)).is_empty())
             })
             .collect();
-        assert!(uncarried.is_empty(), "chrome symbols carried by no bundled face: {uncarried:?}");
+        assert!(
+            uncarried.is_empty(),
+            "chrome symbols carried by no bundled face: {uncarried:?}"
+        );
     }
 
     /// A variable font would rasterize as its default instance only — `ab_glyph` has no axis
@@ -140,7 +158,10 @@ mod tests {
             ("SemiBold", UI_SEMIBOLD),
         ] {
             let face = ttf_parser::Face::parse(bytes, 0).expect("valid TTF");
-            assert!(!face.is_variable(), "InstrumentSans-{name} is still a variable font");
+            assert!(
+                !face.is_variable(),
+                "InstrumentSans-{name} is still a variable font"
+            );
         }
     }
 
@@ -153,13 +174,19 @@ mod tests {
     #[test]
     fn box_drawing_has_full_coverage() {
         let missing = missing_glyphs(0x2500u32..=0x257F);
-        assert!(missing.is_empty(), "missing box-drawing glyphs: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "missing box-drawing glyphs: {missing:?}"
+        );
     }
 
     #[test]
     fn blocks_and_shades_have_full_coverage() {
         let missing = missing_glyphs(0x2580u32..=0x259F);
-        assert!(missing.is_empty(), "missing block/shade glyphs: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "missing block/shade glyphs: {missing:?}"
+        );
     }
 
     #[test]
@@ -167,9 +194,7 @@ mod tests {
         // Braille is not a curated palette page — this test records gaps rather than asserting none.
         let missing = missing_glyphs((0x2800u32..=0x28FF).step_by(8));
         if !missing.is_empty() {
-            eprintln!(
-                "Iosevka Fixed Braille sample gaps (informational): {missing:?}"
-            );
+            eprintln!("Iosevka Fixed Braille sample gaps (informational): {missing:?}");
         }
     }
 }

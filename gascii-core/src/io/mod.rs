@@ -44,13 +44,17 @@ pub fn composite_frame(doc: &Document, frame: usize) -> Option<Vec<Vec<Cell>>> {
 /// cell (text export, thumbnails). Painting consumers (canvas, playback overlay, PNG export) walk
 /// `visible_layers` and stack instead — see the module doc.
 pub fn composite_cell(doc: &Document, frame: usize, x: u16, y: u16) -> Cell {
-    let Some(layers) = doc.frame_layers(frame) else { return Cell::BLANK };
+    let Some(layers) = doc.frame_layers(frame) else {
+        return Cell::BLANK;
+    };
     let mut out = Cell::BLANK;
     for layer in 0..layers.len() {
         if !doc.layer_visible(layer) {
             continue;
         }
-        let Some(&over) = doc.cell_at(frame, layer, x, y) else { continue };
+        let Some(&over) = doc.cell_at(frame, layer, x, y) else {
+            continue;
+        };
         out = alpha_over(out, over);
     }
     out
@@ -61,8 +65,12 @@ pub fn composite_cell(doc: &Document, frame: usize, x: u16, y: u16) -> Cell {
 /// instead of `0..layer_count` so hidden-layer exclusion stays here, next to `composite_cell`'s
 /// own — the two models can never disagree about which layers exist.
 pub fn visible_layers(doc: &Document, frame: usize) -> Vec<usize> {
-    let Some(layers) = doc.frame_layers(frame) else { return Vec::new() };
-    (0..layers.len()).filter(|&layer| doc.layer_visible(layer)).collect()
+    let Some(layers) = doc.frame_layers(frame) else {
+        return Vec::new();
+    };
+    (0..layers.len())
+        .filter(|&layer| doc.layer_visible(layer))
+        .collect()
 }
 
 fn alpha_over(under: Cell, over: Cell) -> Cell {
@@ -70,7 +78,11 @@ fn alpha_over(under: Cell, over: Cell) -> Cell {
         return under; // fully transparent — nothing to composite (Blank is alpha)
     }
     if over.bg.is_transparent() {
-        return Cell { ch: over.ch, fg: over.fg, bg: under.bg }; // glyph/fg opaque, bg shows through
+        return Cell {
+            ch: over.ch,
+            fg: over.fg,
+            bg: under.bg,
+        }; // glyph/fg opaque, bg shows through
     }
     if over.bg.3 == 255 {
         return over; // fully opaque bg: complete replace
@@ -89,7 +101,11 @@ fn blended_over(under: Cell, over: Cell) -> Cell {
         blend(over.bg.2, under.bg.2),
         blend(over.bg.3, under.bg.3),
     );
-    Cell { ch: over.ch, fg: over.fg, bg }
+    Cell {
+        ch: over.ch,
+        fg: over.fg,
+        bg,
+    }
 }
 
 #[cfg(test)]
@@ -111,9 +127,15 @@ mod tests {
         }
         assert_eq!(visible_layers(&doc, 0), vec![0, 1, 2]);
 
-        let hide = crate::layer_ops::set_layer_visibility(&doc, 1, false).unwrap().unwrap();
+        let hide = crate::layer_ops::set_layer_visibility(&doc, 1, false)
+            .unwrap()
+            .unwrap();
         history.apply(&mut doc, hide);
-        assert_eq!(visible_layers(&doc, 0), vec![0, 2], "a hidden layer is excluded, order stays bottom-to-top");
+        assert_eq!(
+            visible_layers(&doc, 0),
+            vec![0, 2],
+            "a hidden layer is excluded, order stays bottom-to-top"
+        );
     }
 
     #[test]
@@ -131,11 +153,17 @@ mod tests {
         let edit = crate::layer_ops::add_layer(&doc, 1).unwrap();
         history.apply(&mut doc, edit);
         doc.set_cell(1, 0, 0, cell('t', Rgba::WHITE, Rgba::TRANSPARENT));
-        let hide = crate::layer_ops::set_layer_visibility(&doc, 1, false).unwrap().unwrap();
+        let hide = crate::layer_ops::set_layer_visibility(&doc, 1, false)
+            .unwrap()
+            .unwrap();
         history.apply(&mut doc, hide);
 
         assert_eq!(visible_layers(&doc, 0), vec![0]);
-        assert_eq!(composite_cell(&doc, 0, 0, 0), Cell::BLANK, "the flattened view excludes the same hidden layer");
+        assert_eq!(
+            composite_cell(&doc, 0, 0, 0),
+            Cell::BLANK,
+            "the flattened view excludes the same hidden layer"
+        );
     }
 
     #[test]
@@ -177,9 +205,18 @@ mod tests {
         doc.set_cell(1, 0, 0, cell('t', Rgba::WHITE, top_bg));
         let out = composite(&doc);
         let blended = out[0][0].bg;
-        assert!(blended.0 > bottom_bg.0 && blended.0 < top_bg.0, "red channel should sit strictly between");
-        assert!(blended.1 > bottom_bg.1 && blended.1 < top_bg.1, "green channel should sit strictly between");
-        assert!(blended.2 > bottom_bg.2 && blended.2 < top_bg.2, "blue channel should sit strictly between");
+        assert!(
+            blended.0 > bottom_bg.0 && blended.0 < top_bg.0,
+            "red channel should sit strictly between"
+        );
+        assert!(
+            blended.1 > bottom_bg.1 && blended.1 < top_bg.1,
+            "green channel should sit strictly between"
+        );
+        assert!(
+            blended.2 > bottom_bg.2 && blended.2 < top_bg.2,
+            "blue channel should sit strictly between"
+        );
     }
 
     #[test]
@@ -205,7 +242,10 @@ mod tests {
         assert!(doc.set_active_frame(0));
 
         let out = composite_frame(&doc, 1).unwrap();
-        assert_eq!(out[0][0].ch, 'Q', "explicit frame 1 must be flattened, independent of the active frame (0)");
+        assert_eq!(
+            out[0][0].ch, 'Q',
+            "explicit frame 1 must be flattened, independent of the active frame (0)"
+        );
     }
 
     #[test]
@@ -218,7 +258,10 @@ mod tests {
     fn composite_matches_composite_frame_of_the_active_frame_index() {
         let mut doc = Document::new(2, 2);
         doc.set_cell(0, 0, 0, cell('a', Rgba::WHITE, Rgba::TRANSPARENT));
-        assert_eq!(composite(&doc), composite_frame(&doc, doc.active_frame()).unwrap());
+        assert_eq!(
+            composite(&doc),
+            composite_frame(&doc, doc.active_frame()).unwrap()
+        );
     }
 
     #[test]
@@ -240,7 +283,9 @@ mod tests {
         // Sanity: with both layers visible, the top layer wins.
         assert_eq!(composite_cell(&doc, 0, 0, 0).ch, 't');
 
-        let hide = crate::layer_ops::set_layer_visibility(&doc, 1, false).unwrap().unwrap();
+        let hide = crate::layer_ops::set_layer_visibility(&doc, 1, false)
+            .unwrap()
+            .unwrap();
         history.apply(&mut doc, hide);
         assert_eq!(
             composite_cell(&doc, 0, 0, 0).ch,
@@ -257,10 +302,15 @@ mod tests {
         let add = crate::layer_ops::add_layer(&doc, 1).unwrap();
         history.apply(&mut doc, add);
         doc.set_cell(1, 0, 0, cell('t', Rgba::WHITE, Rgba(9, 9, 9, 255)));
-        let hide = crate::layer_ops::set_layer_visibility(&doc, 1, false).unwrap().unwrap();
+        let hide = crate::layer_ops::set_layer_visibility(&doc, 1, false)
+            .unwrap()
+            .unwrap();
         history.apply(&mut doc, hide);
 
         let out = composite_frame(&doc, 0).unwrap();
-        assert_eq!(out[0][0].ch, 'b', "composite_frame must exclude a hidden layer's content via composite_cell");
+        assert_eq!(
+            out[0][0].ch, 'b',
+            "composite_frame must exclude a hidden layer's content via composite_cell"
+        );
     }
 }

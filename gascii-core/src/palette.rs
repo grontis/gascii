@@ -39,9 +39,18 @@ pub fn builtin_pages() -> Vec<Page> {
     let blocks_shades: Vec<char> = "░▒▓█▀▄▌▐".chars().collect();
 
     vec![
-        Page { name: "ASCII", glyphs: ascii },
-        Page { name: "Box Drawing", glyphs: box_drawing },
-        Page { name: "Blocks & Shades", glyphs: blocks_shades },
+        Page {
+            name: "ASCII",
+            glyphs: ascii,
+        },
+        Page {
+            name: "Box Drawing",
+            glyphs: box_drawing,
+        },
+        Page {
+            name: "Blocks & Shades",
+            glyphs: blocks_shades,
+        },
     ]
 }
 
@@ -104,7 +113,10 @@ mod tests {
         assert_eq!(box_page.glyphs.len(), 128);
         for cp in 0x2500u32..=0x257F {
             let ch = char::from_u32(cp).unwrap();
-            assert!(box_page.glyphs.contains(&ch), "missing box-drawing glyph: {ch:?} (U+{cp:04X})");
+            assert!(
+                box_page.glyphs.contains(&ch),
+                "missing box-drawing glyph: {ch:?} (U+{cp:04X})"
+            );
         }
     }
 
@@ -116,5 +128,4 @@ mod tests {
             assert!(!page.glyphs.is_empty(), "page {name:?} must not be empty");
         }
     }
-
 }

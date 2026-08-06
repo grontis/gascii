@@ -12,7 +12,11 @@ fn flatten(cells: &[Vec<Cell>], trim: bool) -> String {
         .iter()
         .map(|row| {
             let line: String = row.iter().map(|c| c.ch).collect();
-            if trim { line.trim_end().to_owned() } else { line }
+            if trim {
+                line.trim_end().to_owned()
+            } else {
+                line
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -42,8 +46,13 @@ pub fn frame_header(index: usize, duration_ms: u32) -> String {
 pub fn export_text_frames_with_trim(doc: &Document, trim: bool) -> String {
     (0..doc.frame_count())
         .map(|i| {
-            let body = flatten(&composite_frame(doc, i).expect("i is always in 0..frame_count()"), trim);
-            let dur = doc.resolved_frame_duration_ms(i).expect("i is always in 0..frame_count()");
+            let body = flatten(
+                &composite_frame(doc, i).expect("i is always in 0..frame_count()"),
+                trim,
+            );
+            let dur = doc
+                .resolved_frame_duration_ms(i)
+                .expect("i is always in 0..frame_count()");
             format!("{}\n{body}", frame_header(i, dur))
         })
         .collect::<Vec<_>>()
@@ -63,19 +72,73 @@ mod tests {
     #[test]
     fn hand_built_doc_exports_expected_multiline_string() {
         let mut doc = Document::new(3, 2);
-        doc.set_cell(0, 0, 0, Cell { ch: 'a', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
-        doc.set_cell(0, 1, 0, Cell { ch: 'b', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
-        doc.set_cell(0, 0, 1, Cell { ch: 'c', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: 'a',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
+        doc.set_cell(
+            0,
+            1,
+            0,
+            Cell {
+                ch: 'b',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
+        doc.set_cell(
+            0,
+            0,
+            1,
+            Cell {
+                ch: 'c',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         assert_eq!(export_text(&doc), "ab\nc");
     }
 
     #[test]
     fn trailing_colored_but_blank_cells_trim_to_last_glyph() {
         let mut doc = Document::new(4, 1);
-        doc.set_cell(0, 0, 0, Cell { ch: 'x', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: 'x',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         // Colored bg but still a space glyph — trims away regardless of color.
-        doc.set_cell(0, 1, 0, Cell { ch: ' ', fg: Rgba::WHITE, bg: Rgba(9, 9, 9, 255) });
-        doc.set_cell(0, 2, 0, Cell { ch: ' ', fg: Rgba::WHITE, bg: Rgba(9, 9, 9, 255) });
+        doc.set_cell(
+            0,
+            1,
+            0,
+            Cell {
+                ch: ' ',
+                fg: Rgba::WHITE,
+                bg: Rgba(9, 9, 9, 255),
+            },
+        );
+        doc.set_cell(
+            0,
+            2,
+            0,
+            Cell {
+                ch: ' ',
+                fg: Rgba::WHITE,
+                bg: Rgba(9, 9, 9, 255),
+            },
+        );
         assert_eq!(export_text(&doc), "x");
     }
 
@@ -88,7 +151,16 @@ mod tests {
     #[test]
     fn one_by_one_document() {
         let mut doc = Document::new(1, 1);
-        doc.set_cell(0, 0, 0, Cell { ch: 'Q', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: 'Q',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         assert_eq!(export_text(&doc), "Q");
 
         let blank = Document::new(1, 1);
@@ -100,10 +172,23 @@ mod tests {
     #[test]
     fn a_single_frame_document_produces_one_headered_frame_matching_export_text() {
         let mut doc = Document::new(2, 1);
-        doc.set_cell(0, 0, 0, Cell { ch: 'a', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: 'a',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         assert_eq!(
             export_text_frames(&doc),
-            format!("--- frame 1 ({}ms) ---\n{}", Document::DEFAULT_FRAME_DURATION_MS, export_text(&doc))
+            format!(
+                "--- frame 1 ({}ms) ---\n{}",
+                Document::DEFAULT_FRAME_DURATION_MS,
+                export_text(&doc)
+            )
         );
     }
 
@@ -114,15 +199,42 @@ mod tests {
         use crate::model::Frame;
 
         let mut doc = Document::new(2, 1);
-        doc.set_cell(0, 0, 0, Cell { ch: 'a', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: 'a',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         // Trailing colored-but-blank cell — pins that per-frame trim still applies inside each body.
-        doc.set_cell(0, 1, 0, Cell { ch: ' ', fg: Rgba::WHITE, bg: Rgba(1, 1, 1, 255) });
+        doc.set_cell(
+            0,
+            1,
+            0,
+            Cell {
+                ch: ' ',
+                fg: Rgba::WHITE,
+                bg: Rgba(1, 1, 1, 255),
+            },
+        );
 
         let mut history = History::new();
         let edit = add_frame(&doc, 1, Frame::blank(2, 1)).unwrap();
         history.apply(&mut doc, edit);
         assert!(doc.set_active_frame(1));
-        doc.set_cell(0, 0, 0, Cell { ch: 'b', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: 'b',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         assert!(doc.set_active_frame(0));
 
         let edit = set_frame_duration(&doc, 1, Some(250)).unwrap().unwrap();
@@ -147,7 +259,16 @@ mod tests {
         use crate::model::Frame;
 
         let mut doc = Document::new(3, 1);
-        doc.set_cell(0, 0, 0, Cell { ch: 'x', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: 'x',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
 
         let mut history = History::new();
         for _ in 1..3 {
@@ -155,15 +276,46 @@ mod tests {
             history.apply(&mut doc, edit);
         }
         doc.set_active_frame(1);
-        doc.set_cell(0, 0, 0, Cell { ch: 'y', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
-        doc.set_cell(0, 1, 0, Cell { ch: ' ', fg: Rgba::WHITE, bg: Rgba(3, 3, 3, 255) }); // trims away
+        doc.set_cell(
+            0,
+            0,
+            0,
+            Cell {
+                ch: 'y',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
+        doc.set_cell(
+            0,
+            1,
+            0,
+            Cell {
+                ch: ' ',
+                fg: Rgba::WHITE,
+                bg: Rgba(3, 3, 3, 255),
+            },
+        ); // trims away
         doc.set_active_frame(2);
-        doc.set_cell(0, 2, 0, Cell { ch: 'z', fg: Rgba::WHITE, bg: Rgba::TRANSPARENT });
+        doc.set_cell(
+            0,
+            2,
+            0,
+            Cell {
+                ch: 'z',
+                fg: Rgba::WHITE,
+                bg: Rgba::TRANSPARENT,
+            },
+        );
         doc.set_active_frame(0);
 
         let combined = export_text_frames(&doc);
         for i in 0..doc.frame_count() {
-            let header = format!("--- frame {} ({}ms) ---", i + 1, Document::DEFAULT_FRAME_DURATION_MS);
+            let header = format!(
+                "--- frame {} ({}ms) ---",
+                i + 1,
+                Document::DEFAULT_FRAME_DURATION_MS
+            );
             let mut isolated = doc.clone();
             isolated.set_active_frame(i);
             let expected_body = export_text(&isolated);
@@ -171,7 +323,11 @@ mod tests {
                 .split("\n\n")
                 .nth(i)
                 .unwrap_or_else(|| panic!("segment {i} must exist in the combined dump"));
-            assert_eq!(segment, format!("{header}\n{expected_body}"), "frame {i}'s segment must match export_text in isolation");
+            assert_eq!(
+                segment,
+                format!("{header}\n{expected_body}"),
+                "frame {i}'s segment must match export_text in isolation"
+            );
         }
     }
 }

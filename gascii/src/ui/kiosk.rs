@@ -66,8 +66,17 @@ pub fn top_bar(ui: &mut Ui, app: &mut GasciiApp, ctx: &egui::Context) {
 
     let font = fonts::ui_semibold_id(fonts::size::BODY);
     let title = app.window_title();
-    let title_w = painter.layout_no_wrap(title.clone(), font.clone(), t.fg_text).size().x;
-    painter.text(Pos2::new(bar.min.x + 16.0, bar.center().y), Align2::LEFT_CENTER, &title, font, t.fg_text);
+    let title_w = painter
+        .layout_no_wrap(title.clone(), font.clone(), t.fg_text)
+        .size()
+        .x;
+    painter.text(
+        Pos2::new(bar.min.x + 16.0, bar.center().y),
+        Align2::LEFT_CENTER,
+        &title,
+        font,
+        t.fg_text,
+    );
 
     enum Action {
         None,
@@ -82,8 +91,20 @@ pub fn top_bar(ui: &mut Ui, app: &mut GasciiApp, ctx: &egui::Context) {
     // tap is never one slip away from the history pair.
     let buttons = [
         ("Exit Full Screen (Esc)", true, true, Action::Exit, 0.0),
-        ("Redo", false, app.history.can_redo() && no_stroke, Action::Redo, 0.0),
-        ("Undo", false, app.history.can_undo() && no_stroke, Action::Undo, 0.0),
+        (
+            "Redo",
+            false,
+            app.history.can_redo() && no_stroke,
+            Action::Redo,
+            0.0,
+        ),
+        (
+            "Undo",
+            false,
+            app.history.can_undo() && no_stroke,
+            Action::Undo,
+            0.0,
+        ),
         ("Clear Drawing", false, true, Action::Clear, 22.0),
     ];
     let mut action = Action::None;
@@ -93,7 +114,10 @@ pub fn top_bar(ui: &mut Ui, app: &mut GasciiApp, ctx: &egui::Context) {
         x -= lead_gap;
         let w = widgets::button_size(ui, label).x;
         x -= w;
-        let rect = Rect::from_min_size(Pos2::new(x, bar.min.y + 4.0), Vec2::new(w, bar.height() - 8.0));
+        let rect = Rect::from_min_size(
+            Pos2::new(x, bar.min.y + 4.0),
+            Vec2::new(w, bar.height() - 8.0),
+        );
         let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
         if widgets::button(&mut child, label, primary, enabled).clicked() {
             action = act;
@@ -114,7 +138,10 @@ pub fn top_bar(ui: &mut Ui, app: &mut GasciiApp, ctx: &egui::Context) {
     if gap_max > gap_min {
         widgets::pinstripe(
             &painter,
-            Rect::from_min_max(Pos2::new(gap_min, bar.center().y - 4.5), Pos2::new(gap_max, bar.center().y + 4.5)),
+            Rect::from_min_max(
+                Pos2::new(gap_min, bar.center().y - 4.5),
+                Pos2::new(gap_max, bar.center().y + 4.5),
+            ),
             t.pinstripe,
         );
     }
@@ -128,7 +155,11 @@ pub fn top_bar(ui: &mut Ui, app: &mut GasciiApp, ctx: &egui::Context) {
 /// selected, never panics or paints a phantom badge (pinned by
 /// `tool_grid_renders_without_panicking_when_a_binding_holds_a_tool_absent_from_its_list`).
 fn kiosk_tools(app: &GasciiApp) -> Vec<crate::app::ToolDef> {
-    tools().iter().copied().filter(|d| d.kiosk_visible && app.tool_enabled(d.kind)).collect()
+    tools()
+        .iter()
+        .copied()
+        .filter(|d| d.kiosk_visible && app.tool_enabled(d.kind))
+        .collect()
 }
 
 /// The sidebar: a 4×2 tool grid (Eyedropper excluded — Alt+click samples), both bindings' tool
@@ -141,26 +172,28 @@ pub fn sidebar(ui: &mut Ui, app: &mut GasciiApp) {
     let t = theme::current(ui.ctx());
     let panel_h = ui.available_height();
     let k = scale_for(panel_h);
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        ui.spacing_mut().item_spacing = Vec2::new(10.0, 12.0);
-        let top = ui.cursor().min.y;
-        let ktools = kiosk_tools(app);
-        tool_grid(ui, app, &ktools, TOOL_COLS, TOOL_CELL_H * k);
-        rule(ui, t.border_soft);
-        binding_options(ui, app, k);
-        rule(ui, t.border_soft);
-        sidebar::trace_controls(ui, app, k);
-        rule(ui, t.border_soft);
-        // available_height is unbounded inside the scroll area — size the glyph scroll against
-        // the panel's real height minus what the grid and options actually consumed.
-        let remaining = panel_h - (ui.cursor().min.y - top);
-        let reserved = PALETTE_RESERVED_FIXED + PALETTE_RESERVED_SCALED * k;
-        let scroll_h = (remaining - reserved).clamp(PALETTE_SCROLL_MIN * k, PALETTE_SCROLL_MAX);
-        palette(ui, app, SWATCH * k, GLYPH_PX * k, scroll_h);
-        ui.add_space(8.0);
-        rule(ui, t.border_soft);
-        colors(ui, app, k);
-    });
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(10.0, 12.0);
+            let top = ui.cursor().min.y;
+            let ktools = kiosk_tools(app);
+            tool_grid(ui, app, &ktools, TOOL_COLS, TOOL_CELL_H * k);
+            rule(ui, t.border_soft);
+            binding_options(ui, app, k);
+            rule(ui, t.border_soft);
+            sidebar::trace_controls(ui, app, k);
+            rule(ui, t.border_soft);
+            // available_height is unbounded inside the scroll area — size the glyph scroll against
+            // the panel's real height minus what the grid and options actually consumed.
+            let remaining = panel_h - (ui.cursor().min.y - top);
+            let reserved = PALETTE_RESERVED_FIXED + PALETTE_RESERVED_SCALED * k;
+            let scroll_h = (remaining - reserved).clamp(PALETTE_SCROLL_MIN * k, PALETTE_SCROLL_MAX);
+            palette(ui, app, SWATCH * k, GLYPH_PX * k, scroll_h);
+            ui.add_space(8.0);
+            rule(ui, t.border_soft);
+            colors(ui, app, k);
+        });
 }
 
 /// Per-binding tool options at touch geometry — kiosk's own `OptionsGeom`, delegating the actual
@@ -251,15 +284,26 @@ fn quick_colors(ui: &mut Ui, app: &mut GasciiApp, k: f32) {
 /// kiosk's zoom auto-fits continuously, so there is no interactive zoom cluster to show here.
 pub fn status_bar(ui: &mut Ui, app: &mut GasciiApp) {
     ui.spacing_mut().item_spacing.x = 20.0;
-    let coord = app.hovered_cell.map(|(x, y)| format!("cell {x},{y}")).unwrap_or_else(|| "cell –".to_owned());
+    let coord = app
+        .hovered_cell
+        .map(|(x, y)| format!("cell {x},{y}"))
+        .unwrap_or_else(|| "cell –".to_owned());
     super::status_bar::mono(ui, coord, false);
     if let Some((err, left)) = app.error_flash(std::time::Instant::now()) {
         let t = theme::current(ui.ctx());
-        ui.label(egui::RichText::new(err).font(fonts::mono_id(fonts::size::LABEL)).color(t.fg_error));
+        ui.label(
+            egui::RichText::new(err)
+                .font(fonts::mono_id(fonts::size::LABEL))
+                .color(t.fg_error),
+        );
         ui.ctx().request_repaint_after(left);
     }
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        super::status_bar::mono(ui, format!("doc {}×{}", app.doc.width, app.doc.height), false);
+        super::status_bar::mono(
+            ui,
+            format!("doc {}×{}", app.doc.width, app.doc.height),
+            false,
+        );
         super::status_bar::mono(ui, "zoom: fit (auto)".to_owned(), true);
     });
 }
@@ -268,7 +312,7 @@ pub fn status_bar(ui: &mut Ui, app: &mut GasciiApp) {
 mod tests {
     use super::*;
     use crate::app::{Binding, ToolKind, BRUSH_KIND};
-    use gascii_core::{Buildup, BrushShape, DensityMode};
+    use gascii_core::{BrushShape, Buildup, DensityMode};
 
     /// Full size on tall panels, proportional shrink below `COMFORT_H`, floored at `SCALE_MIN` so
     /// touch targets never collapse on very short screens.
@@ -287,9 +331,19 @@ mod tests {
     fn kiosk_sidebars_tool_list_includes_text_and_excludes_eyedropper() {
         let app = crate::app::GasciiApp::headless();
         let tools = kiosk_tools(&app);
-        assert_eq!(tools.len(), crate::app::tools().len() - 1, "every registry entry except Eyedropper");
-        assert!(tools.iter().any(|d| d.kind == ToolKind::Text), "Text must have a cell in the kiosk grid");
-        assert!(!tools.iter().any(|d| d.kind == ToolKind::Eyedropper), "Eyedropper must not appear in the kiosk grid");
+        assert_eq!(
+            tools.len(),
+            crate::app::tools().len() - 1,
+            "every registry entry except Eyedropper"
+        );
+        assert!(
+            tools.iter().any(|d| d.kind == ToolKind::Text),
+            "Text must have a cell in the kiosk grid"
+        );
+        assert!(
+            !tools.iter().any(|d| d.kind == ToolKind::Eyedropper),
+            "Eyedropper must not appear in the kiosk grid"
+        );
     }
 
     /// A binding already parked on Eyedropper when fullscreen is entered (deliberate user state,
@@ -311,7 +365,9 @@ mod tests {
         // check against each listed tool's kind, so a kind absent from the list can never match —
         // no cell shows a phantom L/R badge for it.
         assert!(
-            kiosk_tools(&app).iter().all(|d| d.kind != app.slot(Binding::L).kind),
+            kiosk_tools(&app)
+                .iter()
+                .all(|d| d.kind != app.slot(Binding::L).kind),
             "sanity: L's Eyedropper binding has no equal in the kiosk grid's tool list"
         );
     }
@@ -343,7 +399,11 @@ mod tests {
             BrushShape::Circle,
             "a render pass with no input must not change the configured shape"
         );
-        assert_eq!(app.slot(Binding::R).kind, ToolKind::Fill, "the unsized row is display-only");
+        assert_eq!(
+            app.slot(Binding::R).kind,
+            ToolKind::Fill,
+            "the unsized row is display-only"
+        );
     }
 
     /// The shared brush block renders whichever binding holds the Brush, and rendering alone must
@@ -352,7 +412,8 @@ mod tests {
     fn brush_block_renders_when_a_binding_holds_brush_without_mutating_brush_state() {
         let mut app = crate::app::GasciiApp::headless();
         app.bind(Binding::R, BRUSH_KIND);
-        app.brush_plugin_mut().set_density_mode(DensityMode::Buildup(Buildup));
+        app.brush_plugin_mut()
+            .set_density_mode(DensityMode::Buildup(Buildup));
         let ramp_before = app.brush_plugin_mut().active_ramp();
 
         let ctx = egui::Context::default();
@@ -362,10 +423,17 @@ mod tests {
         });
 
         assert!(
-            matches!(app.brush_plugin_mut().density_mode(), DensityMode::Buildup(_)),
+            matches!(
+                app.brush_plugin_mut().density_mode(),
+                DensityMode::Buildup(_)
+            ),
             "a render pass with no input must not flip the density mode"
         );
-        assert_eq!(app.brush_plugin_mut().active_ramp(), ramp_before, "a render pass with no input must not change the ramp");
+        assert_eq!(
+            app.brush_plugin_mut().active_ramp(),
+            ramp_before,
+            "a render pass with no input must not change the ramp"
+        );
     }
 
     /// The colour block (wells + K1 well popups + quick-color row) must render without panicking,
@@ -382,8 +450,14 @@ mod tests {
             colors(ui, &mut app, 1.0);
         });
 
-        assert_eq!(app.active_fg, fg_before, "a render pass with no input must not change the FG colour");
-        assert_eq!(app.active_bg, bg_before, "a render pass with no input must not change the BG colour");
+        assert_eq!(
+            app.active_fg, fg_before,
+            "a render pass with no input must not change the FG colour"
+        );
+        assert_eq!(
+            app.active_bg, bg_before,
+            "a render pass with no input must not change the BG colour"
+        );
     }
 
     /// Full-stack smoke test for kiosk's `TRACE` wiring (`sidebar::trace_controls` called from
@@ -394,7 +468,11 @@ mod tests {
     #[test]
     fn kiosk_sidebar_renders_with_an_image_loaded_without_panicking_or_mutating_its_settings() {
         let mut app = crate::app::GasciiApp::headless();
-        app.image_bg = Some(crate::image_bg::ImageBackground::new(image::RgbaImage::new(4, 3), None, None));
+        app.image_bg = Some(crate::image_bg::ImageBackground::new(
+            image::RgbaImage::new(4, 3),
+            None,
+            None,
+        ));
 
         let ctx = egui::Context::default();
         fonts::install_fonts(&ctx);
@@ -402,8 +480,17 @@ mod tests {
             sidebar(ui, &mut app);
         });
 
-        let bg = app.image_bg.as_ref().expect("a no-input render must not clear the loaded image");
-        assert!(bg.show_as_trace, "a no-input render must not change trace visibility");
-        assert!((bg.trace_opacity - 0.5).abs() < f32::EPSILON, "a no-input render must not change opacity");
+        let bg = app
+            .image_bg
+            .as_ref()
+            .expect("a no-input render must not clear the loaded image");
+        assert!(
+            bg.show_as_trace,
+            "a no-input render must not change trace visibility"
+        );
+        assert!(
+            (bg.trace_opacity - 0.5).abs() < f32::EPSILON,
+            "a no-input render must not change opacity"
+        );
     }
 }

@@ -14,7 +14,8 @@ pub const UI_SEMIBOLD: &str = "ui-semibold";
 
 /// The bundled canvas font's raw bytes, shared by the live egui canvas and `png_export.rs`'s
 /// off-screen `fontdue` rasterizer — one embedded font asset, one source of truth.
-pub(crate) const CANVAS_FONT_BYTES: &[u8] = include_bytes!("../assets/fonts/IosevkaFixed-Regular.ttf");
+pub(crate) const CANVAS_FONT_BYTES: &[u8] =
+    include_bytes!("../assets/fonts/IosevkaFixed-Regular.ttf");
 
 /// The named type ramp: every UI font size in the app resolves to one of these constants. No
 /// numeric literal may appear in a font-id call outside this module (the canvas's zoom-derived
@@ -49,7 +50,11 @@ static FAMILY_NAMES: OnceLock<[Arc<str>; 3]> = OnceLock::new();
 
 fn family_name(which: usize) -> Arc<str> {
     FAMILY_NAMES.get_or_init(|| {
-        [Arc::from(CANVAS_FONT), Arc::from(UI_MEDIUM), Arc::from(UI_SEMIBOLD)]
+        [
+            Arc::from(CANVAS_FONT),
+            Arc::from(UI_MEDIUM),
+            Arc::from(UI_SEMIBOLD),
+        ]
     })[which]
         .clone()
 }
@@ -70,9 +75,10 @@ pub fn install_fonts(ctx: &egui::Context) {
         ("ui-regular", UI_REGULAR_BYTES),
         ("mono", MONO_BYTES),
     ] {
-        fonts
-            .font_data
-            .insert(name.to_owned(), Arc::new(egui::FontData::from_static(bytes)));
+        fonts.font_data.insert(
+            name.to_owned(),
+            Arc::new(egui::FontData::from_static(bytes)),
+        );
     }
 
     // Iosevka goes on the TAIL of both chrome chains as a last-resort backstop. It is already
@@ -100,11 +106,14 @@ pub fn install_fonts(ctx: &egui::Context) {
     for (name, bytes_name) in [(UI_MEDIUM, UI_MEDIUM), (UI_SEMIBOLD, UI_SEMIBOLD)] {
         let mut chain = vec![bytes_name.to_owned()];
         chain.extend(stock.iter().cloned());
-        fonts.families.insert(FontFamily::Name(Arc::from(name)), chain);
+        fonts
+            .families
+            .insert(FontFamily::Name(Arc::from(name)), chain);
     }
-    fonts
-        .families
-        .insert(FontFamily::Name(Arc::from(CANVAS_FONT)), vec![CANVAS_FONT.to_owned()]);
+    fonts.families.insert(
+        FontFamily::Name(Arc::from(CANVAS_FONT)),
+        vec![CANVAS_FONT.to_owned()],
+    );
 
     ctx.set_fonts(fonts);
 
@@ -113,14 +122,29 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.all_styles_mut(|style| {
         style.text_styles = [
             // Menus and controls.
-            (TextStyle::Body, FontId::new(size::BODY, FontFamily::Proportional)),
+            (
+                TextStyle::Body,
+                FontId::new(size::BODY, FontFamily::Proportional),
+            ),
             // Buttons, segments, strong labels.
-            (TextStyle::Button, FontId::new(size::CONTROL, FontFamily::Proportional)),
+            (
+                TextStyle::Button,
+                FontId::new(size::CONTROL, FontFamily::Proportional),
+            ),
             // Field labels.
-            (TextStyle::Small, FontId::new(size::LABEL, FontFamily::Proportional)),
+            (
+                TextStyle::Small,
+                FontId::new(size::LABEL, FontFamily::Proportional),
+            ),
             // Status bar and other measurements.
-            (TextStyle::Monospace, FontId::new(size::LABEL, FontFamily::Monospace)),
-            (TextStyle::Heading, FontId::new(size::BODY, ui_semibold_family())),
+            (
+                TextStyle::Monospace,
+                FontId::new(size::LABEL, FontFamily::Monospace),
+            ),
+            (
+                TextStyle::Heading,
+                FontId::new(size::BODY, ui_semibold_family()),
+            ),
         ]
         .into();
     });
